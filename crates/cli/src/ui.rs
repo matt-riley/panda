@@ -1,5 +1,5 @@
 use panda_core::Call;
-use reedline::{DefaultPrompt, Prompt, PromptEditMode, PromptHistorySearch, PromptViMode};
+use reedline::{DefaultPrompt, Prompt, PromptEditMode, PromptHistorySearch};
 use std::borrow::Cow;
 
 pub struct Status<'a>(pub &'a crate::screen::Screen);
@@ -11,16 +11,11 @@ impl Prompt for Status<'_> {
     fn render_prompt_right(&self) -> Cow<'_, str> {
         "".into()
     }
-    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
-        match mode {
-            PromptEditMode::Vi(PromptViMode::Normal) => "NORMAL ❯ ",
-            PromptEditMode::Vi(PromptViMode::Visual) => "VISUAL ❯ ",
-            _ => "INSERT ❯ ",
-        }
-        .into()
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        "❯ ".into()
     }
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
-        "       │ ".into()
+        "│ ".into()
     }
     fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         DefaultPrompt::default()
@@ -67,7 +62,7 @@ pub fn result(text: &str, expanded: bool) -> String {
         preview.push(format!("  │ {display}"));
     }
     if clipped || lines.next().is_some() {
-        preview.push("  └ … /tools for full output".into());
+        preview.push("  └ … :tools for full output".into());
     }
     preview.join("\n")
 }
@@ -92,7 +87,7 @@ mod tests {
     fn long_results_advertise_full_output() {
         let preview = result(&"one\n".repeat(12), false);
         assert_eq!(preview.matches("one").count(), 6);
-        assert!(preview.contains("/tools"));
+        assert!(preview.contains(":tools"));
         assert_eq!(result(&"one\n".repeat(12), true).matches("one").count(), 12);
     }
 

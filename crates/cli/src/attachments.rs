@@ -154,13 +154,13 @@ impl reedline::Completer for Completion {
                     }
                 }
             }
-        } else if start == 0 && word.starts_with('/') {
+        } else if start == 0 && word.starts_with([':', '/']) {
             suggestions.extend(
                 crate::HELP
                     .split(" · ")
                     .filter_map(|s| s.split_whitespace().next())
-                    .filter(|s| s.starts_with(word))
-                    .map(String::from),
+                    .filter(|s| s[1..].starts_with(&word[1..]))
+                    .map(|s| format!("{}{}", &word[..1], &s[1..])),
             );
         }
         reedline::CompletionResult::fresh(

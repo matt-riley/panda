@@ -14,19 +14,19 @@ cd /path/to/repository
 panda
 ```
 
-For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `/model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `/login deepseek` or `/login openrouter`.
+For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `:model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `:login deepseek` or `:login openrouter`.
 
-For ChatGPT Codex, enter `/login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `/model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. The direct command `/login openai` also works. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
+For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `:model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. The direct command `:login openai` also works. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
 
 ## Use a session
 
 The interactive prompt starts in Vim Insert mode. Press `Esc` for Normal mode, use motions such as `w`, `b`, `0` and `$`, and edit with `cw`, `dw` or `u`. Press `i` to insert again. Enter sends the prompt. Alt-Enter inserts a newline in terminals that report the shortcut. Multiline paste stays in the editor until you submit it.
 
-The interactive UI fills the terminal. Assistant replies render Markdown as they stream, including headings, lists, emphasis, inline code and fenced code. Reopening a session renders its saved Markdown with the same styles and wrapping. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The input indicator shows the Vim mode. Set `NO_COLOR=1` for monochrome. Use `/tools` for full tool results.
+The interactive UI fills the terminal. Assistant replies render Markdown as they stream, including headings, lists, emphasis, inline code and fenced code. Reopening a session renders its saved Markdown with the same styles and wrapping. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The lower-left footer shows the Vim mode. Press Esc, type a command such as `:q`, and press Enter. Esc cancels the command and restores the draft. Existing slash commands still work. The steering prompt shares the idle editor’s Vim motions, operators, and undo history. Set `NO_COLOR=1` for monochrome. Use `:tools` for full tool results.
 
-- `/plan` enables repository mapping, paginated literal search, file reads, skill lookup and conversational clarification. Type `/code` to enable edits, writes and shell commands.
-- `/resume` lists this workspace’s sessions. `/resume ID` reopens one and displays its transcript and mode. Ctrl-C interrupts an active turn. `/quit` closes Panda.
-- After an interrupted turn, inspect the workspace and use `/ack` to close outstanding calls with an unknown outcome. Panda never reruns the old call during resume.
+- `:plan` enables repository mapping, paginated literal search, file reads, skill lookup and conversational clarification. Type `:code` to enable edits, writes and shell commands.
+- `:resume` lists this workspace’s sessions. `:resume ID` reopens one and displays its transcript and mode. Ctrl-C interrupts an active turn. `:quit` closes Panda.
+- After an interrupted turn, inspect the workspace and use `:ack` to close outstanding calls with an unknown outcome. Panda never reruns the old call during resume.
 - Panda loads `$PANDA_HOME/AGENTS.md` and instructions from the Git root down to the launch directory. Its `instructions` tool reads the applicable nested files for a workspace path. Panda discovers Markdown skills in workspace and user skill directories. Set `PANDA_SKILL_ROOTS` to add colon-separated directories.
 - Workspace tools inherit a private scratch home, restricted filesystem access, and a network-denying macOS profile. System commands and Xcode build tools are available. Set `PANDA_TOOLCHAIN_DIRS` to colon-separated, trusted toolchain installations to grant read access and add their `bin` directories to the tool PATH.
 - `PANDA_HOME` defaults to `~/.panda`. This private directory holds the SQLite session database, model selection, and any stored credentials. Install Panda outside repositories you let it edit.
@@ -36,16 +36,16 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 | To do this | In Panda |
 |---|---|
 | Attach a workspace file | Type `@src/main.rs`, or `@"path with spaces"`. Press Tab in Insert mode for completions. For large files, ask Panda to read a range of lines. |
-| Send an image | Attach a PNG, JPEG or WebP by path, or use Ctrl-V in Insert mode or `/paste` for a macOS clipboard image. `/detach` clears the pending clipboard image. Select a model that accepts images. |
+| Send an image | Attach a PNG, JPEG or WebP by path, or use Ctrl-V in Insert mode or `:paste` for a macOS clipboard image. `:detach` clears the pending clipboard image. Select a model that accepts images. |
 | Edit a longer prompt | Press Ctrl-G in Insert mode. Panda opens the draft in `$VISUAL`, `$EDITOR` or `vi`. Save and close the editor to return. |
 | Redirect an active turn | Type a correction and press Enter. Panda delivers it after the current batch of tools finishes. Alt-Enter queues a follow-up after the answer. Alt-Up brings queued text back into the draft. |
-| Inspect output | Shell output appears as it arrives. During a turn the activity timer sits above the steering prompt. Ctrl-O at the prompt expands tool results, `/tool ID` toggles one and Ctrl-T shows or hides reasoning supplied by the model. |
+| Inspect output | Shell output appears as it arrives. During a turn the activity timer sits above the steering prompt. Ctrl-O at the prompt expands tool results, `:tool ID` toggles one and Ctrl-T shows or hides reasoning supplied by the model. |
 | Run a shell command yourself | In code mode, `!git status` adds the command and result to the conversation. `!!git status` displays it locally. Both use the workspace sandbox. |
-| Explore another approach | Use `/name NAME` and `/tree` to identify the session and completed turn. `/fork 2 alternative` starts a session at the second completed answer. `/clone NAME` copies the current conversation. |
-| Return to a session | `/resume ID` or `/resume NAME` opens a session in the current workspace. `panda --continue` opens the most recently created session for that workspace. |
-| Manage context | `/context` shows the estimated size in bytes. `/context BYTES` sets the automatic compaction threshold. `/compact` summarizes earlier conversation for the model while preserving the transcript on disk. |
-| Choose a model | `/models openrouter deepseek` filters the provider catalogue. Use `/model NUMBER` to select a result. Use `/effort` to choose a reasoning level, or enter it directly with `/effort high`. `/thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
-| Use a Markdown skill | Search with `/skills QUERY` and invoke one with `/skill:NAME task`. Panda shows the selected path. |
+| Explore another approach | Use `:name NAME` and `:tree` to identify the session and completed turn. `:fork 2 alternative` starts a session at the second completed answer. `:clone NAME` copies the current conversation. |
+| Return to a session | `:resume ID` or `:resume NAME` opens a session in the current workspace. `panda --continue` opens the most recently created session for that workspace. |
+| Manage context | `:context` shows the estimated size in bytes. `:context BYTES` sets the automatic compaction threshold. `:compact` summarizes earlier conversation for the model while preserving the transcript on disk. |
+| Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
+| Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
 ## Scripting
 

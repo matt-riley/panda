@@ -53,5 +53,5 @@ fn fresh_state_asks_user_to_login_without_an_external_runtime() {
     let err = p
         .reply("system", &[], &[], &Cancel::default(), &mut |_| {})
         .unwrap_err();
-    assert!(err.to_string().contains(&format!("/login {id}")), "{err}");
+    assert!(err.to_string().contains(&format!(":login {id}")), "{err}");
 }

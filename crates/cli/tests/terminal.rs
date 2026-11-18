@@ -71,7 +71,7 @@ fn retired_provider_requires_explicit_reselection() {
     assert!(output.status.success());
     let errors = String::from_utf8(output.stderr).unwrap();
     assert!(
-        errors.contains("choose a supported provider with /model"),
+        errors.contains("choose a supported provider with :model"),
         "{errors}"
     );
     assert!(errors.contains("unknown provider"));

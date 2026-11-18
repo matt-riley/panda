@@ -53,7 +53,7 @@ pub(crate) async fn credential(state: &Path, id: &str, client: &Client) -> Resul
             r.get(0)
         })
         .optional()?
-        .with_context(|| format!("Sign in with /login {id}"))?;
+        .with_context(|| format!("Sign in with :login {id}"))?;
     let mut v: Value = serde_json::from_str(&raw)?;
     if v["expires"].as_u64().unwrap_or(0) <= now()? + 30_000 {
         let refresh = string(&v, "refresh")?;

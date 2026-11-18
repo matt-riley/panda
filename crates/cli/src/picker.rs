@@ -1,4 +1,4 @@
-//! Focused terminal selector used by /login and /model.
+//! Focused terminal selector used by :login and :model.
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal,

@@ -90,7 +90,7 @@ pub fn run(
     input: Message,
     cancel: &Cancel,
     screen: &mut Screen,
-    draft: &mut String,
+    editor: Option<&mut reedline::Reedline>,
 ) -> Result<()> {
     screen.end_reply();
     let mut pending = None;
@@ -107,6 +107,10 @@ pub fn run(
         println!();
         return Ok(());
     }
+    let mut prompt = crate::vim::Steering {
+        vim: screen.footer.vim.clone(),
+        editor: editor.expect("interactive screen requires its editor"),
+    };
     terminal::enable_raw_mode()?;
     let _raw = Raw;
     crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
@@ -141,7 +145,15 @@ pub fn run(
                     break;
                 }
                 if dirty || last_frame.elapsed() >= Duration::from_millis(125) {
-                    terminal.draw(|frame| screen.draw_working(frame, draft, started.elapsed()))?;
+                    terminal.draw(|frame| {
+                        screen.draw_working(
+                            frame,
+                            prompt.editor.current_buffer_contents(),
+                            prompt.editor.current_insertion_point(),
+                            prompt.editor.current_selection(),
+                            started.elapsed(),
+                        )
+                    })?;
                     last_frame = std::time::Instant::now();
                     dirty = false;
                 }
@@ -150,9 +162,20 @@ pub fn run(
                 }
                 match event::read()? {
                     Input::Resize(..) => {}
-                    Input::Paste(s) => draft.push_str(&safe(&s)),
+                    Input::Paste(s) => {
+                        prompt.input(Input::Paste(safe(&s)));
+                    }
                     Input::Key(key) if key.kind != KeyEventKind::Release => {
+                        let draft = prompt.editor.current_buffer_contents();
                         match (key.code, key.modifiers) {
+                            _ if prompt.vim.commanding() => {
+                                if let Some(command) = prompt.input(Input::Key(key)) {
+                                    if matches!(command.as_str(), ":q" | ":quit") {
+                                        cancel.stop();
+                                    }
+                                    screen.commands.push_back(command);
+                                }
+                            }
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => cancel.stop(),
                             (KeyCode::Enter, mods) if !draft.trim().is_empty() => {
                                 let follow = mods.contains(KeyModifiers::ALT);
@@ -166,24 +189,19 @@ pub fn run(
                                     ),
                                 );
                                 let target = if follow { &mut q.follow } else { &mut q.steer };
-                                target.push(std::mem::take(draft));
+                                target.push(draft.to_owned());
+                                prompt.replace(String::new());
                             }
                             (KeyCode::Up, KeyModifiers::ALT) => {
                                 let mut q = queue.lock().unwrap();
                                 let mut messages = q.take(false);
                                 messages.append(&mut q.follow);
-                                messages.push(std::mem::take(draft));
-                                *draft = messages.join("\n").trim_end().into();
+                                messages.push(draft.to_owned());
+                                prompt.replace(messages.join("\n").trim_end().into());
                             }
-                            (KeyCode::Backspace, _) => {
-                                draft.pop();
+                            _ => {
+                                prompt.input(Input::Key(key));
                             }
-                            (KeyCode::Char(c), mods)
-                                if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                            {
-                                draft.push(c)
-                            }
-                            _ => continue,
                         }
                     }
                     _ => continue,
@@ -208,8 +226,8 @@ pub fn run(
     let mut held = q.take(false);
     held.append(&mut q.follow);
     if !held.is_empty() {
-        held.push(std::mem::take(draft));
-        *draft = held.join("\n").trim_end().into();
+        held.push(prompt.editor.current_buffer_contents().to_owned());
+        prompt.replace(held.join("\n").trim_end().into());
     }
     std::io::stdout().flush()?;
     result
@@ -279,6 +297,7 @@ mod tests {
         };
         let mut screen = Screen::open(true).unwrap();
         let mut store = MemoryStore::default();
+        let mut editor = screen.editor(std::path::Path::new("."));
         run(
             &mut Script,
             &mut store,
@@ -286,7 +305,7 @@ mod tests {
             Message::User("begin".into()),
             &Cancel::default(),
             &mut screen,
-            &mut String::new(),
+            Some(&mut editor),
         )
         .unwrap();
         assert!(

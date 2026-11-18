@@ -6,6 +6,7 @@ mod picker;
 mod renderer;
 mod screen;
 mod ui;
+mod vim;
 use anyhow::{Context, Result, bail, ensure};
 use panda_coding::{Coding, Workspace};
 use panda_core::*;
@@ -22,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = "/plan · /code · /model PROVIDER MODEL · /login PROVIDER · /resume [ID] · /ack · /tool ID · /tools · /context [BYTES] · /compact · /new · /session · /name NAME · /tree · /fork [TURN] [NAME] · /clone [NAME] · /models PROVIDER [FILTER] · /effort [LEVEL] · /thinking [LEVEL] · /skills [QUERY] · /paste · /detach · /quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :paste · :detach · :q · :quit";
 fn editor_command(setting: &str, path: &Path) -> Result<std::process::Command> {
     let words = shlex::split(setting).context("invalid quoting in editor setting")?;
     let (program, args) = words.split_first().context("empty editor command")?;
@@ -86,7 +87,7 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
         Some(
             std::env::var(key_env(id)?)
                 .or_else(|_| fs::read_to_string(state.join("deepseek.key")))
-                .context("use /login deepseek first")?,
+                .context("use :login deepseek first")?,
         )
     } else {
         None
@@ -128,7 +129,7 @@ fn effort_levels(state: &Path, provider: &str, model: &str) -> Result<Vec<String
 }
 
 fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option<String>> {
-    if cmd == "/login" {
+    if cmd == ":login" {
         let mut labels = Vec::new();
         for (id, label) in PROVIDERS.iter().zip([
             "OpenAI Codex (ChatGPT subscription)",
@@ -145,7 +146,7 @@ fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option
             ));
         }
         return Ok(picker::choose("Search providers", &labels, 0)?
-            .map(|i| format!("/login {}", PROVIDERS[i])));
+            .map(|i| format!(":login {}", PROVIDERS[i])));
     }
     let mut models = Vec::new();
     let mut errors = Vec::new();
@@ -163,7 +164,7 @@ fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option
     }
     ensure!(
         !models.is_empty(),
-        "No available models. Use /login to configure a provider. {}",
+        "No available models. Use :login to configure a provider. {}",
         errors.join("; ")
     );
     let labels = models
@@ -175,7 +176,7 @@ fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option
         .position(|(id, m)| (*id, m.as_str()) == current)
         .unwrap_or(0);
     Ok(picker::choose("Search models", &labels, selected)?
-        .map(|i| format!("/model {} {}", models[i].0, models[i].1)))
+        .map(|i| format!(":model {} {}", models[i].0, models[i].1)))
 }
 fn subscription(p: &str) -> bool {
     p == "openai-codex"
@@ -191,7 +192,7 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     let var = key_env(p)?;
     let key = std::env::var(var)
         .or_else(|_| fs::read_to_string(state.join(format!("{p}.key"))))
-        .with_context(|| format!("set {var} or use /login {p}"))?;
+        .with_context(|| format!("set {var} or use :login {p}"))?;
     let endpoint = match p {
         "deepseek" => "https://api.deepseek.com/chat/completions",
         _ => "https://openrouter.ai/api/v1/chat/completions",
@@ -216,7 +217,7 @@ fn login(state: &Path, p: &str, cancel: &Cancel, browser: Option<bool>) -> Resul
     }
     let var = key_env(p)?;
     let key = std::env::var(var)
-        .with_context(|| format!("export {var} before starting Panda, then retry /login"))?;
+        .with_context(|| format!("export {var} before starting Panda, then retry :login"))?;
     let mut temp = tempfile::NamedTempFile::new_in(state)?;
     temp.write_all(key.trim().as_bytes())?;
     temp.persist(state.join(format!("{p}.key")))?;
@@ -292,7 +293,7 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     }
     if s.active {
         screen.line(Tone::Removed,
-            "Interrupted turn. Outstanding tool outcomes are unknown. Inspect the workspace and use /ack to continue."
+            "Interrupted turn. Outstanding tool outcomes are unknown. Inspect the workspace and use :ack to continue."
         );
     }
     screen.footer.usage = usage(&s);
@@ -388,7 +389,7 @@ fn main() -> Result<()> {
         (p, model) = (id.into(), name.into());
     }
     if !subscription(&p) && key_env(&p).is_err() {
-        let warning = "Saved provider is unavailable; choose a supported provider with /model PROVIDER MODEL.";
+        let warning = "Saved provider is unavailable; choose a supported provider with :model PROVIDER MODEL.";
         if interactive {
             screen.line(Tone::Removed, warning);
         } else {
@@ -413,7 +414,7 @@ fn main() -> Result<()> {
     screen.line(
         Tone::Dim,
         if interactive {
-            "Panda   /help for commands"
+            "Panda   :help for commands"
         } else {
             HELP
         },
@@ -421,16 +422,10 @@ fn main() -> Result<()> {
     let mut picker = None;
     let mut catalogue: Vec<(String, String)> = Vec::new();
 
-    let mut draft = String::new();
     loop {
-        if let Some(e) = editor.as_mut()
-            && !draft.is_empty()
-        {
-            e.run_edit_commands(&[reedline::EditCommand::InsertString(std::mem::take(
-                &mut draft,
-            ))]);
-        }
-        let line = if interactive {
+        let line = if let Some(command) = screen.commands.pop_front() {
+            command
+        } else if interactive {
             screen.footer.session = format!("{mode:?} · session {}", db.id());
             screen.footer.model = format!("{p}/{model}");
             match screen.read(&mut editor)? {
@@ -446,28 +441,35 @@ fn main() -> Result<()> {
             line
         };
         let line = line.trim();
-        if line == "/quit" {
+        let alias;
+        let line = if let Some(name) = line.strip_prefix('/') {
+            alias = format!(":{name}");
+            alias.as_str()
+        } else {
+            line
+        };
+        if matches!(line, ":q" | ":quit") {
             break;
         }
-        if line.is_empty() {
+        if line.is_empty() || line == ":" {
             continue;
         }
         if interactive {
             screen.line(Tone::User, &format!("❯ {line}"));
         }
-        if line == "/cancel" {
+        if line == ":cancel" {
             picker = None;
             continue;
         }
         let action = (|| -> Result<()> {
             let command;
-            let line = match (picker.take(), line.starts_with('/')) {
+            let line = match (picker.take(), line.starts_with(':')) {
                 (Some(choice), false) => {
                     command = match choice {
-                        Picker::Login => format!("/login {}", provider_id(line.trim())?),
-                        Picker::Models => format!("/models {}", provider_id(line.trim())?),
+                        Picker::Login => format!(":login {}", provider_id(line.trim())?),
+                        Picker::Models => format!(":models {}", provider_id(line.trim())?),
                         Picker::Select => format!(
-                            "/model {}",
+                            ":model {}",
                             line.trim()
                                 .parse::<usize>()
                                 .context("enter a model number")?
@@ -478,7 +480,7 @@ fn main() -> Result<()> {
                 _ => line,
             };
             let chosen;
-            let line = if interactive && matches!(line, "/login" | "/model") {
+            let line = if interactive && matches!(line, ":login" | ":model") {
                 let Some(cmd) = pick_command(&state, line, (&p, &model))? else {
                     return Ok(());
                 };
@@ -490,9 +492,9 @@ fn main() -> Result<()> {
             let mut words = line.split_whitespace();
             let first = words.next().unwrap();
             match first {
-                "/plan" | "/code" => {
+                ":plan" | ":code" => {
                     let mut s = db.load()?;
-                    s.mode = if first == "/plan" {
+                    s.mode = if first == ":plan" {
                         Mode::Plan
                     } else {
                         Mode::Code
@@ -501,7 +503,7 @@ fn main() -> Result<()> {
                     mode = s.mode;
                     screen.line(Tone::Dim, &format!("{mode:?} mode"))
                 }
-                "/session" => {
+                ":session" => {
                     let s = db.load()?;
                     screen.line(
                         Tone::Dim,
@@ -514,23 +516,23 @@ fn main() -> Result<()> {
                         ),
                     );
                 }
-                "/name" => {
+                ":name" => {
                     let mut s = db.load()?;
                     s.name = line[first.len()..].trim().into();
                     db.save(&mut s)?;
                     screen.line(Tone::Dim, &format!("session {} {}", db.id(), s.name));
                 }
-                "/new" | "/fork" | "/clone" => {
+                ":new" | ":fork" | ":clone" => {
                     let mut rest = line[first.len()..].trim();
                     let mut at = None;
-                    if first == "/fork"
+                    if first == ":fork"
                         && let Some(word) = rest.split_whitespace().next()
                         && let Ok(n) = word.parse()
                     {
                         at = Some(n);
                         rest = rest[word.len()..].trim();
                     }
-                    db = if first == "/new" {
+                    db = if first == ":new" {
                         Disk::open(&state, &root, None)?
                     } else {
                         db.fork(&state, &root, at, rest)?
@@ -541,7 +543,7 @@ fn main() -> Result<()> {
                     model_window(&mut db, &state, &p, &model)?;
                     mode = show(&db, &mut screen)?;
                 }
-                "/tree" => {
+                ":tree" => {
                     for (id, name, parent) in db.catalogue(&root)? {
                         screen.line(
                             Tone::Dim,
@@ -561,8 +563,8 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                "/context" | "/compact" => {
-                    if first == "/compact" {
+                ":context" | ":compact" => {
+                    if first == ":compact" {
                         cancel.reset();
                         compact(provider(&state, &p, &model)?.as_mut(), &mut db, &cancel)?;
                     }
@@ -583,8 +585,8 @@ fn main() -> Result<()> {
                         ),
                     );
                 }
-                "/ack" => acknowledge(&mut db)?,
-                "/resume" => {
+                ":ack" => acknowledge(&mut db)?,
+                ":resume" => {
                     if let Some(n) = words.next() {
                         let id = if let Ok(id) = n.parse() {
                             id
@@ -614,17 +616,17 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                "/login" | "/model" if line == first => {
-                    let login = first == "/login";
+                ":login" | ":model" if line == first => {
+                    let login = first == ":login";
                     picker = Some(if login { Picker::Login } else { Picker::Models });
                     let title = if login {
                         "Choose a login provider"
                     } else {
                         "Choose a model provider"
                     };
-                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (/cancel to close)."));
+                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (:cancel to close)."));
                 }
-                "/login" => {
+                ":login" => {
                     cancel.reset();
                     if interactive {
                         crossterm::execute!(
@@ -652,11 +654,11 @@ fn main() -> Result<()> {
                     login(&state, id, &cancel, browser)?;
                     screen.line(
                         Tone::Dim,
-                        &format!("Signed in to {id}. Use /model to select a model."),
+                        &format!("Signed in to {id}. Use :model to select a model."),
                     );
                 }
-                "/models" | "/model"
-                    if first == "/models"
+                ":models" | ":model"
+                    if first == ":models"
                         || (words.clone().count() == 1
                             && words.clone().next().is_some_and(|w| {
                                 w.parse::<usize>().is_err() && provider_id(w).is_ok()
@@ -681,10 +683,10 @@ fn main() -> Result<()> {
                         screen.line(Tone::Dim, "No matching models.");
                     } else {
                         picker = Some(Picker::Select);
-                        screen.line(Tone::Dim, "Enter a model number, or use /model NUMBER. /cancel closes the picker.");
+                        screen.line(Tone::Dim, "Enter a model number, or use :model NUMBER. :cancel closes the picker.");
                     }
                 }
-                "/thinking" | "/effort" => {
+                ":thinking" | ":effort" => {
                     let mut s = db.load()?;
                     let levels = if interactive
                         || words.clone().next().is_some_and(|level| level != "default")
@@ -723,12 +725,12 @@ fn main() -> Result<()> {
                         ),
                     );
                 }
-                "/model" => {
+                ":model" => {
                     if let Some(id) = words.next() {
                         let (id, m) = if let Ok(n) = id.parse::<usize>() {
                             let (pi, mi) = catalogue
                                 .get(n.checked_sub(1).context("index starts at 1")?)
-                                .context("use /models first")?;
+                                .context("use :models first")?;
                             (pi.as_str(), mi.as_str())
                         } else {
                             if let Some(m) = words.next() {
@@ -747,8 +749,8 @@ fn main() -> Result<()> {
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))
                 }
-                "/tool" => screen.select_tool(words.next().context("usage: /tool ID")?)?,
-                "/tools" => {
+                ":tool" => screen.select_tool(words.next().context("usage: :tool ID")?)?,
+                ":tools" => {
                     let mut found = false;
                     for message in db.load()?.history {
                         match message {
@@ -774,18 +776,18 @@ fn main() -> Result<()> {
                         screen.line(Tone::Dim, "No tool results in this session.");
                     }
                 }
-                "/paste" => {
+                ":paste" => {
                     screen.clipboard = Some(attachments::clipboard()?);
                     screen.line(
                         Tone::Dim,
-                        "Clipboard image attached to the next prompt. /detach removes it.",
+                        "Clipboard image attached to the next prompt. :detach removes it.",
                     );
                 }
-                "/detach" => {
+                ":detach" => {
                     screen.clipboard = None;
                 }
-                "/help" => screen.line(Tone::Dim, HELP),
-                "/skills" => {
+                ":help" => screen.line(Tone::Dim, HELP),
+                ":skills" => {
                     for (name, path, desc) in coding.skills.ranked(line[first.len()..].trim())? {
                         screen.line(Tone::Dim, &format!("{name}  {desc}  {}", path.display()));
                     }
@@ -814,14 +816,14 @@ fn main() -> Result<()> {
                         db.save(&mut s)?;
                     }
                 }
-                unknown if unknown.starts_with('/') && !unknown.starts_with("/skill:") => {
+                unknown if unknown.starts_with(':') && !unknown.starts_with(":skill:") => {
                     bail!("unknown command: {HELP}")
                 }
                 _ => {
                     let mut engine = provider(&state, &p, &model)?;
                     cancel.reset();
                     let mut input = attachments::prepare(&root, line, screen.clipboard.as_deref())?;
-                    if let Some(name) = first.strip_prefix("/skill:") {
+                    if let Some(name) = first.strip_prefix(":skill:") {
                         let (path, body) = coding.skills.named(name)?;
                         screen.line(Tone::Dim, &format!("Skill loaded: {}", path.display()));
                         match &mut input {
@@ -839,7 +841,7 @@ fn main() -> Result<()> {
                         input,
                         &cancel,
                         &mut screen,
-                        &mut draft,
+                        editor.as_mut(),
                     )?;
                     screen.footer.usage = usage(&db.load()?);
                 }
@@ -857,10 +859,10 @@ fn main() -> Result<()> {
                 if interactive {
                     screen.line(
                         Tone::Removed,
-                        "Turn interrupted. Inspect the workspace, then /ack.",
+                        "Turn interrupted. Inspect the workspace, then :ack.",
                     );
                 } else {
-                    eprintln!("Turn interrupted. Inspect the workspace, then /ack.");
+                    eprintln!("Turn interrupted. Inspect the workspace, then :ack.");
                 }
             }
         }
