@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3](https://github.com/matt-riley/panda/compare/v0.1.2...v0.1.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** make login and model selection searchable in the terminal ([ad4ab16](https://github.com/matt-riley/panda/commit/ad4ab16abea0483dddae8b91e6fe8ad90adf44ef))
+* **cli:** preserve oversized graphemes when wrapping terminal output ([76e4291](https://github.com/matt-riley/panda/commit/76e42918b54852d5af91f94c62eb0f8c1109956e))
+* **providers:** discover current Codex models and open browser sign-in ([04c9b2c](https://github.com/matt-riley/panda/commit/04c9b2c53a4bd29e733d58909ed39baaf2620ba3))
+* restore Codex login and model selection in the terminal ([c602377](https://github.com/matt-riley/panda/commit/c6023770ebe325e45d563eb6d54d8b74a1f5759d))
+
 ## [0.1.2](https://github.com/matt-riley/panda/compare/v0.1.1...v0.1.2) (2026-11-18)
 
 
