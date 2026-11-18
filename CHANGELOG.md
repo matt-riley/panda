@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/matt-riley/panda/compare/v0.1.4...v0.1.5) (2026-11-18)
+
+
+### Features
+
+* **cli:** render streaming and resumed assistant replies as Markdown ([06acb03](https://github.com/matt-riley/panda/commit/06acb033fe4659b2a090ac020e85d2e425c3d090))
+* render streaming Markdown with live and resume parity ([5618558](https://github.com/matt-riley/panda/commit/5618558ce00aca6e23182630f5394570a4c6db0b))
+
 ## [0.1.4](https://github.com/matt-riley/panda/compare/v0.1.3...v0.1.4) (2026-11-18)
 
 
