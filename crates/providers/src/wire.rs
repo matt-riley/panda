@@ -46,6 +46,11 @@ impl Responses {
         self.lines.feed(bytes, |v| {
             ensure!(!self.complete, "event after completion");
             match string(&v, "type")? {
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(t) = v["delta"].as_str() {
+                        emit(Event::Reasoning(t.into()));
+                    }
+                }
                 "response.output_text.delta" => {
                     let t = v["delta"].as_str().context("missing delta")?;
                     self.text += t;
@@ -97,6 +102,15 @@ pub(crate) fn responses_body(
     let mut input = Vec::new();
     for m in history {
         match m {
+            Message::Reasoning(_) => continue,
+            Message::Images { text, urls } => {
+                let mut parts = vec![json!({"type":"input_text","text":text})];
+                parts.extend(
+                    urls.iter()
+                        .map(|u| json!({"type":"input_image","image_url":u})),
+                );
+                input.push(json!({"role":"user","content":parts}));
+            }
             Message::User(t) => input.push(json!({"role":"user","content":t})),
             Message::Assistant { text, calls } => {
                 if !text.is_empty() {

@@ -93,6 +93,7 @@ impl Native {
         input: &[u8],
         write: bool,
         cancel: &Cancel,
+        emit: &mut panda_core::Emit,
     ) -> Result<String> {
         let scratch = self.scratch.path().canonicalize()?;
         let bins = self
@@ -128,8 +129,10 @@ impl Native {
         let mut stdin = child.stdin.take().unwrap();
         let input = input.to_vec();
         let writer = std::thread::spawn(move || stdin.write_all(&input));
+        let (updates, rx) = std::sync::mpsc::channel();
         fn drain(
             mut pipe: impl Read + Send + 'static,
+            updates: Option<std::sync::mpsc::Sender<String>>,
         ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
             std::thread::spawn(move || {
                 let mut out = Vec::new();
@@ -139,15 +142,30 @@ impl Native {
                     if n == 0 {
                         break;
                     }
-                    out.extend_from_slice(&buffer[..n.min(1_100_000 - out.len())]);
+                    let count = n.min(1_100_000 - out.len());
+                    if let Some(tx) = &updates
+                        && count > 0
+                    {
+                        let _ = tx.send(String::from_utf8_lossy(&buffer[..count]).into_owned());
+                    }
+                    out.extend_from_slice(&buffer[..count]);
                 }
                 Ok(out)
             })
         }
-        let stdout = drain(child.stdout.take().unwrap());
-        let stderr = drain(child.stderr.take().unwrap());
+        let stdout = drain(
+            child.stdout.take().unwrap(),
+            (cmd == Path::new("/bin/sh")).then(|| updates.clone()),
+        );
+        let stderr = drain(
+            child.stderr.take().unwrap(),
+            (cmd == Path::new("/bin/sh")).then_some(updates),
+        );
         let start = Instant::now();
         let result = loop {
+            for chunk in rx.try_iter() {
+                emit(panda_core::Event::ToolOutput(chunk));
+            }
             if let Err(e) = cancel.check() {
                 break Err(e);
             }
@@ -166,6 +184,9 @@ impl Native {
         let _ = writer.join();
         let out = stdout.join().unwrap()?;
         let err = stderr.join().unwrap()?;
+        for chunk in rx.try_iter() {
+            emit(panda_core::Event::ToolOutput(chunk));
+        }
         let error = String::from_utf8_lossy(&err);
         ensure!(
             status.success(),
@@ -177,6 +198,15 @@ impl Native {
 }
 impl Workspace for Native {
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
+        self.invoke_stream(name, args, cancel, &mut |_| {})
+    }
+    fn invoke_stream(
+        &self,
+        name: &str,
+        args: &Value,
+        cancel: &Cancel,
+        emit: &mut panda_core::Emit,
+    ) -> Result<String> {
         if name == "shell" {
             return self.exec(
                 Path::new("/bin/sh"),
@@ -184,6 +214,7 @@ impl Workspace for Native {
                 &[],
                 true,
                 cancel,
+                emit,
             );
         }
         self.exec(
@@ -192,17 +223,43 @@ impl Workspace for Native {
             &serde_json::to_vec(args)?,
             matches!(name, "write" | "edit"),
             cancel,
+            emit,
         )
     }
     fn instructions(&self) -> Result<Vec<(String, String)>> {
-        let file = self.root.join("AGENTS.md");
-        if !file.try_exists()? {
-            return Ok(vec![]);
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut paths = vec![state_dir()?.join("AGENTS.md")];
+        if let Some(top) = self.root.ancestors().find(|d| d.join(".git").exists()) {
+            let dirs: Vec<_> = self
+                .root
+                .ancestors()
+                .skip(1)
+                .take_while(|d| d.starts_with(top))
+                .collect();
+            paths.extend(dirs.into_iter().rev().map(|d| d.join("AGENTS.md")));
         }
-        Ok(vec![(
-            file.display().to_string(),
-            self.invoke("read", &json!({"path":"AGENTS.md"}), &Cancel::default())?,
-        )])
+        let mut loaded = Vec::new();
+        for p in paths {
+            if !p.try_exists()? {
+                continue;
+            }
+            let mut opts = fs::OpenOptions::new();
+            opts.read(true);
+            #[cfg(target_os = "macos")]
+            opts.custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK);
+            loaded.push((
+                p.display().to_string(),
+                super::files::read_file(opts.open(p)?)?,
+            ));
+        }
+        let file = self.root.join("AGENTS.md");
+        if file.try_exists()? {
+            loaded.push((
+                file.display().to_string(),
+                self.invoke("read", &json!({"path":"AGENTS.md"}), &Cancel::default())?,
+            ));
+        }
+        Ok(loaded)
     }
 }
 pub fn state_dir() -> Result<PathBuf> {

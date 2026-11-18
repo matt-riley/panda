@@ -19,20 +19,46 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
             .all(|p| matches!(p, Component::Normal(_) | Component::CurDir)),
         "expected relative workspace path"
     );
+    if name == "instructions" {
+        let mut output = String::new();
+        let parents: Vec<_> = Path::new(path)
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .collect();
+        for dir in parents.into_iter().rev() {
+            let file = dir.join("AGENTS.md");
+            if root.join(&file).try_exists()? {
+                output.push_str(&format!(
+                    "Instructions from {}:\n{}\n",
+                    file.display(),
+                    read(&root.join(&file))?
+                ));
+            }
+        }
+        return Ok(output);
+    }
     let path = root.join(path);
     match name {
+        "read" if args.get("offset").is_some() || args.get("limit").is_some() => {
+            let file = fs::File::open(path)?;
+            ensure!(file.metadata()?.is_file(), "expected regular file");
+            panda_coding::read_range(std::io::BufReader::new(file), args)
+        }
         "read" => read(&path),
         "write" | "edit" => {
-            let text = if name == "edit" {
+            let (text, report) = if name == "edit" {
                 let old = field(args, "old")?;
                 let current = read(&path)?;
                 ensure!(
                     !old.is_empty() && current.matches(old).count() == 1,
                     "expected one exact match"
                 );
-                current.replacen(old, field(args, "new")?, 1)
+                let updated = current.replacen(old, field(args, "new")?, 1);
+                let report = edit_report(&current, &updated);
+                (updated, report)
             } else {
-                field(args, "text")?.into()
+                (field(args, "text")?.into(), "saved".into())
             };
             let parent = path
                 .parent()
@@ -44,10 +70,47 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
             }
             temp.write_all(text.as_bytes())?;
             temp.persist(path)?;
-            Ok("saved".into())
+            Ok(report)
         }
         _ => bail!("unknown file tool"),
     }
+}
+// Keep the small diff from the same snapshots used for the atomic write so replay
+// can show the original edit after the workspace has changed.
+fn edit_report(before: &str, after: &str) -> String {
+    let old: Vec<_> = before.split_inclusive('\n').collect();
+    let new: Vec<_> = after.split_inclusive('\n').collect();
+    let start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let common_end = old[start..]
+        .iter()
+        .rev()
+        .zip(new[start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut report = String::from("saved");
+    let mut append = |mark: &str, first: usize, lines: &[&str]| {
+        use std::fmt::Write;
+        for (offset, line) in lines.iter().take(8).enumerate() {
+            let mut chars = line.trim_end_matches(['\r', '\n']).chars();
+            let excerpt: String = chars.by_ref().take(256).collect();
+            let ellipsis = if chars.next().is_some() { "…" } else { "" };
+            let _ = write!(
+                report,
+                "\n{mark} {}  {excerpt}{ellipsis}",
+                first + offset + 1
+            );
+        }
+        if lines.len() > 8 {
+            report.push_str("\n  …");
+        }
+    };
+    let context = start.saturating_sub(2);
+    append(" ", context, &old[context..start]);
+    append("−", start, &old[start..old.len() - common_end]);
+    append("+", start, &new[start..new.len() - common_end]);
+    let tail = new.len() - common_end;
+    append(" ", tail, &new[tail..tail + common_end.min(2)]);
+    report
 }
 pub(super) fn read(path: &Path) -> Result<String> {
     read_file(fs::File::open(path)?)

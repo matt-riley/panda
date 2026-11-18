@@ -1,0 +1,88 @@
+"""Exercise Panda's native terminal entry point with a disposable PTY."""
+import fcntl
+import json
+import os
+import pty
+import select
+import sqlite3
+import subprocess
+import signal
+import struct
+import sys
+import tempfile
+import termios
+import time
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    repo = root / 'repo'
+    repo.mkdir()
+    env=dict(os.environ, TERM="xterm-256color", PANDA_HOME=str(root / "state"))
+    subprocess.run([sys.argv[1]],cwd=repo,env=env,input=b"/quit\n",check=True,stdout=subprocess.DEVNULL)
+    with sqlite3.connect(root / "state" / "sessions.sqlite3") as db:
+        saved=json.loads(db.execute("select data from sessions where id=1").fetchone()[0])
+        saved["history"]=[
+            {"User":"\n".join(f"older message {i}" for i in range(30))},
+            {"Assistant":{"text":"","calls":[{"id":"one","name":"edit","args":{"path":"style.css","old":"serif","new":"mono"}}]}},
+            {"Result":{"id":"one","isError":False,"text":"saved\n  1  before\n− 2  font: serif;\n+ 2  font: mono;\n  3  after"}}
+        ]
+        db.execute("update sessions set data=? where id=1",(json.dumps(saved),))
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(repo)
+        os.environ.update(TERM='xterm-256color', PANDA_HOME=str(root / 'state'))
+        os.environ.pop('NO_COLOR', None)
+        os.execv(sys.argv[1], [sys.argv[1]])
+
+    pending = bytearray()
+    def expect(marker):
+        end = time.monotonic() + 6
+        while marker not in pending:
+            if time.monotonic() > end:
+                raise AssertionError((marker, bytes(pending[-1000:])))
+            if select.select([fd], [], [], 0.1)[0]:
+                chunk = os.read(fd, 65536)
+                pending.extend(chunk)
+                if b'\x1b[6n' in chunk:
+                    os.write(fd, b'\x1b[1;1R')
+        del pending[:pending.index(marker) + len(marker)]
+
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 28, 90, 0, 0))
+        expect(b'\x1b[?1049h')
+        expect('─'.encode())
+        expect(b'INSERT')
+        expect(b'deepseek-flash')
+        os.write(fd,b'/resume 1\r')
+        expect('− 2  font: serif;'.encode())
+        expect(b'\x1b[32;48;5;22m')
+        expect(b'+ 2  font: mono;')
+        expect(b'deepseek-flash')
+        os.write(fd,b'\x1b[5~')
+        expect(b'older message 0')
+        os.write(fd,b'\x1b[6~')
+        expect(b'+ 2  font: mono;')
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 18, 60, 0, 0))
+        expect(('─'*59).encode())
+        os.write(fd, b'\x1b')
+        expect(b'NORMAL')
+        os.write(fd, b'i')
+        expect(b'INSERT')
+        os.write(fd, b'/model deepseek checked\r')
+        expect(b'deepseek/checked')
+        assert json.loads((root / 'state/model.json').read_text()) == ['deepseek', 'checked']
+        os.write(fd, b'\x1b[200~first\nsecond\nthird\nfourth\nfifth\x1b[201~')
+        expect(b'fifth')
+        expect(b'deepseek/checked')
+        os.write(fd, b'\x03')
+        expect(b'INSERT')
+        os.write(fd, b'/quit\r')
+        expect(b'\x1b[?1049l')
+    finally:
+        os.close(fd)
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
