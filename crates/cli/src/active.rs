@@ -104,6 +104,7 @@ pub fn run(
     terminal::enable_raw_mode()?;
     let _raw = Raw;
     crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
+    let mut terminal = crate::renderer::terminal()?;
     let queue = Mutex::new(Queue::default());
     let (tx, rx) = mpsc::channel();
     let result = std::thread::scope(|scope| {
@@ -121,6 +122,8 @@ pub fn run(
                 &mut |idle| queue.lock().unwrap().take(idle),
             )
         });
+        let started = std::time::Instant::now();
+        let mut last_frame = started;
         let mut dirty = true;
         let mut handle = || -> Result<()> {
             loop {
@@ -131,8 +134,9 @@ pub fn run(
                 if worker.is_finished() {
                     break;
                 }
-                if dirty {
-                    screen.working(draft)?;
+                if dirty || last_frame.elapsed() >= Duration::from_millis(125) {
+                    terminal.draw(|frame| screen.draw_working(frame, draft, started.elapsed()))?;
+                    last_frame = std::time::Instant::now();
                     dirty = false;
                 }
                 if !event::poll(Duration::from_millis(25))? {
@@ -246,7 +250,7 @@ mod tests {
                         vec![Call {
                             id: "shell".into(),
                             name: "shell".into(),
-                            args: serde_json::json!({"command":"printf 'RUNNING%s' ' FIXTURE'; /bin/sleep 1; printf 'done'"}),
+                            args: serde_json::json!({"command":"printf 'RUNNING%s' 'FIXTURE'; /bin/sleep 1; printf 'done'"}),
                         }],
                     )),
                     Message::User(s) if s == "correction" || s == "next" => {
