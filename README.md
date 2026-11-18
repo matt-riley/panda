@@ -22,7 +22,7 @@ For ChatGPT Codex, enter `/login`, choose **OpenAI Codex**, then choose **Open b
 
 The interactive prompt starts in Vim Insert mode. Press `Esc` for Normal mode, use motions such as `w`, `b`, `0` and `$`, and edit with `cw`, `dw` or `u`. Press `i` to insert again. Enter sends the prompt. Alt-Enter inserts a newline in terminals that report the shortcut. Multiline paste stays in the editor until you submit it.
 
-The interactive UI fills the terminal. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The input indicator shows the Vim mode. Set `NO_COLOR=1` for monochrome. Use `/tools` for full tool results.
+The interactive UI fills the terminal. Assistant replies render Markdown as they stream, including headings, lists, emphasis, inline code and fenced code. Reopening a session renders its saved Markdown with the same styles and wrapping. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The input indicator shows the Vim mode. Set `NO_COLOR=1` for monochrome. Use `/tools` for full tool results.
 
 - `/plan` enables repository mapping, paginated literal search, file reads, skill lookup and conversational clarification. Type `/code` to enable edits, writes and shell commands.
 - `/resume` lists this workspace’s sessions. `/resume ID` reopens one and displays its transcript and mode. Ctrl-C interrupts an active turn. `/quit` closes Panda.
@@ -73,6 +73,8 @@ cargo run --locked -p panda-memory
 ```
 
 The isolation tests require native macOS with permission to launch Seatbelt. The HTTP error and cancellation fixture uses loopback. The in-memory binary exercises the same turn loop independently of SQLite, the sandbox, providers and terminal.
+
+The Markdown tests compare streamed prefixes with one-shot rendering across randomized Unicode, terminal widths and chunk boundaries. A SQLite round-trip test compares the live and resumed terminal frames.
 
 The regular Cargo suite uses proptest to generate Unicode arguments and arbitrary chunk boundaries. It also tests each chunk width for a fixed fragmented tool call. The coverage-guided target compares whole and chunked decoding on mutated bytes, starting with valid text and tool-call streams.
 

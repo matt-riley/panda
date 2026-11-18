@@ -50,6 +50,11 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
             }
         }
         Event::Text(s) => screen.stream(&s),
+        Event::AssistantComplete(s) => {
+            if screen.active {
+                screen.finish_reply(&s);
+            }
+        }
         Event::Calling(call) if screen.active => {
             screen.line(Tone::Tool, &ui::header(&call));
             *pending = Some(call);
@@ -87,6 +92,7 @@ pub fn run(
     screen: &mut Screen,
     draft: &mut String,
 ) -> Result<()> {
+    screen.end_reply();
     let mut pending = None;
     if !screen.active {
         turn_message(
