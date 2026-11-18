@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/matt-riley/panda/compare/v0.1.7...v0.1.8) (2026-11-18)
+
+
+### Features
+
+* **cli:** search and preview sessions in the resume picker ([#17](https://github.com/matt-riley/panda/issues/17)) ([951b759](https://github.com/matt-riley/panda/commit/951b759939611495e1fb69e293d551a2b6b27db7))
+
 ## [0.1.7](https://github.com/matt-riley/panda/compare/v0.1.6...v0.1.7) (2026-11-18)
 
 
