@@ -36,7 +36,9 @@ with tempfile.TemporaryDirectory() as tmp:
                 if b"\x1b[6n" in chunk:
                     os.write(fd, b"\x1b[1;1R")
                 if not sent and b"RUNNINGFIXTURE" in output:
-                    os.write(fd, b"correction\rnext\x1b\r")
+                    os.write(fd, b"wrong\x1b")
+                    time.sleep(0.08)
+                    os.write(fd, b"0cwcorrection\rnext\x1b\r")
                     sent = True
         if time.monotonic() >= deadline:
             os.kill(pid, signal.SIGKILL)

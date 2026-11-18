@@ -6,7 +6,7 @@ use crossterm::{
 };
 use panda_core::Call;
 use reedline::{
-    KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal, StatusLine, Vi,
+    KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal, StatusLine,
     default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
 };
 use std::{
@@ -85,6 +85,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[derive(Clone, Default)]
 pub struct Footer {
+    pub vim: crate::vim::Vim,
     pub location: String,
     pub session: String,
     pub model: String,
@@ -117,7 +118,7 @@ impl Footer {
         if let Some(e) = &self.effort {
             right.push_str(&format!(" · {e}"));
         }
-        let left = format!("{} {}", self.session, self.usage)
+        let left = format!("{}  {} {}", self.vim.label(), self.session, self.usage)
             .trim_end()
             .to_owned();
         let gap = width.saturating_sub(left.width() + right.width()).max(1);
@@ -125,8 +126,8 @@ impl Footer {
             format!("{left}{}{right}", " ".repeat(gap))
         } else {
             let available = width.saturating_sub(right.width() + 1);
-            if available == 0 {
-                right
+            if available < self.vim.label().width() {
+                left
             } else {
                 let short = wrap(&left, available)
                     .into_iter()
@@ -172,6 +173,7 @@ pub struct Screen {
     replies: std::collections::HashMap<usize, crate::markdown::Reply>,
     current_reply: Option<usize>,
     pub footer: Footer,
+    pub commands: std::collections::VecDeque<String>,
     offset: usize,
     input_rows: Arc<AtomicUsize>,
 }
@@ -202,6 +204,7 @@ impl Screen {
             offset: 0,
             input_rows: Arc::new(AtomicUsize::new(1)),
             footer: Footer::default(),
+            commands: Default::default(),
         })
     }
     pub fn line(&mut self, tone: Tone, text: &str) {
@@ -411,6 +414,8 @@ impl Screen {
         &self,
         frame: &mut ratatui::Frame,
         draft: &str,
+        cursor: usize,
+        selection: Option<(usize, usize)>,
         elapsed: std::time::Duration,
     ) {
         use crate::renderer::{ACCENT, MUTED, ink};
@@ -426,10 +431,38 @@ impl Screen {
         }
         let width = usize::from(area.width.saturating_sub(1)).max(1);
         let prompt_width = width.saturating_sub(2).max(1);
-        let draft_lines: Vec<_> = draft
-            .split('\n')
-            .flat_map(|l| wrap(l, prompt_width))
-            .collect();
+        let mut draft_lines = vec![Line::from("❯ ")];
+        let mut width_used = 0;
+        let mut caret = (0, 0);
+        for (offset, grapheme) in draft.grapheme_indices(true) {
+            let newline = grapheme == "\n" || grapheme == "\r\n";
+            if !newline && width_used > 0 && width_used + grapheme.width() > prompt_width {
+                draft_lines.push(Line::from("│ "));
+                width_used = 0;
+            }
+            if offset <= cursor {
+                caret = (draft_lines.len() - 1, width_used);
+            }
+            if newline {
+                draft_lines.push(Line::from("│ "));
+                width_used = 0;
+            } else {
+                let style = if selection.is_some_and(|(start, end)| (start..end).contains(&offset))
+                {
+                    ratatui::style::Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Default::default()
+                };
+                draft_lines
+                    .last_mut()
+                    .unwrap()
+                    .push_span(ratatui::text::Span::styled(grapheme, style));
+                width_used += grapheme.width();
+            }
+        }
+        if cursor == draft.len() {
+            caret = (draft_lines.len() - 1, width_used);
+        }
         let prompt_height =
             (draft_lines.len().clamp(1, 4) as u16).min(area.height.saturating_sub(5).max(1));
         let [history, activity, prompt, footer] = Layout::vertical([
@@ -501,12 +534,12 @@ impl Screen {
             .border_style(ink(MUTED, self.color));
         let inner = block.inner(prompt);
         frame.render_widget(block, prompt);
-        let skip = draft_lines.len().saturating_sub(inner.height.into());
+        let (row, column) = caret;
+        let skip = (row + 1).saturating_sub(inner.height.into());
         let prompt_lines = draft_lines
-            .iter()
-            .enumerate()
+            .into_iter()
             .skip(skip)
-            .map(|(i, s)| Line::from(format!("{} {s}", if i == 0 { "❯" } else { "│" })))
+            .take(inner.height.into())
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(prompt_lines), inner);
         let stats = self.footer.render(width, false);
@@ -517,10 +550,8 @@ impl Screen {
         );
         if inner.height > 0 && inner.width > 0 {
             frame.set_cursor_position((
-                inner.x
-                    + (2 + draft_lines.last().map_or(0, |s| s.width()))
-                        .min(usize::from(inner.width - 1)) as u16,
-                inner.y + ((draft_lines.len() - skip - 1) as u16).min(inner.height - 1),
+                inner.x + (2 + column).min(usize::from(inner.width - 1)) as u16,
+                inner.y + ((row.saturating_sub(skip)) as u16).min(inner.height - 1),
             ));
         }
     }
@@ -534,11 +565,14 @@ impl Screen {
         let signal = loop {
             let signal = engine.read_line(&ui::Status(self))?;
             if let Signal::HostCommand(action) = &signal {
+                if action.starts_with(':') {
+                    break Signal::Success(action.clone());
+                }
                 if action == "paste-image" {
                     match crate::attachments::clipboard() {
                         Ok(image) => {
                             self.clipboard = Some(image);
-                            self.line(Tone::Dim, "Clipboard image attached · /detach to remove");
+                            self.line(Tone::Dim, "Clipboard image attached · :detach to remove");
                         }
                         Err(e) => self.line(Tone::Removed, &e.to_string()),
                     }
@@ -552,7 +586,7 @@ impl Screen {
                                 self.clipboard = Some(image);
                                 self.line(
                                     Tone::Dim,
-                                    "Clipboard image attached · /detach to remove",
+                                    "Clipboard image attached · :detach to remove",
                                 );
                             }
                             Err(e) => self.line(Tone::Removed, &e.to_string()),
@@ -603,7 +637,7 @@ impl reedline::Highlighter for InputLayout {
         let width = Screen::dimensions().0 + 1;
         let rows = line
             .split('\n')
-            .map(|s| (9 + s.width()).div_ceil(width))
+            .map(|s| (2 + s.width()).div_ceil(width))
             .sum();
         self.0.store(rows, Ordering::Relaxed);
         let mut text = reedline::StyledText::default();
@@ -612,7 +646,7 @@ impl reedline::Highlighter for InputLayout {
     }
 }
 impl Screen {
-    pub fn editor(&self, root: &Path) -> Reedline {
+    pub fn editor(&mut self, root: &Path) -> Reedline {
         let mut insert = default_vi_insert_keybindings();
         use reedline::MenuBuilder;
         insert.add_binding(
@@ -654,13 +688,14 @@ impl Screen {
                 );
             }
         }
+        self.footer.vim = crate::vim::Vim::new(insert, normal, visual);
         Reedline::create()
             .with_completer(Box::new(crate::attachments::Completion(root.into())))
             .with_menu(reedline::ReedlineMenu::EngineCompleter(Box::new(
                 reedline::ColumnarMenu::default().with_name("completion"),
             )))
             .with_highlighter(Box::new(InputLayout(self.input_rows.clone())))
-            .with_edit_mode(Box::new(Vi::new(insert, normal, visual)))
+            .with_edit_mode(Box::new(self.footer.vim.clone()))
             .use_bracketed_paste(true)
             .with_ansi_colors(std::env::var_os("NO_COLOR").is_none())
     }
@@ -737,7 +772,7 @@ mod tests {
             let frame = |s: &Screen| {
                 let mut term =
                     ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 30)).unwrap();
-                term.draw(|f| s.draw_working(f, "", std::time::Duration::ZERO))
+                term.draw(|f| s.draw_working(f, "", 0, None, std::time::Duration::ZERO))
                     .unwrap();
                 term.backend().buffer().clone()
             };
@@ -758,8 +793,10 @@ mod tests {
         for draft in ["", "correction"] {
             let mut term =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 18)).unwrap();
-            term.draw(|f| screen.draw_working(f, draft, std::time::Duration::ZERO))
-                .unwrap();
+            term.draw(|f| {
+                screen.draw_working(f, draft, draft.len(), None, std::time::Duration::ZERO)
+            })
+            .unwrap();
             let buf = term.backend().buffer();
             let lines = buf
                 .content
@@ -788,7 +825,7 @@ mod tests {
         fn busy_and_picker_frames_fit_small_terminals(w in 1u16..95, h in 1u16..30, draft in ".{0,64}") {
             let screen=Screen::open(false).unwrap();
             let mut term=ratatui::Terminal::new(ratatui::backend::TestBackend::new(w,h)).unwrap();
-            term.draw(|f|screen.draw_working(f,&draft,std::time::Duration::from_secs(123))).unwrap();
+            term.draw(|f|screen.draw_working(f,&draft,draft.len(),None,std::time::Duration::from_secs(123))).unwrap();
             let labels=vec![draft.clone()];
             term.draw(|f| crate::renderer::picker(f,"Reasoning effort",&draft,&labels,&[0],0,false)).unwrap();
             prop_assert_eq!(term.backend().buffer().content.len(),usize::from(w)*usize::from(h));
@@ -798,8 +835,9 @@ mod tests {
     #[test]
     fn footer_uses_two_status_rows_below_the_rule() {
         let footer = Footer {
+            vim: Default::default(),
             effort: None,
-            location: "~/code (main)".into(),
+            location: "~:code (main)".into(),
             session: "Plan".into(),
             usage: "↑6 ↓12".into(),
             model: "deepseek/flash".into(),
@@ -808,8 +846,9 @@ mod tests {
         let rows: Vec<_> = plain.lines().collect();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0], "─".repeat(60));
-        assert_eq!(rows[1], "~/code (main)");
+        assert_eq!(rows[1], "~:code (main)");
         assert_eq!(rows[2].width(), 60);
+        assert!(rows[2].starts_with("insert  Plan"));
         assert!(rows[2].ends_with("deepseek/flash"));
         assert!(!plain.contains('\x1b'));
     }
