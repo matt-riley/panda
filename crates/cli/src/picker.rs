@@ -134,6 +134,33 @@ impl Selection {
     }
 }
 
+fn tree_labels(entries: &[panda_local::store::TreeEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}{}{}{} {}",
+                "  ".repeat(
+                    entry
+                        .branch_depth
+                        .saturating_sub(usize::from(entry.starts_branch))
+                        .min(8)
+                ),
+                if entry.starts_branch { "↳ " } else { "" },
+                if entry.current { "● " } else { "" },
+                if entry.is_prompt { "You:" } else { "Panda:" },
+                crate::ui::inline(&entry.text, 240)
+            )
+        })
+        .collect()
+}
+
+pub fn tree(entries: &[panda_local::store::TreeEntry]) -> io::Result<Option<i64>> {
+    let labels = tree_labels(entries);
+    let current = entries.iter().position(|e| e.current).unwrap_or(0);
+    Ok(choose("Session tree", &labels, current)?.map(|row| entries[row].id))
+}
+
 use panda_local::store::SessionPreview;
 
 pub fn resume(sessions: &[SessionPreview]) -> io::Result<Option<i64>> {
@@ -246,6 +273,45 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn tree_picker_key_sequences(keys in prop::collection::vec(0u8..12,1..96)) {
+            use panda_local::store::TreeEntry;
+            let entries = [
+                TreeEntry{id:41,branch_depth:0,starts_branch:false,is_prompt:true,text:"root".into(),current:false},
+                TreeEntry{id:53,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:false},
+                TreeEntry{id:89,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:true},
+            ];
+            let labels=tree_labels(&entries);
+            let mut state=Selection{query:String::new(),pos:2};
+            let mut typed=Vec::new();
+            let mut row=2usize;
+            for key in keys {
+                let ids:Vec<_>=labels.iter().enumerate().filter(|(_,label)|matches(label,&state.query)).map(|(i,_)|i).collect();
+                let expected:Vec<i64>=match typed.as_slice() {
+                    []=>vec![41,53,89], ['🐼']=>vec![53,89], ['●']=>vec![89], ['●','🐼']=>vec![89], _=>vec![]
+                };
+                prop_assert_eq!(ids.iter().map(|&i|entries[i].id).collect::<Vec<_>>(),expected.clone());
+                let code=match key {
+                    0..=2=>{let c=['🐼','●','z'][key as usize];typed.push(c); row=0;KeyCode::Char(c)}
+                    3|4=>{typed.pop();row=0;KeyCode::Backspace}
+                    5=>{if !ids.is_empty(){row=row.checked_sub(1).unwrap_or(ids.len()-1);}KeyCode::Up}
+                    6=>{if !ids.is_empty(){row=(row+1)%ids.len();}KeyCode::Down}
+                    7=>{row=0;KeyCode::PageUp}
+                    8=>{row=ids.len().saturating_sub(1);KeyCode::PageDown}
+                    9=>KeyCode::Esc, _=>KeyCode::Enter
+                };
+                let outcome=state.key(event::KeyEvent::new(code,KeyModifiers::NONE),&ids,3);
+                prop_assert_eq!(state.pos,row);
+                match outcome {
+                    Action::Close(choice)=>{
+                        prop_assert_eq!(choice.map(|i|entries[i].id),if code==KeyCode::Enter {Some(expected[row])}else{None});
+                        state=Selection{query:String::new(),pos:2};row=2;typed.clear();
+                    }
+                    _=>prop_assert!(code!=KeyCode::Esc && (code!=KeyCode::Enter || expected.is_empty()))
+                }
+            }
+        }
+
         #[test]
         fn resume_picker_key_sequences(actions in prop::collection::vec(0u8..16, 1..80)) {
             // Duplicate names and different transcript matches exercise selection

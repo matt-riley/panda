@@ -163,6 +163,7 @@ pub struct Screen {
     selected_tool: Option<usize>,
     tool_rows: std::collections::HashMap<String, usize>,
     pub clipboard: Option<String>,
+    pub recalled_images: Option<Vec<String>>,
     thoughts: bool,
     expanded: bool,
     previews: std::collections::HashMap<usize, (usize, String)>,
@@ -193,6 +194,7 @@ impl Screen {
             selected_tool: None,
             tool_rows: Default::default(),
             clipboard: None,
+            recalled_images: None,
             thoughts: false,
             expanded: false,
             previews: Default::default(),
@@ -277,6 +279,7 @@ impl Screen {
         self.live.clear();
         self.selected_tool = None;
         self.clipboard = None;
+        self.recalled_images = None;
         self.offset = 0;
     }
     pub fn tool_result(&mut self, call: Option<&Call>, text: &str, error: bool) {
@@ -566,7 +569,7 @@ impl Screen {
             let signal = engine.read_line(&ui::Status(self))?;
             if let Signal::HostCommand(action) = &signal {
                 if action.starts_with(':') {
-                    break Signal::Success(action.clone());
+                    break signal;
                 }
                 if action == "paste-image" {
                     match crate::attachments::clipboard() {

@@ -308,6 +308,13 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run(args, provider)
+}
+
+fn run(
+    args: Vec<String>,
+    provider: fn(&Path, &str, &str) -> Result<Box<dyn Provider + Send>>,
+) -> Result<()> {
     if args == ["--version"] {
         println!("panda {}", include_str!("../../../version.txt").trim());
         return Ok(());
@@ -429,14 +436,19 @@ fn main() -> Result<()> {
     let mut catalogue: Vec<(String, String)> = Vec::new();
 
     loop {
-        let line = if let Some(command) = screen.commands.pop_front() {
-            command
+        let (line, recalled) = if let Some(command) = screen.commands.pop_front() {
+            (command, false)
         } else if interactive {
             screen.footer.session = format!("{mode:?} · session {}", db.id());
             screen.footer.model = format!("{p}/{model}");
             match screen.read(&mut editor)? {
-                reedline::Signal::Success(line) => line,
+                reedline::Signal::Success(line) => (line, screen.recalled_images.is_some()),
+                reedline::Signal::HostCommand(command) => (command, false),
                 reedline::Signal::CtrlD => break,
+                reedline::Signal::CtrlC(_) => {
+                    screen.recalled_images = None;
+                    continue;
+                }
                 _ => continue,
             }
         } else {
@@ -444,26 +456,29 @@ fn main() -> Result<()> {
             if io::stdin().read_line(&mut line)? == 0 {
                 break;
             }
-            line
+            (line, false)
         };
-        let line = line.trim();
+        let line = if recalled { line.as_str() } else { line.trim() };
         let alias;
-        let line = if let Some(name) = line.strip_prefix('/') {
+        let line = if !recalled && let Some(name) = line.strip_prefix('/') {
             alias = format!(":{name}");
             alias.as_str()
         } else {
             line
         };
-        if matches!(line, ":q" | ":quit") {
+        if !recalled && matches!(line, ":q" | ":quit") {
             break;
         }
-        if line.is_empty() || line == ":" {
+        if line.trim().is_empty() || (!recalled && line == ":") {
+            if recalled {
+                screen.recalled_images = None;
+            }
             continue;
         }
         if interactive {
             screen.line(Tone::User, &format!("❯ {line}"));
         }
-        if line == ":cancel" {
+        if !recalled && line == ":cancel" {
             picker = None;
             continue;
         }
@@ -486,7 +501,7 @@ fn main() -> Result<()> {
                 _ => line,
             };
             let chosen;
-            let line = if interactive && matches!(line, ":login" | ":model") {
+            let line = if !recalled && interactive && matches!(line, ":login" | ":model") {
                 let Some(cmd) = pick_command(&state, line, (&p, &model))? else {
                     return Ok(());
                 };
@@ -496,7 +511,7 @@ fn main() -> Result<()> {
                 line
             };
             let mut words = line.split_whitespace();
-            let first = words.next().unwrap();
+            let first = if recalled { "" } else { words.next().unwrap() };
             match first {
                 ":plan" | ":code" => {
                     let mut s = db.load()?;
@@ -548,6 +563,35 @@ fn main() -> Result<()> {
                     screen.footer.usage.clear();
                     model_window(&mut db, &state, &p, &model)?;
                     mode = show(&db, &mut screen)?;
+                }
+                ":tree" if interactive => {
+                    let entries = db.tree()?;
+                    if entries.is_empty() {
+                        screen.line(Tone::Dim, "This session has no prompts or answers yet.");
+                        return Ok(());
+                    }
+                    let Some(node) = picker::tree(&entries)? else {
+                        return Ok(());
+                    };
+                    let draft = db.navigate(node)?;
+                    screen.clear();
+                    mode = show(&db, &mut screen)?;
+                    let text = match draft {
+                        Some(Message::User(text)) => {
+                            screen.recalled_images = Some(Vec::new());
+                            text
+                        }
+                        Some(Message::Images { text, urls }) => {
+                            screen.recalled_images = Some(urls);
+                            text
+                        }
+                        _ => String::new(),
+                    };
+                    vim::Steering {
+                        vim: screen.footer.vim.clone(),
+                        editor: editor.as_mut().unwrap(),
+                    }
+                    .replace(safe(&text));
                 }
                 ":tree" => {
                     for (id, name, parent) in db.catalogue(&root)? {
@@ -795,6 +839,9 @@ fn main() -> Result<()> {
                     );
                 }
                 ":detach" => {
+                    if let Some(images) = &mut screen.recalled_images {
+                        images.clear();
+                    }
                     screen.clipboard = None;
                 }
                 ":help" => screen.line(Tone::Dim, HELP),
@@ -833,8 +880,21 @@ fn main() -> Result<()> {
                 _ => {
                     let mut engine = provider(&state, &p, &model)?;
                     cancel.reset();
-                    let mut input = attachments::prepare(&root, line, screen.clipboard.as_deref())?;
-                    if let Some(name) = first.strip_prefix(":skill:") {
+                    let mut input = if let Some(mut urls) = screen.recalled_images.take() {
+                        // The saved message already includes its resolved files and skill text.
+                        urls.extend(screen.clipboard.iter().cloned());
+                        if urls.is_empty() {
+                            Message::User(line.into())
+                        } else {
+                            Message::Images {
+                                text: line.into(),
+                                urls,
+                            }
+                        }
+                    } else {
+                        attachments::prepare(&root, line, screen.clipboard.as_deref())?
+                    };
+                    if !recalled && let Some(name) = first.strip_prefix(":skill:") {
                         let (path, body) = coding.skills.named(name)?;
                         screen.line(Tone::Dim, &format!("Skill loaded: {}", path.display()));
                         match &mut input {
@@ -890,3 +950,6 @@ mod editor_tests {
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["--wait", "draft"]);
     }
 }
+
+#[cfg(test)]
+mod tree_tests;
