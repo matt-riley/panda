@@ -223,6 +223,13 @@ pub(crate) async fn browser_login(client: &Client) -> Result<Value> {
         .await
         .context("could not bind the login callback; choose device_code instead")?;
     eprintln!("Open {url}");
+    #[cfg(target_os = "macos")]
+    {
+        // The printed URL also supports terminals without a GUI session.
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(url.as_str())
+            .status();
+    }
     let code = tokio::time::timeout(Duration::from_secs(900), async {
         loop {
             let (mut socket, _) = listener.accept().await?;

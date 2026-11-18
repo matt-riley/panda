@@ -1,6 +1,7 @@
 mod active;
 mod attachments;
 mod automation;
+mod picker;
 mod screen;
 mod ui;
 use anyhow::{Context, Result, bail, ensure};
@@ -35,6 +36,117 @@ fn key_env(provider: &str) -> Result<&'static str> {
         _ => bail!("unknown API-key provider"),
     }
 }
+fn provider_id(input: &str) -> Result<&'static str> {
+    match input.to_ascii_lowercase().as_str() {
+        "1" | "openai" | "codex" | "openai-codex" => Ok("openai-codex"),
+        "2" | "deepseek" => Ok("deepseek"),
+        "3" | "openrouter" => Ok("openrouter"),
+        _ => bail!("unknown provider: choose OpenAI Codex, DeepSeek or OpenRouter"),
+    }
+}
+
+fn canonical_model<'a>(id: &'a str, model: &'a str) -> (&'a str, &'a str) {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    if name.to_ascii_lowercase().starts_with("gpt-") {
+        ("openai-codex", name)
+    } else {
+        (id, model)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Picker {
+    Login,
+    Models,
+    Select,
+}
+
+const PROVIDERS: [&str; 3] = ["openai-codex", "deepseek", "openrouter"];
+fn configured(state: &Path, id: &str) -> Result<bool> {
+    if subscription(id) {
+        return panda_providers::models::codex_configured(state);
+    }
+    Ok(
+        std::env::var(key_env(id)?).is_ok_and(|k| !k.trim().is_empty())
+            || state.join(format!("{id}.key")).try_exists()?,
+    )
+}
+fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Option<u64>)>> {
+    let path = state.join(format!("catalog-{id}.json"));
+    if cached
+        && let Ok(data) = fs::read(&path)
+        && let Ok(rows) = serde_json::from_slice::<Vec<(String, Option<u64>)>>(&data)
+        && !rows.is_empty()
+    {
+        return Ok(rows);
+    }
+    let key = if id == "deepseek" {
+        Some(
+            std::env::var(key_env(id)?)
+                .or_else(|_| fs::read_to_string(state.join("deepseek.key")))
+                .context("use /login deepseek first")?,
+        )
+    } else {
+        None
+    };
+    let rows = panda_providers::models::list(id, state, key.as_deref().map(str::trim))?;
+    if !rows.is_empty() {
+        let mut file = tempfile::NamedTempFile::new_in(state)?;
+        serde_json::to_writer(&mut file, &rows)?;
+        file.persist(path)?;
+    }
+    Ok(rows)
+}
+fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option<String>> {
+    if cmd == "/login" {
+        let mut labels = Vec::new();
+        for (id, label) in PROVIDERS.iter().zip([
+            "OpenAI Codex (ChatGPT subscription)",
+            "DeepSeek (API key)",
+            "OpenRouter (API key)",
+        ]) {
+            labels.push(format!(
+                "{label} · {}",
+                if configured(state, id)? {
+                    "configured"
+                } else {
+                    "not configured"
+                }
+            ));
+        }
+        return Ok(picker::choose("Search providers", &labels, 0)?
+            .map(|i| format!("/login {}", PROVIDERS[i])));
+    }
+    let mut models = Vec::new();
+    let mut errors = Vec::new();
+    for id in PROVIDERS {
+        if configured(state, id)? {
+            match model_entries(state, id, true) {
+                Ok(rows) => models.extend(
+                    rows.into_iter()
+                        .filter(|(m, _)| canonical_model(id, m).0 == id)
+                        .map(|(m, _)| (id, m)),
+                ),
+                Err(e) => errors.push(format!("{id}: {e:#}")),
+            }
+        }
+    }
+    ensure!(
+        !models.is_empty(),
+        "No available models. Use /login to configure a provider. {}",
+        errors.join("; ")
+    );
+    let labels = models
+        .iter()
+        .map(|(id, m)| format!("{m}  [{id}]"))
+        .collect::<Vec<_>>();
+    let selected = models
+        .iter()
+        .position(|(id, m)| (*id, m.as_str()) == current)
+        .unwrap_or(0);
+    Ok(picker::choose("Search models", &labels, selected)?
+        .map(|i| format!("/model {} {}", models[i].0, models[i].1)))
+}
 fn subscription(p: &str) -> bool {
     p == "openai-codex"
 }
@@ -60,14 +172,17 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
         endpoint: endpoint.into(),
     }))
 }
-fn login(state: &Path, p: &str, cancel: &Cancel) -> Result<()> {
+fn login(state: &Path, p: &str, cancel: &Cancel, browser: Option<bool>) -> Result<()> {
     if subscription(p) {
-        return Subscription {
+        let account = Subscription {
             provider: p.into(),
             model: String::new(),
             state: state.into(),
-        }
-        .login_with_cancel(cancel);
+        };
+        return match browser {
+            Some(method) => account.login_with_method(cancel, method),
+            None => account.login_with_cancel(cancel),
+        };
     }
     let var = key_env(p)?;
     let key = std::env::var(var)
@@ -237,6 +352,10 @@ fn main() -> Result<()> {
     } else {
         ("deepseek".into(), "deepseek-flash".into())
     };
+    if let Ok(id) = provider_id(&p) {
+        let (id, name) = canonical_model(id, &model);
+        (p, model) = (id.into(), name.into());
+    }
     if !subscription(&p) && key_env(&p).is_err() {
         let warning = "Saved provider is unavailable; choose a supported provider with /model PROVIDER MODEL.";
         if interactive {
@@ -268,6 +387,7 @@ fn main() -> Result<()> {
             HELP
         },
     );
+    let mut picker = None;
     let mut catalogue: Vec<(String, String)> = Vec::new();
 
     let mut draft = String::new();
@@ -304,7 +424,38 @@ fn main() -> Result<()> {
         if interactive {
             screen.line(Tone::User, &format!("❯ {line}"));
         }
+        if line == "/cancel" {
+            picker = None;
+            continue;
+        }
         let action = (|| -> Result<()> {
+            let command;
+            let line = match (picker.take(), line.starts_with('/')) {
+                (Some(choice), false) => {
+                    command = match choice {
+                        Picker::Login => format!("/login {}", provider_id(line.trim())?),
+                        Picker::Models => format!("/models {}", provider_id(line.trim())?),
+                        Picker::Select => format!(
+                            "/model {}",
+                            line.trim()
+                                .parse::<usize>()
+                                .context("enter a model number")?
+                        ),
+                    };
+                    command.as_str()
+                }
+                _ => line,
+            };
+            let chosen;
+            let line = if interactive && matches!(line, "/login" | "/model") {
+                let Some(cmd) = pick_command(&state, line, (&p, &model))? else {
+                    return Ok(());
+                };
+                chosen = cmd;
+                &chosen
+            } else {
+                line
+            };
             let mut words = line.split_whitespace();
             let first = words.next().unwrap();
             match first {
@@ -432,6 +583,16 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                "/login" | "/model" if line == first => {
+                    let login = first == "/login";
+                    picker = Some(if login { Picker::Login } else { Picker::Models });
+                    let title = if login {
+                        "Choose a login provider"
+                    } else {
+                        "Choose a model provider"
+                    };
+                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (/cancel to close)."));
+                }
                 "/login" => {
                     cancel.reset();
                     if interactive {
@@ -441,38 +602,56 @@ fn main() -> Result<()> {
                             crossterm::cursor::MoveTo(0, 0)
                         )?;
                     }
-                    login(&state, words.next().unwrap_or(&p), &cancel)?;
-                    if interactive {
-                        screen.line(Tone::Dim, "Login completed.");
-                    }
-                }
-                "/models" => {
-                    let id = words.next().unwrap_or(&p);
-                    let filter = words.next().unwrap_or("").to_lowercase();
-                    let key = if id == "deepseek" {
-                        Some(
-                            std::env::var(key_env(id)?)
-                                .or_else(|_| fs::read_to_string(state.join("deepseek.key")))?,
-                        )
+                    let id = provider_id(words.next().unwrap_or(&p))?;
+                    let browser = if interactive && subscription(id) {
+                        let options = ["Open browser".to_owned(), "Use device code".to_owned()];
+                        let Some(i) = picker::choose("Sign in to OpenAI Codex", &options, 0)?
+                        else {
+                            return Ok(());
+                        };
+                        crossterm::execute!(
+                            io::stdout(),
+                            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                            crossterm::cursor::MoveTo(0, 0)
+                        )?;
+                        Some(i == 0)
                     } else {
                         None
                     };
-                    let entries =
-                        panda_providers::models::list(id, &state, key.as_deref().map(str::trim))?;
-                    let mut file = tempfile::NamedTempFile::new_in(&state)?;
-                    serde_json::to_writer(&mut file, &entries)?;
-                    file.persist(state.join(format!("catalog-{id}.json")))?;
+                    login(&state, id, &cancel, browser)?;
+                    screen.line(
+                        Tone::Dim,
+                        &format!("Signed in to {id}. Use /model to select a model."),
+                    );
+                }
+                "/models" | "/model"
+                    if first == "/models"
+                        || (words.clone().count() == 1
+                            && words.clone().next().is_some_and(|w| {
+                                w.parse::<usize>().is_err() && provider_id(w).is_ok()
+                            })) =>
+                {
+                    let id = provider_id(words.next().unwrap_or(&p))?;
+                    let filter = words.next().unwrap_or("").to_lowercase();
+                    let entries = model_entries(&state, id, false)?;
                     model_window(&mut db, &state, &p, &model)?;
                     catalogue = entries
                         .into_iter()
                         .map(|(m, _)| m)
-                        .filter(|m| m.to_lowercase().contains(&filter))
+                        .filter(|m| {
+                            canonical_model(id, m).0 == id && m.to_lowercase().contains(&filter)
+                        })
                         .map(|m| (id.to_owned(), m))
                         .collect();
                     for (i, (_, m)) in catalogue.iter().enumerate() {
                         screen.line(Tone::Dim, &format!("{}  {m}", i + 1));
                     }
-                    screen.line(Tone::Dim, "Select with /model NUMBER");
+                    if catalogue.is_empty() {
+                        screen.line(Tone::Dim, "No matching models.");
+                    } else {
+                        picker = Some(Picker::Select);
+                        screen.line(Tone::Dim, "Enter a model number, or use /model NUMBER. /cancel closes the picker.");
+                    }
                 }
                 "/thinking" => {
                     let mut s = db.load()?;
@@ -503,14 +682,18 @@ fn main() -> Result<()> {
                                 .context("use /models first")?;
                             (pi.as_str(), mi.as_str())
                         } else {
-                            (id, words.next().context("usage: /model PROVIDER MODEL")?)
+                            if let Some(m) = words.next() {
+                                (provider_id(id)?, m)
+                            } else {
+                                canonical_model(&p, id)
+                            }
                         };
+                        let (id, m) = canonical_model(id, m);
                         ensure!(subscription(id) || key_env(id).is_ok(), "unknown provider");
                         let mut temp = tempfile::NamedTempFile::new_in(&state)?;
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
-                        p = id.into();
-                        model = m.into();
+                        (p, model) = (id.into(), m.into());
                         model_window(&mut db, &state, &p, &model)?;
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))

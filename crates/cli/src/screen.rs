@@ -55,7 +55,7 @@ type Row = (Tone, String);
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     let mut used = 0;
-    for g in text.graphemes(true) {
+    let mut append = |g: &str| {
         let cells = g.width();
         if used > 0 && used + cells > width {
             rows.push(String::new());
@@ -64,6 +64,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         if cells <= width {
             rows.last_mut().unwrap().push_str(g);
             used += cells;
+        }
+    };
+    for g in text.graphemes(true) {
+        if g.width() <= width {
+            append(g);
+        } else {
+            for c in g.chars() {
+                append(c.encode_utf8(&mut [0; 4]));
+            }
         }
     }
     rows
@@ -504,6 +513,11 @@ impl Screen {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn oversized_grapheme_preserves_both_characters() {
+        assert_eq!(wrap("🪀𑩗", 2), ["🪀", "𑩗"]);
+    }
 
     proptest! {
         #[test]

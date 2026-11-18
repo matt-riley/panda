@@ -16,7 +16,7 @@ panda
 
 For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `/model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `/login deepseek` or `/login openrouter`.
 
-For ChatGPT Codex, use `/login openai-codex` and choose browser or device-code sign-in. After login, select an available model with `/model PROVIDER MODEL`. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
+For ChatGPT Codex, enter `/login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `/model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. The direct command `/login openai` also works. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
 
 ## Use a session
 

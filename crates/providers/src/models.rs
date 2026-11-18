@@ -21,7 +21,8 @@ pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(Stri
                     let cred = auth::credential(state, auth::CODEX, &client).await?;
                     client
                         .get("https://chatgpt.com/backend-api/codex/models")
-                        .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+                        // Codex filters this catalogue by its client protocol version.
+                        .query(&[("client_version", "0.169.0")])
                         .bearer_auth(wire::string(&cred, "access")?)
                         .header("chatgpt-account-id", wire::string(&cred, "accountId")?)
                 }
@@ -47,4 +48,18 @@ pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(Stri
             ids.dedup();
             Ok(ids)
         })
+}
+
+pub fn codex_configured(state: &Path) -> Result<bool> {
+    let path = state.join("subscriptions.sqlite3");
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credentials WHERE id=?)",
+        [auth::CODEX],
+        |r| r.get(0),
+    )?)
 }
