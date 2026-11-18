@@ -827,7 +827,8 @@ mod tests {
             let mut term=ratatui::Terminal::new(ratatui::backend::TestBackend::new(w,h)).unwrap();
             term.draw(|f|screen.draw_working(f,&draft,draft.len(),None,std::time::Duration::from_secs(123))).unwrap();
             let labels=vec![draft.clone()];
-            term.draw(|f| crate::renderer::picker(f,"Reasoning effort",&draft,&labels,&[0],0,false)).unwrap();
+            term.draw(|f| crate::renderer::picker(f,"Reasoning effort",&draft,&labels,crate::renderer::PickerResults{ids:&[0],pos:0,preview:None},false)).unwrap();
+            term.draw(|f| crate::renderer::picker(f,"Resume session",&draft,&labels,crate::renderer::PickerResults{ids:&[0],pos:0,preview:Some(&draft)},false)).unwrap();
             prop_assert_eq!(term.backend().buffer().content.len(),usize::from(w)*usize::from(h));
         }
     }

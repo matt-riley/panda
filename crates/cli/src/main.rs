@@ -593,8 +593,8 @@ fn main() -> Result<()> {
                 }
                 ":ack" => acknowledge(&mut db)?,
                 ":resume" => {
-                    if let Some(n) = words.next() {
-                        let id = if let Ok(id) = n.parse() {
+                    let selected = if let Some(n) = words.next() {
+                        Some(if let Ok(id) = n.parse() {
                             id
                         } else {
                             let name = line[first.len()..].trim();
@@ -608,7 +608,16 @@ fn main() -> Result<()> {
                                 "ambiguous session name; use its numeric ID"
                             );
                             id
-                        };
+                        })
+                    } else if interactive {
+                        picker::resume(&db.previews(&root)?)?
+                    } else {
+                        for (id, name, _) in db.catalogue(&root)? {
+                            screen.line(Tone::Dim, &format!("{id} {name}"));
+                        }
+                        None
+                    };
+                    if let Some(id) = selected {
                         if id != db.id() {
                             db = Disk::open(&state, &root, Some(id))?
                         }
@@ -616,10 +625,6 @@ fn main() -> Result<()> {
                         screen.footer.usage.clear();
                         model_window(&mut db, &state, &p, &model)?;
                         mode = show(&db, &mut screen)?
-                    } else {
-                        for (id, name, _) in db.catalogue(&root)? {
-                            screen.line(Tone::Dim, &format!("{id} {name}"));
-                        }
                     }
                 }
                 ":login" | ":model" if line == first => {

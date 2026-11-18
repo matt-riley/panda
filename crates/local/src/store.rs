@@ -2,6 +2,11 @@ use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
 use rusqlite::{Connection, params};
 use std::{fs, path::Path};
+pub struct SessionPreview {
+    pub id: i64,
+    pub name: String,
+    pub messages: Vec<(&'static str, String)>,
+}
 pub struct Disk {
     conn: Connection,
     id: i64,
@@ -50,6 +55,38 @@ impl Disk {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+    /// Read searchable conversation text without opening session locks or
+    /// transferring tool payloads, reasoning traces, or image data to the UI.
+    pub fn previews(&self, repo: &Path) -> Result<Vec<SessionPreview>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, coalesce(json_extract(s.data, '$.name'), ''),
+                    json_extract(m.value, '$.User'),
+                    json_extract(m.value, '$.Images.text'),
+                    json_extract(m.value, '$.Assistant.text')
+             FROM sessions AS s LEFT JOIN json_each(s.data, '$.history') AS m
+             WHERE s.repo = ? ORDER BY s.id DESC, m.key",
+        )?;
+        let mut rows = stmt.query([repo.to_str().context("non UTF-8 workspace")?])?;
+        let mut sessions: Vec<SessionPreview> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id = row.get(0)?;
+            if sessions.last().is_none_or(|s| s.id != id) {
+                sessions.push(SessionPreview {
+                    id,
+                    name: row.get(1)?,
+                    messages: Vec::new(),
+                });
+            }
+            for (col, role) in [(2, "You"), (3, "You"), (4, "Panda")] {
+                if let Some(text) = row.get::<_, Option<String>>(col)?
+                    && !text.trim().is_empty()
+                {
+                    sessions.last_mut().unwrap().messages.push((role, text));
+                }
+            }
+        }
+        Ok(sessions)
     }
     fn open_seed(dir: &Path, repo: &Path, id: Option<i64>, seed: &Session) -> Result<Self> {
         let conn = Connection::open(dir.join("sessions.sqlite3"))?;
@@ -126,6 +163,48 @@ impl Store for Disk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn previews_are_workspace_scoped_and_read_only_while_sessions_are_open() {
+        use panda_core::Message;
+        let dir = tempfile::tempdir().unwrap();
+        let mut disk = Disk::open(dir.path(), dir.path(), None).unwrap();
+        let mut session = disk.load().unwrap();
+        session.name = "same name".into();
+        session.history = vec![
+            Message::Images {
+                text: "image caption".into(),
+                urls: vec!["hidden attachment".into()],
+            },
+            Message::Reasoning("hidden reasoning".into()),
+            Message::Result {
+                id: "1".into(),
+                text: "hidden tool output".into(),
+                is_error: false,
+            },
+            Message::Assistant {
+                text: "visible reply".into(),
+                calls: vec![],
+            },
+        ];
+        disk.save(&mut session).unwrap();
+        let empty = Disk::open(dir.path(), dir.path(), None).unwrap();
+        let _other = Disk::open(dir.path(), &dir.path().join("elsewhere"), None).unwrap();
+        let items = disk.previews(dir.path()).unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [empty.id(), disk.id()]
+        );
+        assert!(items[0].messages.is_empty());
+        assert_eq!(items[1].name, "same name");
+        assert_eq!(
+            items[1].messages,
+            [
+                ("You", "image caption".into()),
+                ("Panda", "visible reply".into())
+            ]
+        );
+        assert_eq!(disk.load().unwrap().revision, session.revision);
+    }
     #[test]
     fn durable_snapshot_refuses_stale_save() {
         let dir = tempfile::tempdir().unwrap();
