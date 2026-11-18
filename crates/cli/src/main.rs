@@ -1,6 +1,7 @@
 mod active;
 mod attachments;
 mod automation;
+mod copy;
 mod markdown;
 mod picker;
 mod renderer;
@@ -23,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -846,6 +847,7 @@ fn run(
                         screen.line(Tone::Dim, "No tool results in this session.");
                     }
                 }
+                ":copy" => screen.line(Tone::Dim, copy::copy_last(&db.load()?.history)?),
                 ":paste" => {
                     screen.clipboard = Some(attachments::clipboard()?);
                     screen.line(
