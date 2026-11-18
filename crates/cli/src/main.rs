@@ -644,9 +644,11 @@ fn run(
                     screen.line(
                         Tone::Dim,
                         &format!(
-                            "Context {} / {} bytes · {} messages covered by summary",
+                            "Context {} bytes · estimated {} / {} input tokens · byte limit {} · {} messages covered by summary",
                             s.context_bytes(),
-                            s.budget(),
+                            s.estimated_tokens(&coding.system()?, &coding.schemas(s.mode)),
+                            s.token_budget(),
+                            s.context_budget.map_or_else(|| "unset".into(), |n| n.to_string()),
                             s.checkpoint.map_or(0, |c| c.through)
                         ),
                     );

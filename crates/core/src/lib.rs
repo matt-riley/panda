@@ -1,4 +1,6 @@
+mod recovery;
 use anyhow::{Result, bail};
+pub use recovery::TransientFailure;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -84,6 +86,8 @@ pub struct Checkpoint {
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct UsageRecord {
+    #[serde(default)]
+    pub checkpoint_through: usize,
     pub through: usize,
     pub input: u64,
     pub output: u64,
@@ -93,6 +97,7 @@ impl UsageRecord {
     fn from_event(u: &Value) -> Option<Self> {
         Some(Self {
             through: 0,
+            checkpoint_through: 0,
             input: u["input_tokens"].as_u64().or(u["prompt_tokens"].as_u64())?,
             output: u["output_tokens"]
                 .as_u64()
@@ -120,14 +125,62 @@ impl Session {
     pub fn context_bytes(&self) -> usize {
         serde_json::to_vec(&self.projected()).map_or(0, |v| v.len())
     }
-    pub fn budget(&self) -> usize {
-        self.context_budget.unwrap_or_else(|| {
-            self.model_window
-                .map_or(196608, |n| (n as usize).saturating_mul(3))
-        })
+    pub fn token_budget(&self) -> u64 {
+        let window = self.model_window.filter(|&n| n > 0).unwrap_or(65536);
+        window - (window / 4).min(16384)
+    }
+    pub fn estimated_tokens(&self, system: &str, tools: &[Value]) -> u64 {
+        let estimate = |bytes: usize| (bytes as u64).div_ceil(4);
+        let checkpoint = self.checkpoint.as_ref().map_or(0, |c| c.through);
+        if let Some(u) = self.usage.last().filter(|u| {
+            u.checkpoint_through == checkpoint
+                && u.through > checkpoint
+                && u.through <= self.history.len()
+        }) {
+            let tail = &self.history[u.through..];
+            let bytes = serde_json::to_vec(tail).map_or(0, |v| v.len().saturating_sub(2));
+            return u
+                .input
+                .saturating_add(u.output)
+                .saturating_add(estimate(bytes));
+        }
+        estimate(
+            self.context_bytes()
+                .saturating_add(system.len())
+                .saturating_add(serde_json::to_vec(tools).map_or(0, |v| v.len())),
+        )
+    }
+    // Keep whole recent user exchanges where possible. Never leave tool results
+    // without their assistant call at the start of the retained suffix.
+    fn compact_through(&self, limit: usize) -> usize {
+        let previous = self.checkpoint.as_ref().map_or(0, |c| c.through);
+        let target = (self.token_budget() / 4).min(20000) * 4;
+        let mut bytes = 0u64;
+        let mut boundary = limit;
+        for (i, message) in self.history.iter().enumerate().skip(previous).rev() {
+            bytes = bytes.saturating_add(message.summary_text().len() as u64 + 1);
+            if bytes > target {
+                break;
+            }
+            if i > previous && i <= limit && message.user() {
+                boundary = i;
+            }
+        }
+        boundary
+    }
+    fn needs_compaction(&self, system: &str, tools: &[Value]) -> bool {
+        self.context_budget
+            .is_some_and(|limit| self.context_bytes() > limit)
+            || self.estimated_tokens(system, tools) > self.token_budget()
     }
 }
-fn checkpoint(p: &mut dyn Provider, s: &mut Session, end: usize, cancel: &Cancel) -> Result<()> {
+fn checkpoint(
+    p: &mut dyn Provider,
+    s: &mut Session,
+    end: usize,
+    cancel: &Cancel,
+    emit: &mut Emit,
+) -> Result<()> {
     let start = s.checkpoint.as_ref().map_or(0, |c| c.through);
     if end <= start {
         return Ok(());
@@ -140,8 +193,10 @@ fn checkpoint(p: &mut dyn Provider, s: &mut Session, end: usize, cancel: &Cancel
         p,
         &s.history[start..end],
         prior,
+        (s.token_budget().clamp(1, 24576)) as usize,
         "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.",
         cancel,
+        emit,
     )?;
     s.checkpoint = Some(Checkpoint {
         through: end,
@@ -158,25 +213,31 @@ pub fn summarize_branch(
         p,
         messages,
         String::new(),
+        24576,
         "Summarize the branch being left as data for a different branch. Preserve relevant findings, decisions, file changes, tool outcomes and open questions. Be concise.",
         cancel,
+        &mut |_| {},
     )
 }
 fn summarize(
     p: &mut dyn Provider,
     messages: &[Message],
     mut summary: String,
+    chunk_limit: usize,
     instruction: &str,
     cancel: &Cancel,
+    emit: &mut Emit,
 ) -> Result<String> {
     let mut chunk = String::new();
-    let summarize =
+    let mut summarize =
         |summary: &mut String, chunk: &mut String, p: &mut dyn Provider| -> Result<()> {
             cancel.check()?;
             let input = [Message::User(format!(
                 "Prior summary:\n{summary}\nTranscript data:\n{chunk}"
             ))];
-            let (next, calls) = p.reply(instruction, &input, &[], cancel, &mut |_| {})?;
+            let (next, calls) = recovery::request(cancel, emit, |_| {
+                p.reply(instruction, &input, &[], cancel, &mut |_| {})
+            })?;
             anyhow::ensure!(
                 calls.is_empty() && !next.trim().is_empty(),
                 "empty summary or unexpected tool call"
@@ -189,7 +250,7 @@ fn summarize(
     for message in messages {
         for ch in message.summary_text().chars().chain(std::iter::once('\n')) {
             chunk.push(ch);
-            if chunk.len() >= 24576 {
+            if chunk.len() >= chunk_limit {
                 summarize(&mut summary, &mut chunk, p)?;
             }
         }
@@ -214,12 +275,13 @@ pub fn compact(p: &mut dyn Provider, store: &mut dyn Store, cancel: &Cancel) -> 
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
     let end = s.history.len();
-    checkpoint(p, &mut s, end, cancel)?;
+    checkpoint(p, &mut s, end, cancel, &mut |_| {})?;
     store.save(&mut s)
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    Retry { attempt: u32, seconds: u64 },
     Reasoning(String),
     ToolOutput(String),
     Text(String),
@@ -319,8 +381,12 @@ pub fn turn_message(
             s.history.len()
         };
         let mut compacted = false;
-        if s.context_bytes() > s.budget() && keep > s.checkpoint.as_ref().map_or(0, |c| c.through) {
-            checkpoint(p, &mut s, keep, cancel)?;
+        let schemas = tools.schemas(s.mode);
+        if s.needs_compaction(&system, &schemas)
+            && keep > s.checkpoint.as_ref().map_or(0, |c| c.through)
+        {
+            let end = s.compact_through(keep);
+            checkpoint(p, &mut s, end, cancel, emit)?;
             store.save(&mut s)?;
             compacted = true;
         }
@@ -335,30 +401,28 @@ pub fn turn_message(
             }
             emit(e);
         };
-        let reply = p.reply_with_effort(
-            &system,
-            &s.projected(),
-            &tools.schemas(s.mode),
-            cancel,
-            &mut relay,
-            s.reasoning.as_deref(),
-        );
-        let (text, calls) = match reply {
+        let request = |p: &mut dyn Provider, s: &Session, relay: &mut Emit| {
+            let history = s.projected();
+            recovery::request(cancel, relay, |events| {
+                p.reply_with_effort(
+                    &system,
+                    &history,
+                    &schemas,
+                    cancel,
+                    events,
+                    s.reasoning.as_deref(),
+                )
+            })
+        };
+        let (text, calls) = match request(p, &s, &mut relay) {
             Err(e)
                 if !compacted
                     && e.is::<ContextOverflow>()
                     && keep > s.checkpoint.as_ref().map_or(0, |c| c.through) =>
             {
-                checkpoint(p, &mut s, keep, cancel)?;
+                checkpoint(p, &mut s, keep, cancel, &mut relay)?;
                 store.save(&mut s)?;
-                p.reply_with_effort(
-                    &system,
-                    &s.projected(),
-                    &tools.schemas(s.mode),
-                    cancel,
-                    &mut relay,
-                    s.reasoning.as_deref(),
-                )?
+                request(p, &s, &mut relay)?
             }
             other => other?,
         };
@@ -378,6 +442,7 @@ pub fn turn_message(
         });
         if let Some(mut u) = reading {
             u.through = s.history.len();
+            u.checkpoint_through = s.checkpoint.as_ref().map_or(0, |cp| cp.through);
             s.usage.push(u);
         }
         let idle = calls.is_empty();

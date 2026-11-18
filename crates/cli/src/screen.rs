@@ -159,6 +159,7 @@ impl StatusLine for Footer {
 
 pub struct Screen {
     pub active: bool,
+    pub retry: Option<(u32, std::time::Instant)>,
     live: String,
     selected_tool: Option<usize>,
     tool_rows: std::collections::HashMap<String, usize>,
@@ -190,6 +191,7 @@ impl Screen {
         }
         Ok(Self {
             active,
+            retry: None,
             live: String::new(),
             selected_tool: None,
             tool_rows: Default::default(),
@@ -528,6 +530,19 @@ impl Screen {
             elapsed.as_secs() / 60,
             elapsed.as_secs() % 60
         );
+        let status = self
+            .retry
+            .and_then(|(attempt, deadline)| {
+                deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .map(|t| {
+                        format!(
+                            "{spinner} Retry {attempt}/3 in {}s · Ctrl-C stop",
+                            t.as_secs_f64().ceil()
+                        )
+                    })
+            })
+            .unwrap_or(status);
         frame.render_widget(
             Paragraph::new(status).style(ink(ACCENT, self.color).add_modifier(Modifier::BOLD)),
             activity,
@@ -799,8 +814,18 @@ mod tests {
 
     #[test]
     fn work_indicator_is_above_prompt_even_with_a_draft() {
-        let screen = Screen::open(false).unwrap();
-        for draft in ["", "correction"] {
+        let mut screen = Screen::open(false).unwrap();
+        for (draft, label) in [
+            ("", "Working"),
+            ("correction", "Working"),
+            ("correction", "Retry 1/3"),
+        ] {
+            if label.starts_with("Retry") {
+                screen.retry = Some((
+                    1,
+                    std::time::Instant::now() + std::time::Duration::from_secs(4),
+                ));
+            }
             let mut term =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 18)).unwrap();
             term.draw(|f| {
@@ -813,7 +838,7 @@ mod tests {
                 .chunks(40)
                 .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
                 .collect::<Vec<_>>();
-            let status = lines.iter().position(|l| l.contains("Working")).unwrap();
+            let status = lines.iter().position(|l| l.contains(label)).unwrap();
             assert!(lines[status + 1].contains("──"));
             assert!(lines[status + 2].contains(&format!("❯ {draft}")));
             assert!(lines[status + 3].contains("──"));
