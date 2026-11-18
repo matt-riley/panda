@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.4](https://github.com/matt-riley/panda/compare/v0.1.3...v0.1.4) (2026-11-18)
+
+
+### Features
+
+* **cli:** render active turns and reasoning effort pickers with Ratatui ([c106e54](https://github.com/matt-riley/panda/commit/c106e5431579276bb191fb3348ba2f97b2c23359))
+* **providers:** expose model reasoning efforts from the Codex catalogue ([a2cd3d6](https://github.com/matt-riley/panda/commit/a2cd3d631e0b539f1e48721eb541bb69234d38e9))
+* render active turns and effort selection with Ratatui ([bf89d5f](https://github.com/matt-riley/panda/commit/bf89d5f8db885375e0416e0c6925e22c0a6bc10a))
+
 ## [0.1.3](https://github.com/matt-riley/panda/compare/v0.1.2...v0.1.3) (2026-11-18)
 
 
