@@ -1,11 +1,9 @@
 //! Focused terminal selector used by /login and /model.
 use crossterm::{
-    cursor::MoveTo,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{self, Clear, ClearType},
+    terminal,
 };
-use std::io::{self, Write};
+use std::io;
 
 fn matches(text: &str, query: &str) -> bool {
     let text = text.to_lowercase();
@@ -26,7 +24,8 @@ pub fn choose(title: &str, labels: &[String], selected: usize) -> io::Result<Opt
     let _restore = Restore;
     let mut query = String::new();
     let mut pos = selected;
-    let mut out = io::stdout().lock();
+    let mut terminal = crate::renderer::terminal()?;
+    let color = std::env::var_os("NO_COLOR").is_none();
     loop {
         let ids: Vec<_> = labels
             .iter()
@@ -35,34 +34,9 @@ pub fn choose(title: &str, labels: &[String], selected: usize) -> io::Result<Opt
             .map(|(i, _)| i)
             .collect();
         pos = pos.min(ids.len().saturating_sub(1));
-        let (width, height) = terminal::size()?;
-        let visible = usize::from(height.saturating_sub(4)).clamp(1, 10);
-        let start = pos
-            .saturating_sub(visible / 2)
-            .min(ids.len().saturating_sub(visible));
-        execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
-        let line = |text: &str| crate::ui::inline(text, usize::from(width.saturating_sub(1)));
-        write!(
-            out,
-            "{}\r\n{}\r\n",
-            line(&format!("{title}: {query}")),
-            line("↑ ↓ move · Enter select · Esc cancel")
-        )?;
-        for (n, i) in ids.iter().enumerate().skip(start).take(visible) {
-            write!(
-                out,
-                "{}\r\n",
-                line(&format!(
-                    "{} {}",
-                    if n == pos { "→" } else { " " },
-                    labels[*i]
-                ))
-            )?;
-        }
-        if ids.is_empty() {
-            write!(out, "No matches\r\n")?;
-        }
-        out.flush()?;
+        let height = terminal.size()?.height;
+        let visible = usize::from(height.saturating_sub(5)).clamp(1, 10);
+        terminal.draw(|f| crate::renderer::picker(f, title, &query, labels, &ids, pos, color))?;
         let Event::Key(k) = event::read()? else {
             continue;
         };

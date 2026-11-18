@@ -20,6 +20,7 @@ base64 = "0.22"
 libc = "0.2"
 walkdir = "2"
 shlex = "2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 [[bin]]
 name = "panda"
 path = "src/main.rs"

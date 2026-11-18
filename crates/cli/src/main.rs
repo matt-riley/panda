@@ -2,6 +2,7 @@ mod active;
 mod attachments;
 mod automation;
 mod picker;
+mod renderer;
 mod screen;
 mod ui;
 use anyhow::{Context, Result, bail, ensure};
@@ -20,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = "/plan · /code · /model PROVIDER MODEL · /login PROVIDER · /resume [ID] · /ack · /tool ID · /tools · /context [BYTES] · /compact · /new · /session · /name NAME · /tree · /fork [TURN] [NAME] · /clone [NAME] · /models PROVIDER [FILTER] · /thinking [LEVEL] · /skills [QUERY] · /paste · /detach · /quit";
+const HELP: &str = "/plan · /code · /model PROVIDER MODEL · /login PROVIDER · /resume [ID] · /ack · /tool ID · /tools · /context [BYTES] · /compact · /new · /session · /name NAME · /tree · /fork [TURN] [NAME] · /clone [NAME] · /models PROVIDER [FILTER] · /effort [LEVEL] · /thinking [LEVEL] · /skills [QUERY] · /paste · /detach · /quit";
 fn editor_command(setting: &str, path: &Path) -> Result<std::process::Command> {
     let words = shlex::split(setting).context("invalid quoting in editor setting")?;
     let (program, args) = words.split_first().context("empty editor command")?;
@@ -89,7 +90,13 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
     } else {
         None
     };
-    let rows = panda_providers::models::list(id, state, key.as_deref().map(str::trim))?;
+    let catalogue = panda_providers::models::catalogue(id, state, key.as_deref().map(str::trim))?;
+    if subscription(id) {
+        let mut file = tempfile::NamedTempFile::new_in(state)?;
+        serde_json::to_writer(&mut file, &catalogue.efforts)?;
+        file.persist(state.join("codex-efforts.json"))?;
+    }
+    let rows = catalogue.models;
     if !rows.is_empty() {
         let mut file = tempfile::NamedTempFile::new_in(state)?;
         serde_json::to_writer(&mut file, &rows)?;
@@ -97,6 +104,28 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
     }
     Ok(rows)
 }
+fn effort_levels(state: &Path, provider: &str, model: &str) -> Result<Vec<String>> {
+    let mut options = vec![String::from("default")];
+    if subscription(provider) {
+        let path = state.join("codex-efforts.json");
+        let cached = || -> Option<Vec<String>> {
+            let rows: std::collections::BTreeMap<String, Vec<String>> =
+                serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
+            rows.get(model).cloned()
+        };
+        let levels = if let Some(levels) = cached() {
+            levels
+        } else {
+            model_entries(state, provider, false)?;
+            cached().unwrap_or_default()
+        };
+        options.extend(levels);
+    } else {
+        options.extend(["none", "low", "medium", "high", "xhigh", "max"].map(String::from));
+    }
+    Ok(options)
+}
+
 fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option<String>> {
     if cmd == "/login" {
         let mut labels = Vec::new();
@@ -232,6 +261,7 @@ fn model_window(db: &mut Disk, state: &Path, id: &str, model: &str) -> Result<()
 }
 fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     let s = db.load()?;
+    screen.footer.effort = s.reasoning.clone();
     screen.line(Tone::Dim, &format!("session {} ({:?})", db.id(), s.mode));
     let mut calls_by_id = std::collections::HashMap::new();
     for m in &s.history {
@@ -653,18 +683,36 @@ fn main() -> Result<()> {
                         screen.line(Tone::Dim, "Enter a model number, or use /model NUMBER. /cancel closes the picker.");
                     }
                 }
-                "/thinking" => {
+                "/thinking" | "/effort" => {
                     let mut s = db.load()?;
-                    if let Some(level) = words.next() {
+                    let levels = if interactive
+                        || words.clone().next().is_some_and(|level| level != "default")
+                    {
+                        effort_levels(&state, &p, &model)?
+                    } else {
+                        vec!["default".into()]
+                    };
+                    let choice = if let Some(level) = words.next() {
+                        Some(level)
+                    } else if interactive {
+                        let current = s.reasoning.as_deref().unwrap_or("default");
+                        let pos = levels.iter().position(|s| s == current).unwrap_or(0);
+                        let Some(i) = picker::choose("Reasoning effort", &levels, pos)? else {
+                            return Ok(());
+                        };
+                        Some(levels[i].as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(level) = choice {
                         ensure!(
-                            matches!(
-                                level,
-                                "default" | "none" | "low" | "medium" | "high" | "xhigh" | "max"
-                            ),
-                            "unknown reasoning effort"
+                            levels.iter().any(|s| s == level),
+                            "available efforts for {model}: {}",
+                            levels.join(", ")
                         );
-                        s.reasoning = (level != "default").then(|| level.into());
+                        s.reasoning = (level != "default").then(|| level.to_owned());
                         db.save(&mut s)?;
+                        screen.footer.effort = s.reasoning.clone();
                     }
                     screen.line(
                         Tone::Dim,

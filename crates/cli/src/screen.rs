@@ -83,6 +83,7 @@ pub struct Footer {
     pub location: String,
     pub session: String,
     pub model: String,
+    pub effort: Option<String>,
     pub usage: String,
 }
 impl Footer {
@@ -107,7 +108,10 @@ impl Footer {
         ui::inline(&label, 256)
     }
     fn render(&self, width: usize, color: bool) -> String {
-        let right = ui::inline(&self.model, 150);
+        let mut right = ui::inline(&self.model, 150);
+        if let Some(e) = &self.effort {
+            right.push_str(&format!(" · {e}"));
+        }
         let left = format!("{} {}", self.session, self.usage)
             .trim_end()
             .to_owned();
@@ -115,7 +119,19 @@ impl Footer {
         let stats = if left.width() + right.width() < width {
             format!("{left}{}{right}", " ".repeat(gap))
         } else {
-            format!("{left} · {right}")
+            let available = width.saturating_sub(right.width() + 1);
+            if available == 0 {
+                right
+            } else {
+                let short = wrap(&left, available)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                format!(
+                    "{short}{}{right}",
+                    " ".repeat(width.saturating_sub(short.width() + right.width()))
+                )
+            }
         };
         let line = |s: &str| wrap(s, width).into_iter().next().unwrap_or_default();
         Tone::Dim.paint(
@@ -184,6 +200,7 @@ impl Screen {
             println!("{text}");
             return;
         }
+        self.wrapped.get_mut().unwrap().0 = 0;
         self.rows.extend(
             safe(text)
                 .replace('\t', "    ")
@@ -201,6 +218,7 @@ impl Screen {
         self.delta(Tone::Text, text);
     }
     pub fn delta(&mut self, tone: Tone, text: &str) {
+        self.wrapped.get_mut().unwrap().0 = 0;
         let clean = safe(text).replace('\t', "    ");
         let mut parts = clean.split('\n');
         let first = parts.next().unwrap_or_default();
@@ -214,6 +232,7 @@ impl Screen {
         self.rows.extend(parts.map(|line| (tone, line.to_owned())));
     }
     pub fn clear(&mut self) {
+        self.wrapped.get_mut().unwrap().0 = 0;
         self.rows.clear();
         self.previews.clear();
         self.tool_rows.clear();
@@ -296,10 +315,11 @@ impl Screen {
     }
     pub fn body(&self) -> String {
         let (w, h) = Self::dimensions();
+        let input_rows = self.input_rows.load(Ordering::Relaxed);
         self.reflow(w);
         let cache = self.wrapped.lock().unwrap();
         let live: Vec<_> = self.live.lines().rev().take(3).collect();
-        let count = h.saturating_sub(5 + self.input_rows.load(Ordering::Relaxed) + live.len());
+        let count = h.saturating_sub(5 + input_rows + live.len());
         let end = cache
             .1
             .len()
@@ -339,33 +359,112 @@ impl Screen {
             self.live.drain(..start);
         }
     }
-    pub fn working(&self, draft: &str) -> io::Result<()> {
-        if self.active {
-            self.wrapped.lock().unwrap().0 = 0;
-            let mut out = io::stdout().lock();
-            execute!(out, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
-            write!(
-                out,
-                "{}{}\r\n{}",
-                self.body().replace('\n', "\r\n"),
-                Tone::Tool.paint(
-                    &if draft.is_empty() {
-                        "Working…  Enter steers · Alt-Enter follows · Ctrl-C cancels".into()
-                    } else {
-                        format!(
-                            "❯ {}",
-                            ui::inline(draft, Self::dimensions().0.saturating_sub(2))
-                        )
-                    },
-                    self.color
-                ),
-                self.footer
-                    .render(Self::dimensions().0, self.color)
-                    .replace('\n', "\r\n")
-            )?;
-            out.flush()?;
+    pub fn draw_working(
+        &self,
+        frame: &mut ratatui::Frame,
+        draft: &str,
+        elapsed: std::time::Duration,
+    ) {
+        use crate::renderer::{ACCENT, MUTED, ink};
+        use ratatui::{
+            layout::{Constraint, Layout},
+            style::{Color, Modifier},
+            text::Line,
+            widgets::{Block, Borders, Paragraph},
+        };
+        let area = frame.area();
+        if area.is_empty() {
+            return;
         }
-        Ok(())
+        let width = usize::from(area.width);
+        let prompt_width = width.saturating_sub(2).max(1);
+        let draft_lines: Vec<_> = draft
+            .split('\n')
+            .flat_map(|l| wrap(l, prompt_width))
+            .collect();
+        let prompt_height =
+            (draft_lines.len().clamp(1, 4) as u16).min(area.height.saturating_sub(5).max(1));
+        let [history, activity, prompt, footer] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(prompt_height + 2),
+            Constraint::Length(2),
+        ])
+        .areas(area);
+        self.reflow(width);
+        let cached = self.wrapped.lock().unwrap();
+        let live: Vec<_> = self
+            .live
+            .lines()
+            .rev()
+            .take(3.min(history.height.into()))
+            .collect();
+        let room = usize::from(history.height).saturating_sub(live.len());
+        let mut lines: Vec<_> = cached
+            .1
+            .iter()
+            .skip(cached.1.len().saturating_sub(room))
+            .map(|(tone, text)| {
+                let color = match tone {
+                    Tone::Thought | Tone::Dim => MUTED,
+                    Tone::Text => Color::Reset,
+                    Tone::User => ACCENT,
+                    Tone::Tool => Color::Yellow,
+                    Tone::Added => Color::Green,
+                    Tone::Removed => Color::Red,
+                };
+                Line::from(text.as_str()).style(ink(color, self.color))
+            })
+            .collect();
+        lines.extend(
+            live.into_iter()
+                .rev()
+                .map(|s| Line::from(s).style(ink(MUTED, self.color))),
+        );
+        frame.render_widget(Paragraph::new(lines), history);
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            [(elapsed.as_millis() / 125 % 10) as usize];
+        let hints = if width >= 65 {
+            "   Enter steer · Alt-Enter queue · Ctrl-C stop"
+        } else {
+            ""
+        };
+        let status = format!(
+            "{spinner} Working…  {}:{:02}{hints}",
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60
+        );
+        frame.render_widget(
+            Paragraph::new(status).style(ink(ACCENT, self.color).add_modifier(Modifier::BOLD)),
+            activity,
+        );
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(ink(MUTED, self.color));
+        let inner = block.inner(prompt);
+        frame.render_widget(block, prompt);
+        let skip = draft_lines.len().saturating_sub(inner.height.into());
+        let prompt_lines = draft_lines
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(|(i, s)| Line::from(format!("{} {s}", if i == 0 { "❯" } else { "│" })))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(prompt_lines), inner);
+        let stats = self.footer.render(width, false);
+        let footer_lines: Vec<_> = stats.lines().skip(1).map(Line::from).collect();
+        frame.render_widget(
+            Paragraph::new(footer_lines).style(ink(MUTED, self.color)),
+            footer,
+        );
+        if inner.height > 0 && inner.width > 0 {
+            frame.set_cursor_position((
+                inner.x
+                    + (2 + draft_lines.last().map_or(0, |s| s.width()))
+                        .min(usize::from(inner.width - 1)) as u16,
+                inner.y + ((draft_lines.len() - skip - 1) as u16).min(inner.height - 1),
+            ));
+        }
     }
     pub fn read(&mut self, editor: &mut Option<Reedline>) -> io::Result<Signal> {
         let mut engine = editor
@@ -519,6 +618,27 @@ mod tests {
         assert_eq!(wrap("🪀𑩗", 2), ["🪀", "𑩗"]);
     }
 
+    #[test]
+    fn work_indicator_is_above_prompt_even_with_a_draft() {
+        let screen = Screen::open(false).unwrap();
+        for draft in ["", "correction"] {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 18)).unwrap();
+            term.draw(|f| screen.draw_working(f, draft, std::time::Duration::ZERO))
+                .unwrap();
+            let buf = term.backend().buffer();
+            let lines = buf
+                .content
+                .chunks(40)
+                .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+                .collect::<Vec<_>>();
+            let status = lines.iter().position(|l| l.contains("Working")).unwrap();
+            assert!(lines[status + 1].contains("──"));
+            assert!(lines[status + 2].contains(&format!("❯ {draft}")));
+            assert!(lines[status + 3].contains("──"));
+            assert!(lines.len() <= 18);
+        }
+    }
     proptest! {
         #[test]
         fn layout_fits_terminal_cells(text in any::<String>(), width in 2usize..160) {
@@ -529,9 +649,22 @@ mod tests {
         }
     }
 
+    proptest! {
+        #[test]
+        fn busy_and_picker_frames_fit_small_terminals(w in 1u16..95, h in 1u16..30, draft in ".{0,64}") {
+            let screen=Screen::open(false).unwrap();
+            let mut term=ratatui::Terminal::new(ratatui::backend::TestBackend::new(w,h)).unwrap();
+            term.draw(|f|screen.draw_working(f,&draft,std::time::Duration::from_secs(123))).unwrap();
+            let labels=vec![draft.clone()];
+            term.draw(|f| crate::renderer::picker(f,"Reasoning effort",&draft,&labels,&[0],0,false)).unwrap();
+            prop_assert_eq!(term.backend().buffer().content.len(),usize::from(w)*usize::from(h));
+        }
+    }
+
     #[test]
     fn footer_uses_two_status_rows_below_the_rule() {
         let footer = Footer {
+            effort: None,
             location: "~/code (main)".into(),
             session: "Plan".into(),
             usage: "↑6 ↓12".into(),

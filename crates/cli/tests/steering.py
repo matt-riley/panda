@@ -33,7 +33,9 @@ with tempfile.TemporaryDirectory() as tmp:
                 if not chunk:
                     break
                 output.extend(chunk)
-                if not sent and b"RUNNING FIXTURE" in output:
+                if b"\x1b[6n" in chunk:
+                    os.write(fd, b"\x1b[1;1R")
+                if not sent and b"RUNNINGFIXTURE" in output:
                     os.write(fd, b"correction\rnext\x1b\r")
                     sent = True
         if time.monotonic() >= deadline:
