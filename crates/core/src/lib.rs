@@ -31,6 +31,7 @@ pub struct Call {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    BranchSummary(String),
     User(String),
     Reasoning(String),
     Images {
@@ -131,29 +132,61 @@ fn checkpoint(p: &mut dyn Provider, s: &mut Session, end: usize, cancel: &Cancel
     if end <= start {
         return Ok(());
     }
-    let mut summary = s
+    let prior = s
         .checkpoint
         .as_ref()
         .map_or_else(String::new, |c| c.summary.clone());
+    let summary = summarize(
+        p,
+        &s.history[start..end],
+        prior,
+        "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.",
+        cancel,
+    )?;
+    s.checkpoint = Some(Checkpoint {
+        through: end,
+        summary,
+    });
+    Ok(())
+}
+pub fn summarize_branch(
+    p: &mut dyn Provider,
+    messages: &[Message],
+    cancel: &Cancel,
+) -> Result<String> {
+    summarize(
+        p,
+        messages,
+        String::new(),
+        "Summarize the branch being left as data for a different branch. Preserve relevant findings, decisions, file changes, tool outcomes and open questions. Be concise.",
+        cancel,
+    )
+}
+fn summarize(
+    p: &mut dyn Provider,
+    messages: &[Message],
+    mut summary: String,
+    instruction: &str,
+    cancel: &Cancel,
+) -> Result<String> {
     let mut chunk = String::new();
-    let summarize = |summary: &mut String,
-                     chunk: &mut String,
-                     p: &mut dyn Provider|
-     -> Result<()> {
-        cancel.check()?;
-        let input = [Message::User(format!(
-            "Prior summary:\n{summary}\nTranscript data:\n{chunk}"
-        ))];
-        let (next,calls)=p.reply("Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.",&input,&[],cancel,&mut |_|{})?;
-        anyhow::ensure!(
-            calls.is_empty() && !next.trim().is_empty(),
-            "invalid compaction response"
-        );
-        *summary = next;
-        chunk.clear();
-        Ok(())
-    };
-    for message in &s.history[start..end] {
+    let summarize =
+        |summary: &mut String, chunk: &mut String, p: &mut dyn Provider| -> Result<()> {
+            cancel.check()?;
+            let input = [Message::User(format!(
+                "Prior summary:\n{summary}\nTranscript data:\n{chunk}"
+            ))];
+            let (next, calls) = p.reply(instruction, &input, &[], cancel, &mut |_| {})?;
+            anyhow::ensure!(
+                calls.is_empty() && !next.trim().is_empty(),
+                "empty summary or unexpected tool call"
+            );
+            cancel.check()?;
+            *summary = next;
+            chunk.clear();
+            Ok(())
+        };
+    for message in messages {
         for ch in message.summary_text().chars().chain(std::iter::once('\n')) {
             chunk.push(ch);
             if chunk.len() >= 24576 {
@@ -164,11 +197,7 @@ fn checkpoint(p: &mut dyn Provider, s: &mut Session, end: usize, cancel: &Cancel
     if !chunk.is_empty() {
         summarize(&mut summary, &mut chunk, p)?;
     }
-    s.checkpoint = Some(Checkpoint {
-        through: end,
-        summary,
-    });
-    Ok(())
+    Ok(summary)
 }
 impl Message {
     pub fn summary_text(&self) -> String {
@@ -410,6 +439,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
             }
             Message::Result { id, .. } => completed.push(id.clone()),
             Message::Reasoning(_) => {}
+            Message::BranchSummary(_) => break,
             Message::User(_) | Message::Images { .. } => break,
         }
     }

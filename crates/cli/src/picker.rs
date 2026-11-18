@@ -18,27 +18,42 @@ struct Hit {
     preview: String,
 }
 
+fn label_hits(labels: &[String], query: &str) -> Vec<Hit> {
+    labels
+        .iter()
+        .enumerate()
+        .filter(|(_, text)| matches(text, query))
+        .map(|(index, _)| Hit {
+            index,
+            preview: String::new(),
+        })
+        .collect()
+}
 pub fn choose(title: &str, labels: &[String], selected: usize) -> io::Result<Option<usize>> {
-    pick(title, labels, selected, false, |query| {
-        labels
-            .iter()
-            .enumerate()
-            .filter(|(_, text)| matches(text, query))
-            .map(|(index, _)| Hit {
-                index,
-                preview: String::new(),
-            })
-            .collect()
-    })
+    Ok(pick(title, labels, selected, PickerMode::List, |query| {
+        label_hits(labels, query)
+    })?
+    .map(|p| p.index))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PickerMode {
+    List,
+    Preview,
+    Tree,
+}
+struct Picked {
+    index: usize,
+    summarize: bool,
 }
 
 fn pick(
     title: &str,
     labels: &[String],
     selected: usize,
-    preview: bool,
+    mode: PickerMode,
     search: impl Fn(&str) -> Vec<Hit>,
-) -> io::Result<Option<usize>> {
+) -> io::Result<Option<Picked>> {
     terminal::enable_raw_mode()?;
     struct Restore;
     impl Drop for Restore {
@@ -51,6 +66,8 @@ fn pick(
         query: String::new(),
         pos: selected,
     };
+    let preview = mode == PickerMode::Preview;
+    let mut filtering = false;
     let mut hits = search("");
     let mut terminal = crate::renderer::terminal()?;
     let color = std::env::var_os("NO_COLOR").is_none();
@@ -60,6 +77,15 @@ fn pick(
         let height = terminal.size()?.height;
         let visible = usize::from(height.saturating_sub(if preview { 11 } else { 5 })).clamp(1, 10);
         let results = crate::renderer::PickerResults {
+            hint: if mode == PickerMode::Tree {
+                Some(if filtering {
+                    " ↑↓ select   Enter switch   Ctrl-S summarize   Esc close"
+                } else {
+                    " ↑↓ move   Enter switch   s summarize   / filter   Esc close"
+                })
+            } else {
+                None
+            },
             ids: &ids,
             pos: state.pos,
             preview: preview.then(|| hits.get(state.pos).map_or("", |hit| hit.preview.as_str())),
@@ -69,8 +95,24 @@ fn pick(
         let Event::Key(k) = event::read()? else {
             continue;
         };
-        match state.key(k, &ids, visible) {
-            Action::Close(id) => return Ok(id),
+        let action = if mode == PickerMode::Tree {
+            state.tree_key(k, &ids, visible, &mut filtering)
+        } else {
+            state.key(k, &ids, visible)
+        };
+        match action {
+            Action::Summarize(index) => {
+                return Ok(Some(Picked {
+                    index,
+                    summarize: true,
+                }));
+            }
+            Action::Close(id) => {
+                return Ok(id.map(|index| Picked {
+                    index,
+                    summarize: false,
+                }));
+            }
             Action::Filter => hits = search(&state.query),
             Action::Stay => {}
         }
@@ -85,12 +127,45 @@ struct Selection {
 
 #[derive(Debug, PartialEq)]
 enum Action {
+    Summarize(usize),
     Close(Option<usize>),
     Filter,
     Stay,
 }
 
 impl Selection {
+    fn tree_key(
+        &mut self,
+        k: event::KeyEvent,
+        ids: &[usize],
+        visible: usize,
+        filtering: &mut bool,
+    ) -> Action {
+        if k.kind != KeyEventKind::Release {
+            match k.code {
+                KeyCode::Char('s')
+                    if (!*filtering && k.modifiers.is_empty())
+                        || k.modifiers == KeyModifiers::CONTROL =>
+                {
+                    return ids
+                        .get(self.pos)
+                        .copied()
+                        .map_or(Action::Stay, Action::Summarize);
+                }
+                KeyCode::Char('/') if !*filtering => {
+                    *filtering = true;
+                    return Action::Stay;
+                }
+                KeyCode::Char(_) | KeyCode::Backspace => *filtering = true,
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    *filtering = false
+                }
+                _ => {}
+            }
+        }
+        self.key(k, ids, visible)
+    }
+
     fn key(&mut self, k: event::KeyEvent, ids: &[usize], visible: usize) -> Action {
         if k.kind == KeyEventKind::Release {
             return Action::Stay;
@@ -155,10 +230,17 @@ fn tree_labels(entries: &[panda_local::store::TreeEntry]) -> Vec<String> {
         .collect()
 }
 
-pub fn tree(entries: &[panda_local::store::TreeEntry]) -> io::Result<Option<i64>> {
+pub fn tree(entries: &[panda_local::store::TreeEntry]) -> io::Result<Option<(i64, bool)>> {
     let labels = tree_labels(entries);
     let current = entries.iter().position(|e| e.current).unwrap_or(0);
-    Ok(choose("Session tree", &labels, current)?.map(|row| entries[row].id))
+    Ok(pick(
+        "Session tree",
+        &labels,
+        current,
+        PickerMode::Tree,
+        |query| label_hits(&labels, query),
+    )?
+    .map(|p| (entries[p.index].id, p.summarize)))
 }
 
 use panda_local::store::SessionPreview;
@@ -177,7 +259,7 @@ pub fn resume(sessions: &[SessionPreview]) -> io::Result<Option<i64>> {
             format!("#{}  {}", s.id, crate::ui::inline(title, 80))
         })
         .collect();
-    let selected = pick("Resume session", &labels, 0, true, |query| {
+    let selected = pick("Resume session", &labels, 0, PickerMode::Preview, |query| {
         let query = query.trim().to_lowercase();
         sessions
             .iter()
@@ -187,7 +269,7 @@ pub fn resume(sessions: &[SessionPreview]) -> io::Result<Option<i64>> {
             })
             .collect()
     })?;
-    Ok(selected.map(|index| sessions[index].id))
+    Ok(selected.map(|index| sessions[index.index].id))
 }
 
 fn session_preview(session: &SessionPreview, query: &str) -> Option<String> {
@@ -273,6 +355,33 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn summary_picker_key_sequences(keys in prop::collection::vec(0u8..10,1..96)) {
+            let mut state=Selection::default();
+            let mut filtering=false;
+            let mut search=false;
+            let mut selected=0;
+            let ids=[41,89];
+            for n in keys {
+                let code=match n {0..=2=>KeyCode::Char('s'),3=>KeyCode::Char('/'),4=>KeyCode::Down,5=>KeyCode::Up,6=>KeyCode::Char('a'),7=>KeyCode::Enter,8=>KeyCode::Esc,_=>KeyCode::Backspace};
+                let mut k=event::KeyEvent::new(code,if n==2 {KeyModifiers::CONTROL} else {KeyModifiers::NONE});
+                if n==1 {k.kind=KeyEventKind::Release;}
+                let expected=match n {
+                    1=>Action::Stay,
+                    2=>Action::Summarize(ids[selected]),
+                    0 if !search=>Action::Summarize(ids[selected]),
+                    3 if !search=>{search=true;Action::Stay}
+                    4|5=>{selected=1-selected;search=false;Action::Stay}
+                    7=>Action::Close(Some(ids[selected])),
+                    8=>Action::Close(None),
+                    _=>{selected=0;search=true;Action::Filter}
+                };
+                prop_assert_eq!(state.tree_key(k,&ids,2,&mut filtering),expected);
+                prop_assert_eq!(search,filtering);
+                prop_assert_eq!(selected,state.pos);
+            }
+        }
+
         #[test]
         fn tree_picker_key_sequences(keys in prop::collection::vec(0u8..12,1..96)) {
             use panda_local::store::TreeEntry;

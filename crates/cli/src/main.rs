@@ -274,6 +274,9 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     let mut calls_by_id = std::collections::HashMap::new();
     for m in &s.history {
         match m {
+            Message::BranchSummary(t) => {
+                screen.line(Tone::Dim, &format!("Branch summary · {}", safe(t)))
+            }
             Message::Reasoning(t) => screen.line(Tone::Thought, t),
             Message::Images { text, urls } => screen.line(
                 Tone::User,
@@ -570,10 +573,22 @@ fn run(
                         screen.line(Tone::Dim, "This session has no prompts or answers yet.");
                         return Ok(());
                     }
-                    let Some(node) = picker::tree(&entries)? else {
+                    let Some((node, summarize)) = picker::tree(&entries)? else {
                         return Ok(());
                     };
-                    let draft = db.navigate(node)?;
+                    let draft = if summarize {
+                        cancel.reset();
+                        db.navigate_summarized(node, &cancel, |messages| {
+                            eprintln!("Summarizing branch… Ctrl-C to cancel");
+                            summarize_branch(
+                                provider(&state, &p, &model)?.as_mut(),
+                                messages,
+                                &cancel,
+                            )
+                        })?
+                    } else {
+                        db.navigate(node)?
+                    };
                     screen.clear();
                     mode = show(&db, &mut screen)?;
                     let text = match draft {

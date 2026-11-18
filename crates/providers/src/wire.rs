@@ -102,6 +102,9 @@ pub(crate) fn responses_body(
     let mut input = Vec::new();
     for m in history {
         match m {
+            Message::BranchSummary(s) => input.push(
+                json!({"role":"user","content":format!("Summary from another branch:\n{s}")}),
+            ),
             Message::Reasoning(_) => continue,
             Message::Images { text, urls } => {
                 let mut parts = vec![json!({"type":"input_text","text":text})];

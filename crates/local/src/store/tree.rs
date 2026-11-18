@@ -1,6 +1,6 @@
 use super::{Disk, save_snapshot};
 use anyhow::{Result, ensure};
-use panda_core::{Message, Session, Store};
+use panda_core::{Cancel, Message, Session, Store};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
@@ -78,6 +78,21 @@ fn set_head(conn: &Connection, id: i64, tip: i64) -> Result<()> {
     Ok(())
 }
 
+fn destination(conn: &Connection, session: i64, node: i64) -> Result<(i64, Option<Message>)> {
+    let (parent, raw): (i64, String) = conn.query_row(
+        "SELECT parent,message FROM tree_nodes WHERE session=? AND id=?",
+        [session, node],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let message: Message = serde_json::from_str(&raw)?;
+    let (tip, draft) = match message {
+        Message::BranchSummary(_) => (node, None),
+        Message::User(_) | Message::Images { .. } => (parent, Some(message)),
+        Message::Assistant { calls, .. } if calls.is_empty() => (node, None),
+        _ => anyhow::bail!("select a prompt or completed answer"),
+    };
+    Ok((tip, draft))
+}
 impl Disk {
     pub fn tree(&mut self) -> Result<Vec<TreeEntry>> {
         let s = self.load()?;
@@ -86,7 +101,7 @@ impl Disk {
         let mut children: HashMap<i64, Vec<(i64, bool, Option<String>)>> = HashMap::new();
         {
             let mut stmt=tx.prepare("SELECT id,parent, json_type(message,'$.User') IS NOT NULL OR json_type(message,'$.Images') IS NOT NULL,
-                substr(coalesce(json_extract(message,'$.User'), json_extract(message,'$.Images.text'),
+                substr(coalesce('Branch summary · ' || json_extract(message,'$.BranchSummary'),json_extract(message,'$.User'), json_extract(message,'$.Images.text'),
                 CASE WHEN json_array_length(message,'$.Assistant.calls')=0 THEN json_extract(message,'$.Assistant.text') END),1,512)
                 FROM tree_nodes WHERE session=? ORDER BY id DESC")?;
             let mut rows = stmt.query([self.id])?;
@@ -127,20 +142,50 @@ impl Disk {
     /// A prompt becomes an editable draft at its parent. A completed answer
     /// becomes the active tip. Both changes share the snapshot transaction.
     pub fn navigate(&mut self, node: i64) -> Result<Option<Message>> {
+        self.switch(node, None)
+    }
+
+    pub fn navigate_summarized(
+        &mut self,
+        node: i64,
+        cancel: &Cancel,
+        generate: impl FnOnce(&[Message]) -> Result<String>,
+    ) -> Result<Option<Message>> {
+        let session = self.load()?;
+        let common = {
+            let tx = self.conn.transaction()?;
+            let source = sync(&tx, self.id, &session)?;
+            let (target, _) = destination(&tx, self.id, node)?;
+            let ancestors = |tip| -> Result<Vec<i64>> {
+                let mut stmt =
+                    tx.prepare(&(ANCESTORS.to_owned() + "SELECT id FROM path ORDER BY depth"))?;
+                Ok(stmt
+                    .query_map([self.id, tip], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?)
+            };
+            let shared = ancestors(source)?
+                .iter()
+                .zip(ancestors(target)?)
+                .take_while(|(a, b)| **a == *b)
+                .count();
+            tx.commit()?;
+            shared
+        };
+        cancel.check()?;
+        if common == session.history.len() {
+            return self.navigate(node);
+        }
+        let text = generate(&session.history[common..])?;
+        ensure!(!text.trim().is_empty(), "empty branch summary");
+        cancel.check()?;
+        self.switch(node, Some((text, cancel)))
+    }
+
+    fn switch(&mut self, node: i64, summary: Option<(String, &Cancel)>) -> Result<Option<Message>> {
         let mut session = self.load()?;
         let tx = self.conn.transaction()?;
         let previous = sync(&tx, self.id, &session)?;
-        let (parent, raw): (i64, String) = tx.query_row(
-            "SELECT parent,message FROM tree_nodes WHERE session=? AND id=?",
-            [self.id, node],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let message: Message = serde_json::from_str(&raw)?;
-        let (tip, draft) = match message {
-            Message::User(_) | Message::Images { .. } => (parent, Some(message)),
-            Message::Assistant { calls, .. } if calls.is_empty() => (node, None),
-            _ => anyhow::bail!("select a prompt or completed answer"),
-        };
+        let (tip, draft) = destination(&tx, self.id, node)?;
         if tip != previous {
             session.history.clear();
             session.usage.clear();
@@ -161,7 +206,15 @@ impl Disk {
                 }
             }
             set_head(&tx, self.id, tip)?;
+            if let Some((text, cancel)) = &summary {
+                session.history.push(Message::BranchSummary(text.clone()));
+                sync(&tx, self.id, &session)?;
+                cancel.check()?;
+            }
             save_snapshot(&tx, self.id, &mut session)?;
+        }
+        if let Some((_, cancel)) = summary {
+            cancel.check()?;
         }
         tx.commit()?;
         Ok(draft)
@@ -229,6 +282,49 @@ mod tests {
         assert_eq!(entries.len(), 6);
         assert_eq!(entries.iter().filter(|e| e.current).count(), 1);
         assert!(entries[4].branch_depth > entries[1].branch_depth);
+    }
+
+    #[test]
+    fn pi_summary_for_nested_prompt_is_attached_to_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Disk::open(dir.path(), dir.path(), None).unwrap();
+        let mut s = db.load().unwrap();
+        s.history = vec![
+            Message::User("shared".into()),
+            answer("shared answer"),
+            Message::User("edit me".into()),
+            answer("finding"),
+        ];
+        db.save(&mut s).unwrap();
+        let entries = db.tree().unwrap();
+        let cancel = Cancel::default();
+        assert!(
+            db.navigate_summarized(entries[2].id, &cancel, |_| anyhow::bail!("offline"))
+                .is_err()
+        );
+        assert_eq!(db.load().unwrap().revision, s.revision);
+        let draft = db
+            .navigate_summarized(entries[2].id, &cancel, |source| {
+                assert_eq!(source, &s.history[2..]);
+                Ok("carry this".into())
+            })
+            .unwrap();
+        assert_eq!(draft, Some(s.history[2].clone()));
+        let expected = [
+            s.history[0].clone(),
+            s.history[1].clone(),
+            Message::BranchSummary("carry this".into()),
+        ];
+        assert_eq!(db.load().unwrap().projected(), expected);
+        let leaf = db.tree().unwrap().into_iter().find(|e| e.current).unwrap();
+        db.navigate_summarized(leaf.id, &cancel, |_| {
+            panic!("same branch must skip provider")
+        })
+        .unwrap();
+        db.navigate(entries[3].id).unwrap();
+        assert_eq!(db.load().unwrap().history, s.history);
+        db.navigate(leaf.id).unwrap();
+        assert_eq!(db.load().unwrap().history, expected);
     }
 
     #[test]
