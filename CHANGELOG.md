@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/matt-riley/panda/compare/v0.1.9...v0.1.10) (2026-11-18)
+
+
+### Features
+
+* **cli:** summarize a branch when switching in the session tree ([#21](https://github.com/matt-riley/panda/issues/21)) ([fa566f1](https://github.com/matt-riley/panda/commit/fa566f12aa7717718a2f543d49e1680e35cf3d98))
+
 ## [0.1.9](https://github.com/matt-riley/panda/compare/v0.1.8...v0.1.9) (2026-11-18)
 
 
