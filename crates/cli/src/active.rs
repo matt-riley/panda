@@ -308,6 +308,7 @@ mod tests {
             Some(&mut editor),
         )
         .unwrap();
+        assert_eq!(screen.commands.pop_front().as_deref(), Some(":model"));
         assert!(
             matches!(store.load().unwrap().history.as_slice(), [Message::User(_),Message::Assistant{..},Message::Result{..},Message::User(c),Message::Assistant{..},Message::User(n),Message::Assistant{..}] if c=="correction" && n=="next")
         );

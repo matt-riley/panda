@@ -23,7 +23,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :paste · :detach · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :paste · :detach · :help · :cancel · :q · :quit";
+fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
+    HELP.split(" · ")
+        .filter_map(|usage| usage.split_whitespace().next())
+        .filter(move |name| name[1..].starts_with(prefix))
+}
+
 fn editor_command(setting: &str, path: &Path) -> Result<std::process::Command> {
     let words = shlex::split(setting).context("invalid quoting in editor setting")?;
     let (program, args) = words.split_first().context("empty editor command")?;
