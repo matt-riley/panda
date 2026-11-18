@@ -107,6 +107,9 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut thought = None;
     for msg in history {
         let message = match msg {
+            Message::BranchSummary(s) => {
+                json!({"role":"user","content":format!("Summary from another branch:\n{s}")})
+            }
             Message::Reasoning(t) => {
                 thought = Some(t);
                 continue;

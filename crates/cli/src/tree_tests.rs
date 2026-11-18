@@ -8,12 +8,39 @@ fn fixture() {
     impl Provider for Offline {
         fn reply(
             &mut self,
-            _: &str,
+            system: &str,
             history: &[Message],
             _: &[serde_json::Value],
-            _: &Cancel,
+            cancel: &Cancel,
             emit: &mut Emit,
         ) -> Result<(String, Vec<Call>)> {
+            if system.starts_with("Summarize") {
+                if std::env::var_os("PANDA_SLOW_SUMMARY").is_some() {
+                    loop {
+                        cancel.check()?;
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                let payload = format!("{history:?}");
+                ensure!(
+                    payload.contains("Quartz") && !payload.contains("Granite"),
+                    "wrong summary source"
+                );
+                return Ok(("Quartz finding".into(), vec![]));
+            }
+            if let [
+                Message::User(_),
+                Message::Assistant { text, .. },
+                Message::BranchSummary(summary),
+                Message::User(question),
+            ] = history
+                && text == "Granite"
+                && summary == "Quartz finding"
+                && question == "What survived?"
+            {
+                emit(Event::Text("Context verified".into()));
+                return Ok(("Context verified".into(), vec![]));
+            }
             let [Message::User(text)] = history else {
                 bail!("unexpected branch context");
             };

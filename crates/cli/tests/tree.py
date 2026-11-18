@@ -16,11 +16,13 @@ from pathlib import Path
 
 
 @contextmanager
-def panda(repo, state, released=None):
+def panda(repo, state, released=None, slow=False, startup=None):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(repo)
         os.environ.update(TERM="xterm-256color", PANDA_HOME=str(state), PANDA_TREE_FIXTURE="1")
+        if slow:
+            os.environ["PANDA_SLOW_SUMMARY"] = "1"
         if released:
             os.execv(released, [released, "--continue"])
         os.execv(sys.argv[1], [sys.argv[1], "--exact", "tree_tests::fixture", "--nocapture"])
@@ -41,6 +43,8 @@ def panda(repo, state, released=None):
         del pending[:pending.index(marker) + len(marker)]
 
     try:
+        if startup:
+            expect(startup)
         expect("deepseek-flash")
         yield lambda s: os.write(fd, s.encode()), expect
         os.write(fd, b":q\r")
@@ -86,3 +90,29 @@ with tempfile.TemporaryDirectory() as tmp:
             expect(answer)
             expect("deepseek-flash")
             assert active_history(state)[-1]["Assistant"]["text"] == answer
+
+    source = active_history(state)
+    for slow in (True, False):
+        with panda(repo, state, slow=slow) as (send, expect):
+            send(":tree\r")
+            expect("Session tree")
+            send("Granite\x1b[B")
+            send("s")
+            expect("Summarizing")
+            if slow:
+                send("\x03")
+                expect("cancelled")
+                expect("deepseek-flash")
+                assert active_history(state) == source
+            else:
+                expect("Quartz finding")
+                expect("deepseek-flash")
+    with panda(repo, state, sys.argv[2] if len(sys.argv) > 2 else None, startup="Quartz finding") as (send, expect):
+        saved = active_history(state)
+        assert saved[-1] == {"BranchSummary":"Quartz finding"}
+        assert saved[-2]["Assistant"]["text"] == "Granite"
+
+    with panda(repo, state) as (send, expect):
+        send("What survived?\r")
+        expect("Context verified")
+        expect("deepseek-flash")

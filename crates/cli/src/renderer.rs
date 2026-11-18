@@ -27,6 +27,7 @@ pub const ACCENT: Color = Color::Rgb(112, 201, 209);
 pub const MUTED: Color = Color::Rgb(145, 158, 175);
 
 pub struct PickerResults<'a> {
+    pub hint: Option<&'a str>,
     pub ids: &'a [usize],
     pub pos: usize,
     pub preview: Option<&'a str>,
@@ -39,7 +40,12 @@ pub fn picker(
     results: PickerResults,
     color: bool,
 ) {
-    let PickerResults { ids, pos, preview } = results;
+    let PickerResults {
+        ids,
+        pos,
+        preview,
+        hint: key_hint,
+    } = results;
     let area = frame.area();
     let preview_rows = if preview.is_some() { 6 } else { 0 };
     let height = area
@@ -120,7 +126,8 @@ pub fn picker(
     }
     frame.render_widget(Paragraph::new(lines), results);
     frame.render_widget(
-        Paragraph::new(" ↑↓ move   Enter select   Esc close").style(ink(MUTED, color)),
+        Paragraph::new(key_hint.unwrap_or(" ↑↓ move   Enter select   Esc close"))
+            .style(ink(MUTED, color)),
         hint,
     );
 }
