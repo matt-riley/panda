@@ -52,3 +52,71 @@ fn same_session_contract_for_both_hosts() -> anyhow::Result<()> {
     assert_eq!(read_fixture(local, EmptySkills, &mut db)?, "hello");
     Ok(())
 }
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn retry_after_shell_runs_command_once_and_reopens() -> anyhow::Result<()> {
+    use panda_core::*;
+    use panda_local::store::Disk;
+    struct ProviderFixture(usize);
+    impl Provider for ProviderFixture {
+        fn reply(
+            &mut self,
+            _: &str,
+            history: &[Message],
+            _: &[serde_json::Value],
+            _: &Cancel,
+            _: &mut Emit,
+        ) -> anyhow::Result<(String, Vec<Call>)> {
+            self.0 += 1;
+            if self.0 == 1 {
+                return Ok((
+                    String::new(),
+                    vec![Call {
+                        id: "run-tests".into(),
+                        name: "shell".into(),
+                        args: json!({"command":"echo ran >> invocations && echo passed"}),
+                    }],
+                ));
+            }
+            assert!(
+                matches!(history.last(),Some(Message::Result{id,text,is_error:false}) if id=="run-tests" && text.contains("passed"))
+            );
+            if self.0 == 2 {
+                return Err(TransientFailure {
+                    reason: "503".into(),
+                    retry_after: Some(std::time::Duration::ZERO),
+                }
+                .into());
+            }
+            Ok(("Tests passed".into(), vec![]))
+        }
+    }
+    let repo = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let coding = panda_coding::Coding {
+        workspace: Native::new(repo.path(), env!("CARGO_BIN_EXE_panda").as_ref())?,
+        skills: panda_memory::EmptySkills,
+    };
+    let mut db = Disk::open(state.path(), repo.path(), None)?;
+    let id = db.id();
+    turn(
+        &mut ProviderFixture(0),
+        &mut db,
+        &coding,
+        "Run tests".into(),
+        &Cancel::default(),
+        &mut |_| {},
+    )?;
+    drop(db);
+    let saved = Disk::open(state.path(), repo.path(), Some(id))?.load()?;
+    assert!(!saved.active);
+    assert!(
+        matches!(&saved.history[..],[Message::User(_),Message::Assistant{calls,..},Message::Result{..},Message::Assistant{text,..}] if calls.len()==1 && text=="Tests passed")
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("invocations"))?,
+        "ran\n"
+    );
+    Ok(())
+}

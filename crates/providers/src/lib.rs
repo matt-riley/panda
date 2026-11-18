@@ -182,10 +182,11 @@ impl Provider for Api {
                 .bearer_auth(&self.key)
                 .json(&body)
                 .send()
-                .await?;
+                .await
+                .map_err(transport_error)?;
             let mut response = checked(response).await?;
             let mut stream = Stream::default();
-            while let Some(chunk) = response.chunk().await? {
+            while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
                 cancel.check()?;
                 stream.push(&chunk, emit)?;
             }
@@ -205,11 +206,40 @@ impl Provider for Api {
 }
 pub mod subscription;
 
+fn transport_error(error: reqwest::Error) -> anyhow::Error {
+    if error.is_connect() || error.is_timeout() || error.is_body() {
+        return TransientFailure {
+            reason: "provider connection interrupted".into(),
+            retry_after: None,
+        }
+        .into();
+    }
+    error.without_url().into()
+}
+fn retry_after(value: &str) -> Option<std::time::Duration> {
+    use std::time::{Duration, SystemTime};
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+        .or_else(|| {
+            httpdate::parse_http_date(value)
+                .ok()
+                .map(|date| date.duration_since(SystemTime::now()).unwrap_or_default())
+        })
+}
+
 pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
+    let delay = response
+        .headers()
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .and_then(retry_after);
     let error = response.json::<Value>().await.unwrap_or(Value::Null);
     let code = error["error"]["code"].as_str().unwrap_or_default();
     let message = error["error"]["message"]
@@ -222,6 +252,18 @@ pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Resp
             && (message.contains("exceed") || message.contains("maximum")))
     {
         return Err(panda_core::ContextOverflow.into());
+    }
+    if matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504 | 529)
+        && !matches!(
+            code,
+            "insufficient_quota" | "billing_hard_limit_reached" | "usage_limit_reached"
+        )
+    {
+        return Err(TransientFailure {
+            reason: format!("provider returned HTTP {status}"),
+            retry_after: delay,
+        }
+        .into());
     }
     anyhow::bail!("provider returned HTTP {status} {code}")
 }

@@ -39,6 +39,16 @@ impl Drop for Raw {
 
 pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
     match event {
+        Event::Retry { attempt, seconds } => {
+            if screen.active {
+                screen.retry = Some((
+                    attempt,
+                    std::time::Instant::now() + Duration::from_secs(seconds),
+                ));
+            } else {
+                eprintln!("Retry {attempt}/3 in {seconds}s");
+            }
+        }
         Event::Reasoning(s) => {
             if screen.active {
                 screen.delta(Tone::Thought, &s);
@@ -92,6 +102,7 @@ pub fn run(
     screen: &mut Screen,
     editor: Option<&mut reedline::Reedline>,
 ) -> Result<()> {
+    screen.retry = None;
     screen.end_reply();
     let mut pending = None;
     if !screen.active {

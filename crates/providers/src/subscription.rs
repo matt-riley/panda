@@ -121,10 +121,11 @@ impl Provider for Subscription {
                 .header("Accept", "text/event-stream")
                 .json(&body)
                 .send()
-                .await?;
+                .await
+                .map_err(crate::transport_error)?;
             let mut response = crate::checked(response).await?;
             let mut stream = wire::Responses::default();
-            while let Some(bytes) = response.chunk().await? {
+            while let Some(bytes) = response.chunk().await.map_err(crate::transport_error)? {
                 stream.push(&bytes, emit)?
             }
             stream.finish()
