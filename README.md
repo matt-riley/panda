@@ -41,7 +41,7 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 | Redirect an active turn | Type a correction and press Enter. Panda delivers it after the current batch of tools finishes. Alt-Enter queues a follow-up after the answer. Alt-Up brings queued text back into the draft. |
 | Inspect output | Shell output appears as it arrives. During a turn the activity timer sits above the steering prompt. Ctrl-O at the prompt expands tool results, `:tool ID` toggles one and Ctrl-T shows or hides reasoning supplied by the model. |
 | Run a shell command yourself | In code mode, `!git status` adds the command and result to the conversation. `!!git status` displays it locally. Both use the workspace sandbox. |
-| Explore another approach | Use `:name NAME` and `:tree` to identify the session and completed turn. `:fork 2 alternative` starts a session at the second completed answer. `:clone NAME` copies the current conversation. |
+| Explore another approach | Open `:tree`, type to filter, and select an earlier prompt to edit it in Insert mode. Submit it to start a sibling branch in the same session. Select a completed answer to continue from it. Esc closes the picker. Both paths survive quitting and resuming. Navigation changes conversation history only. Workspace files keep their current contents. `:fork 2 alternative` starts a session at the second completed answer. `:clone NAME` copies the current conversation. |
 | Return to a session | `:resume ID` or `:resume NAME` opens a session in the current workspace. `panda --continue` opens the most recently created session for that workspace. |
 | Manage context | `:context` shows the estimated size in bytes. `:context BYTES` sets the automatic compaction threshold. `:compact` summarizes earlier conversation for the model while preserving the transcript on disk. |
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
@@ -62,6 +62,8 @@ Print mode writes the final answer. JSON mode emits one object per line, ending 
 ```
 
 During an RPC turn, send `steer` or `follow_up` with a `text` field, or send `cancel`. The terminal reply for that turn includes any undelivered input. Once the turn ends, send `session` to inspect the saved transcript, or `ack` after inspecting an interrupted tool call.
+
+[Pi behavior and Rust test mapping](docs/pi-feature-map.md)
 
 ## Test and fuzz
 

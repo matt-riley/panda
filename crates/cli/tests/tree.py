@@ -1,0 +1,88 @@
+"""Drive the normal editor in two processes with an offline provider."""
+import fcntl
+import json
+import os
+import pty
+import select
+import signal
+import sqlite3
+import struct
+import sys
+import tempfile
+import termios
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+
+@contextmanager
+def panda(repo, state, released=None):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(repo)
+        os.environ.update(TERM="xterm-256color", PANDA_HOME=str(state), PANDA_TREE_FIXTURE="1")
+        if released:
+            os.execv(released, [released, "--continue"])
+        os.execv(sys.argv[1], [sys.argv[1], "--exact", "tree_tests::fixture", "--nocapture"])
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 90, 0, 0))
+    pending = bytearray()
+
+    def expect(text):
+        marker = text.encode()
+        deadline = time.monotonic() + 8
+        while marker not in pending:
+            assert time.monotonic() < deadline, (text, bytes(pending[-1200:]))
+            if select.select([fd], [], [], 0.1)[0]:
+                chunk = os.read(fd, 65536)
+                assert chunk, (text, pending)
+                pending.extend(chunk)
+                if b"\x1b[6n" in chunk:
+                    os.write(fd, b"\x1b[1;1R")
+        del pending[:pending.index(marker) + len(marker)]
+
+    try:
+        expect("deepseek-flash")
+        yield lambda s: os.write(fd, s.encode()), expect
+        os.write(fd, b":q\r")
+        expect("\x1b[?1049l")
+    finally:
+        os.close(fd)
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
+
+
+def active_history(state):
+    with sqlite3.connect(state / "sessions.sqlite3") as db:
+        rows = db.execute("select id,data from sessions").fetchall()
+    assert len(rows) == 1 and rows[0][0] == 1
+    return json.loads(rows[0][1])["history"]
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo, state = Path(tmp) / "repo", Path(tmp) / "state"
+    repo.mkdir()
+    with panda(repo, state) as (send, expect):
+        send("Choose stone\r")
+        expect("Granite")
+        expect("deepseek-flash")
+        send(":tree\r")
+        expect("Session tree")
+        send("Choose stone\r")
+        expect("Choose stone")
+        expect("deepseek-flash")
+        send(" instead\r")
+        expect("Quartz")
+        expect("deepseek-flash")
+    assert active_history(state)[0] == {"User": "Choose stone instead"}
+    with panda(repo, state, sys.argv[2] if len(sys.argv) > 2 else None) as (send, expect):
+        for answer in ("Granite", "Quartz"):
+            send(":tree\r")
+            expect("Session tree")
+            send(answer + "\r")
+            expect("session 1 (Code)")
+            expect(answer)
+            expect("deepseek-flash")
+            assert active_history(state)[-1]["Assistant"]["text"] == answer

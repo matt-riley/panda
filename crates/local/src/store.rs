@@ -1,7 +1,9 @@
+mod tree;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
 use rusqlite::{Connection, params};
 use std::{fs, path::Path};
+pub use tree::TreeEntry;
 pub struct SessionPreview {
     pub id: i64,
     pub name: String,
@@ -144,21 +146,19 @@ impl Store for Disk {
         )?)?)
     }
     fn save(&mut self, s: &mut Session) -> Result<()> {
-        let mut next = s.clone();
-        next.revision += 1;
-        let updated = self.conn.execute(
-            "UPDATE sessions SET revision=?,data=? WHERE id=? AND revision=?",
-            params![
-                next.revision,
-                serde_json::to_string(&next)?,
-                self.id,
-                s.revision
-            ],
-        )?;
-        ensure!(updated == 1, "stale session revision");
-        s.revision = next.revision;
-        Ok(())
+        save_snapshot(&self.conn, self.id, s)
     }
+}
+fn save_snapshot(conn: &Connection, id: i64, s: &mut Session) -> Result<()> {
+    let mut next = s.clone();
+    next.revision += 1;
+    let updated = conn.execute(
+        "UPDATE sessions SET revision=?,data=? WHERE id=? AND revision=?",
+        params![next.revision, serde_json::to_string(&next)?, id, s.revision],
+    )?;
+    ensure!(updated == 1, "stale session revision");
+    s.revision = next.revision;
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
