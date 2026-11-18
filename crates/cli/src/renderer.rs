@@ -26,17 +26,25 @@ pub fn ink(color: Color, enabled: bool) -> Style {
 pub const ACCENT: Color = Color::Rgb(112, 201, 209);
 pub const MUTED: Color = Color::Rgb(145, 158, 175);
 
+pub struct PickerResults<'a> {
+    pub ids: &'a [usize],
+    pub pos: usize,
+    pub preview: Option<&'a str>,
+}
 pub fn picker(
     frame: &mut Frame,
     title: &str,
     query: &str,
     labels: &[String],
-    ids: &[usize],
-    pos: usize,
+    results: PickerResults,
     color: bool,
 ) {
+    let PickerResults { ids, pos, preview } = results;
     let area = frame.area();
-    let height = area.height.min(16).min((labels.len().min(10) as u16) + 6);
+    let preview_rows = if preview.is_some() { 6 } else { 0 };
+    let height = area
+        .height
+        .min(labels.len().clamp(1, 10) as u16 + 6 + preview_rows);
     let width = area.width.min(78);
     let card = Rect::new(
         (area.width - width) / 2,
@@ -70,6 +78,19 @@ pub fn picker(
         Paragraph::new("─".repeat(rule.width.into())).style(ink(MUTED, color)),
         rule,
     );
+    let [results, detail] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(preview_rows.min(results.height / 2 + u16::from(results.height > 2))),
+    ])
+    .areas(results);
+    if let Some(preview) = preview {
+        frame.render_widget(
+            Paragraph::new(preview)
+                .block(Block::default().borders(Borders::TOP).title(" Preview "))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+            detail,
+        );
+    }
     let visible = usize::from(results.height);
     let start = pos
         .saturating_sub(visible / 2)

@@ -22,11 +22,14 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run([sys.argv[1]],cwd=repo,env=env,input=b"/quit\n",check=True,stdout=subprocess.DEVNULL)
     with sqlite3.connect(root / "state" / "sessions.sqlite3") as db:
         saved=json.loads(db.execute("select data from sessions where id=1").fetchone()[0])
+        saved["name"]="Quartz branch"
         saved["history"]=[
             {"User":"\n".join(f"older message {i}" for i in range(30))},
             {"Assistant":{"text":"","calls":[{"id":"one","name":"edit","args":{"path":"style.css","old":"serif","new":"mono"}}]}},
             {"Result":{"id":"one","isError":False,"text":"saved\n  1  before\n− 2  font: serif;\n+ 2  font: mono;\n  3  after"}}
         ]
+        saved["history"].insert(0, {"User": "The saffron fixture belongs to the typography test."})
+        saved["history"].append({"User":"Summarize the change."})
         saved["history"].append({"Assistant":{"text":"## Summary\n\nUse **bold** and `inline`.","calls":[]}})
         db.execute("update sessions set data=? where id=1",(json.dumps(saved),))
     pid, fd = pty.fork()
@@ -55,7 +58,17 @@ with tempfile.TemporaryDirectory() as tmp:
         expect('─'.encode())
         expect(b'insert')
         expect(b'deepseek-flash')
-        os.write(fd,b'/resume 1\r')
+        os.write(fd,b':resume\r')
+        expect(b'Resume session')
+        os.write(fd,b'quartz')
+        expect(b'inline')
+        os.write(fd,b'\x1b')
+        expect(b'session 2')
+        os.write(fd,b':resume\r')
+        expect(b'Resume session')
+        os.write(fd,b'saffron')
+        expect(b'typography')
+        os.write(fd,b'\r')
         expect('− 2  font: serif;'.encode())
         expect(b'\x1b[32;48;5;22m')
         expect(b'+ 2  font: mono;')
