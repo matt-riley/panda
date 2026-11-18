@@ -1,3 +1,4 @@
+mod ui;
 use anyhow::{Context, Result, bail, ensure};
 use panda_coding::{Coding, Workspace};
 use panda_core::*;
@@ -13,8 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str =
-    "/plan · /code · /model PROVIDER MODEL · /login PROVIDER · /resume [ID] · /ack · /quit";
+const HELP: &str = "/plan · /code · /model PROVIDER MODEL · /login PROVIDER · /resume [ID] · /ack · /tools · /quit";
 fn key_env(provider: &str) -> Result<&'static str> {
     match provider {
         "deepseek" => Ok("DEEPSEEK_API_KEY"),
@@ -70,7 +70,7 @@ fn safe(s: &str) -> String {
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect()
 }
-fn show(db: &Disk) -> Result<()> {
+fn show(db: &Disk, interactive: bool) -> Result<Mode> {
     let s = db.load()?;
     println!("session {} ({:?})", db.id(), s.mode);
     for m in &s.history {
@@ -79,9 +79,14 @@ fn show(db: &Disk) -> Result<()> {
             Message::Assistant { text, calls } => {
                 println!("{}", safe(text));
                 for c in calls {
-                    println!("[{} {}]", safe(&c.name), safe(&c.id))
+                    if interactive {
+                        println!("{}", ui::header(c))
+                    } else {
+                        println!("[{} {}]", safe(&c.name), safe(&c.id))
+                    }
                 }
             }
+            Message::Result { text, .. } if interactive => println!("{}", ui::result(text, false)),
             Message::Result { id, text, .. } => println!("[{}] {}", safe(id), safe(text)),
         }
     }
@@ -90,7 +95,7 @@ fn show(db: &Disk) -> Result<()> {
             "Interrupted turn. Outstanding tool outcomes are unknown. Inspect the workspace and use /ack to continue."
         );
     }
-    Ok(())
+    Ok(s.mode)
 }
 
 fn main() -> Result<()> {
@@ -137,7 +142,12 @@ fn main() -> Result<()> {
         skills: Library::new(roots),
     };
     let mut db = Disk::open(&state, &root, None)?;
-    show(&db)?;
+    let interactive = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb");
+    let mut editor = interactive.then(ui::editor);
+    let mut mode = show(&db, interactive)?;
     let selected = state.join("model.json");
     let (mut p, mut model): (String, String) = if selected.try_exists()? {
         serde_json::from_slice(&fs::read(&selected)?)?
@@ -154,14 +164,29 @@ fn main() -> Result<()> {
     ctrlc::set_handler(move || signal.stop())?;
     println!("{HELP}");
     loop {
-        if io::stdin().is_terminal() {
-            print!("panda> ");
-            io::stdout().flush()?
-        }
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line)? == 0 {
-            break;
-        }
+        let line = if let Some(editor) = &mut editor {
+            let prompt = ui::Status(format!(
+                "{:?} · {} · {}/{} · session {}",
+                mode,
+                root.file_name()
+                    .unwrap_or(root.as_os_str())
+                    .to_string_lossy(),
+                p,
+                model,
+                db.id()
+            ));
+            match editor.read_line(&prompt)? {
+                reedline::Signal::Success(line) => line,
+                reedline::Signal::CtrlD => break,
+                _ => continue,
+            }
+        } else {
+            let mut line = String::new();
+            if io::stdin().read_line(&mut line)? == 0 {
+                break;
+            }
+            line
+        };
         let line = line.trim();
         if line == "/quit" {
             break;
@@ -181,7 +206,8 @@ fn main() -> Result<()> {
                         Mode::Code
                     };
                     db.save(&mut s)?;
-                    println!("{:?} mode", s.mode)
+                    mode = s.mode;
+                    println!("{mode:?} mode")
                 }
                 "/ack" => acknowledge(&mut db)?,
                 "/resume" => {
@@ -190,7 +216,7 @@ fn main() -> Result<()> {
                         if id != db.id() {
                             db = Disk::open(&state, &root, Some(id))?
                         }
-                        show(&db)?
+                        mode = show(&db, interactive)?
                     } else {
                         println!("Sessions: {:?}", db.list(&root)?)
                     }
@@ -211,6 +237,26 @@ fn main() -> Result<()> {
                     }
                     println!("{} {}", safe(&p), safe(&model))
                 }
+                "/tools" => {
+                    let mut found = false;
+                    for message in db.load()?.history {
+                        match message {
+                            Message::Assistant { calls, .. } => {
+                                for call in calls {
+                                    println!("{} [{}]", ui::header(&call), safe(&call.id));
+                                }
+                            }
+                            Message::Result { id, text, .. } => {
+                                found = true;
+                                println!("[{}] {}", safe(&id), ui::result(&text, true));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !found {
+                        println!("No tool results in this session.");
+                    }
+                }
                 "/help" => println!("{HELP}"),
                 unknown if unknown.starts_with('/') => bail!("unknown command: {HELP}"),
                 _ => {
@@ -226,6 +272,10 @@ fn main() -> Result<()> {
                             Event::Text(s) => {
                                 print!("{}", safe(&s));
                                 let _ = io::stdout().flush();
+                            }
+                            Event::Calling(c) if interactive => println!("\n{}", ui::header(&c)),
+                            Event::Result(s) if interactive => {
+                                println!("{}", ui::result(&s, false))
                             }
                             Event::Calling(c) => println!(
                                 "\n[{} {}] {}",

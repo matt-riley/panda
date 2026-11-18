@@ -20,6 +20,10 @@ For ChatGPT Codex, use `/login openai-codex` and choose browser or device-code s
 
 ## Use a session
 
+The interactive prompt starts in Vim Insert mode. Press `Esc` for Normal mode, use motions such as `w`, `b`, `0` and `$`, and edit with `cw`, `dw` or `u`. Press `i` to insert again. Enter sends the prompt. Alt-Enter inserts a newline in terminals that report the shortcut. Multiline paste stays in the editor until you submit it.
+
+The status line above the input shows the session’s Plan or Code mode, workspace, provider, model and session ID. The input indicator shows the separate Vim editing mode. Tool calls show their command, path or search query and a six-line result preview. Use `/tools` for the session’s full tool results.
+
 - `/plan` enables repository mapping, paginated literal search, file reads, skill lookup and conversational clarification. Type `/code` to enable edits, writes and shell commands.
 - `/resume` lists this workspace’s sessions. `/resume ID` reopens one and displays its transcript and mode. Ctrl-C interrupts an active turn. `/quit` closes Panda.
 - After an interrupted turn, inspect the workspace and use `/ack` to close outstanding calls with an unknown outcome. Panda never reruns the old call during resume.

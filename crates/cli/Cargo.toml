@@ -12,9 +12,11 @@ panda-coding = { path = "../coding" }
 panda-providers = { path = "../providers" }
 ctrlc = "3"
 tempfile = "3"
+reedline = "0.53.0"
 [[bin]]
 name = "panda"
 path = "src/main.rs"
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
 panda-memory = { path = "../memory" }
