@@ -97,3 +97,43 @@ fn version_exits_without_opening_a_session() {
     );
     assert!(!state.exists());
 }
+
+#[test]
+fn fullscreen_editor_uses_standard_vim_and_restores_terminal() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fullscreen.py"))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn rpc_replies_with_correlated_json_and_continue_reopens_session() {
+    let repo = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    for extra in [vec![], vec!["--continue"]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_panda"))
+            .current_dir(repo.path())
+            .env("PANDA_HOME", state.path().join("state"))
+            .args(extra)
+            .args(["--mode", "rpc"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"{\"id\":1,\"type\":\"session\"}\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["id"], 1);
+        assert_eq!(record["session_id"], 1);
+    }
+}

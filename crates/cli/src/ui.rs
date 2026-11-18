@@ -1,20 +1,12 @@
 use panda_core::Call;
-use reedline::{
-    DefaultPrompt, Prompt, PromptEditMode, PromptHistorySearch, PromptViMode, Reedline, Vi,
-};
+use reedline::{DefaultPrompt, Prompt, PromptEditMode, PromptHistorySearch, PromptViMode};
 use std::borrow::Cow;
 
-pub fn editor() -> Reedline {
-    Reedline::create()
-        .with_edit_mode(Box::<Vi>::default())
-        .use_bracketed_paste(true)
-}
+pub struct Status<'a>(pub &'a crate::screen::Screen);
 
-pub struct Status(pub String);
-
-impl Prompt for Status {
+impl Prompt for Status<'_> {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        format!("{}\n", inline(&self.0, 140)).into()
+        self.0.body().into()
     }
     fn render_prompt_right(&self) -> Cow<'_, str> {
         "".into()
@@ -38,7 +30,7 @@ impl Prompt for Status {
     }
 }
 
-fn inline(text: &str, limit: usize) -> String {
+pub fn inline(text: &str, limit: usize) -> String {
     let mut chars = text.chars().map(|c| if c.is_control() { ' ' } else { c });
     let mut out: String = chars.by_ref().take(limit).collect();
     if chars.next().is_some() {
@@ -111,5 +103,16 @@ mod tests {
             prop_assert!(preview.lines().count() <= 7);
             prop_assert!(!preview.chars().any(|c| c.is_control() && c != '\n'));
         }
+    }
+}
+
+#[cfg(test)]
+mod references {
+    #[test]
+    fn resolves_quoted_and_plain_files_but_skips_email() {
+        assert_eq!(
+            crate::attachments::paths("look @src/lib.rs and @\"my file.png\" a@host.test"),
+            vec!["src/lib.rs", "my file.png"]
+        );
     }
 }

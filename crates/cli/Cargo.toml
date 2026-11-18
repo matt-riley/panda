@@ -13,6 +13,13 @@ panda-providers = { path = "../providers" }
 ctrlc = "3"
 tempfile = "3"
 reedline = "0.53.0"
+crossterm = "0.29"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+base64 = "0.22"
+libc = "0.2"
+walkdir = "2"
+shlex = "2"
 [[bin]]
 name = "panda"
 path = "src/main.rs"

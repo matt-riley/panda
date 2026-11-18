@@ -798,7 +798,10 @@ name = "panda-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "crossterm",
  "ctrlc",
+ "libc",
  "panda-coding",
  "panda-core",
  "panda-local",
@@ -807,7 +810,11 @@ dependencies = [
  "proptest",
  "reedline",
  "serde_json",
+ "shlex",
  "tempfile",
+ "unicode-segmentation",
+ "unicode-width",
+ "walkdir",
 ]
 
 [[package]]
