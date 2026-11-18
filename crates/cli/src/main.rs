@@ -1,6 +1,7 @@
 mod active;
 mod attachments;
 mod automation;
+mod markdown;
 mod picker;
 mod renderer;
 mod screen;
@@ -273,7 +274,7 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
             ),
             Message::User(t) => screen.line(Tone::User, &format!("you> {}", safe(t))),
             Message::Assistant { text, calls } => {
-                screen.line(Tone::Text, &safe(text));
+                screen.finish_reply(text);
                 for c in calls {
                     if screen.active {
                         calls_by_id.insert(&c.id, c);

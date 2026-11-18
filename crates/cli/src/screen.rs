@@ -51,6 +51,11 @@ impl Tone {
 }
 
 type Row = (Tone, String);
+#[derive(Clone)]
+enum DisplayRow {
+    Plain(Tone, String),
+    Markdown(ratatui::text::Line<'static>),
+}
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
@@ -163,7 +168,9 @@ pub struct Screen {
     color: bool,
     rows: Vec<Row>,
     // Cache wrapped transcript rows across editor repaints and page navigation.
-    wrapped: Mutex<(usize, Vec<Row>)>,
+    wrapped: Mutex<(usize, Vec<DisplayRow>)>,
+    replies: std::collections::HashMap<usize, crate::markdown::Reply>,
+    current_reply: Option<usize>,
     pub footer: Footer,
     offset: usize,
     input_rows: Arc<AtomicUsize>,
@@ -190,6 +197,8 @@ impl Screen {
             color: std::env::var_os("NO_COLOR").is_none(),
             rows: Vec::new(),
             wrapped: Mutex::default(),
+            replies: Default::default(),
+            current_reply: None,
             offset: 0,
             input_rows: Arc::new(AtomicUsize::new(1)),
             footer: Footer::default(),
@@ -215,7 +224,31 @@ impl Screen {
             let _ = io::stdout().flush();
             return;
         }
-        self.delta(Tone::Text, text);
+        if !text.is_empty() {
+            self.reply().push(text);
+        }
+    }
+    fn reply(&mut self) -> &mut crate::markdown::Reply {
+        self.wrapped.get_mut().unwrap().0 = 0;
+        let index = *self.current_reply.get_or_insert_with(|| {
+            let i = self.rows.len();
+            self.rows.push((Tone::Text, String::new()));
+            i
+        });
+        self.replies.entry(index).or_default()
+    }
+    pub fn end_reply(&mut self) {
+        self.current_reply = None;
+    }
+    pub fn finish_reply(&mut self, text: &str) {
+        if !self.active {
+            println!("{}", safe(text));
+            return;
+        }
+        if !text.is_empty() || self.current_reply.is_some() {
+            self.reply().finish(text);
+        }
+        self.end_reply();
     }
     pub fn delta(&mut self, tone: Tone, text: &str) {
         self.wrapped.get_mut().unwrap().0 = 0;
@@ -234,6 +267,8 @@ impl Screen {
     pub fn clear(&mut self) {
         self.wrapped.get_mut().unwrap().0 = 0;
         self.rows.clear();
+        self.replies.clear();
+        self.current_reply = None;
         self.previews.clear();
         self.tool_rows.clear();
         self.live.clear();
@@ -296,19 +331,29 @@ impl Screen {
                 if i < skip || (*tone == Tone::Thought && !self.thoughts) {
                     continue;
                 }
+                if let Some(reply) = self.replies.get(&i) {
+                    cache
+                        .1
+                        .extend(reply.rows(width).into_iter().map(DisplayRow::Markdown));
+                    continue;
+                }
                 if (self.expanded || self.selected_tool == Some(i))
                     && let Some((end, full)) = self.previews.get(&i)
                 {
                     skip = *end;
                     for line in full.lines() {
-                        cache
-                            .1
-                            .extend(wrap(line, width).into_iter().map(|s| (*tone, s)));
+                        cache.1.extend(
+                            wrap(line, width)
+                                .into_iter()
+                                .map(|s| DisplayRow::Plain(*tone, s)),
+                        );
                     }
                 } else {
-                    cache
-                        .1
-                        .extend(wrap(s, width).into_iter().map(|s| (*tone, s)));
+                    cache.1.extend(
+                        wrap(s, width)
+                            .into_iter()
+                            .map(|s| DisplayRow::Plain(*tone, s)),
+                    );
                 }
             }
         }
@@ -326,8 +371,11 @@ impl Screen {
             .saturating_sub(self.offset.min(cache.1.len().saturating_sub(count)));
         let start = end.saturating_sub(count);
         let mut out = String::new();
-        for (tone, s) in &cache.1[start..end] {
-            out.push_str(&tone.paint(s, self.color));
+        for row in &cache.1[start..end] {
+            out.push_str(&match row {
+                DisplayRow::Plain(tone, s) => tone.paint(s, self.color),
+                DisplayRow::Markdown(line) => crate::markdown::ansi(line, self.color),
+            });
             out.push('\n');
         }
         out.push_str(&"\n".repeat(count.saturating_sub(end - start)));
@@ -376,7 +424,7 @@ impl Screen {
         if area.is_empty() {
             return;
         }
-        let width = usize::from(area.width);
+        let width = usize::from(area.width.saturating_sub(1)).max(1);
         let prompt_width = width.saturating_sub(2).max(1);
         let draft_lines: Vec<_> = draft
             .split('\n')
@@ -404,7 +452,17 @@ impl Screen {
             .1
             .iter()
             .skip(cached.1.len().saturating_sub(room))
-            .map(|(tone, text)| {
+            .map(|row| {
+                let (tone, text) = match row {
+                    DisplayRow::Plain(t, s) => (t, s),
+                    DisplayRow::Markdown(line) => {
+                        return if self.color {
+                            line.clone()
+                        } else {
+                            Line::raw(line.to_string())
+                        };
+                    }
+                };
                 let color = match tone {
                     Tone::Thought | Tone::Dim => MUTED,
                     Tone::Text => Color::Reset,
@@ -612,6 +670,82 @@ impl Screen {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn streamed_reply_matches_reopening_the_saved_session() {
+        use crate::{active::display, show};
+        use panda_core::{Call, Cancel, Emit, Event, Message, Provider, Store, turn};
+        struct Script(&'static str);
+        impl Provider for Script {
+            fn reply(
+                &mut self,
+                _: &str,
+                _: &[Message],
+                _: &[serde_json::Value],
+                _: &Cancel,
+                emit: &mut Emit,
+            ) -> anyhow::Result<(String, Vec<Call>)> {
+                for c in self.0.chars() {
+                    emit(Event::Text(c.to_string()));
+                }
+                Ok((self.0.into(), vec![]))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = panda_local::store::Disk::open(dir.path(), dir.path(), None).unwrap();
+        let mut live = Screen::open(false).unwrap();
+        live.active = true;
+        show(&db, &mut live).unwrap();
+        let text = "## Answer\n\n- **bold** and `inline`\n\n```rs\nfn main() {}\n```";
+        live.line(Tone::User, "you> review");
+        let coding = panda_coding::Coding {
+            workspace: panda_memory::Files(Default::default()),
+            skills: panda_memory::EmptySkills,
+        };
+        let mut completed = 0;
+        turn(
+            &mut Script(text),
+            &mut db,
+            &coding,
+            "review".into(),
+            &Cancel::default(),
+            &mut |event| {
+                if matches!(event, Event::AssistantComplete(_)) {
+                    let before = live.body();
+                    display(event, &mut live, &mut None);
+                    assert_eq!(live.body(), before);
+                    completed += 1;
+                } else {
+                    display(event, &mut live, &mut None);
+                    live.reflow(37);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(completed, 1);
+        assert!(
+            matches!(db.load().unwrap().history.last(),Some(Message::Assistant{text:raw,..}) if raw==text)
+        );
+        let id = db.id();
+        drop(db);
+        let db = panda_local::store::Disk::open(dir.path(), dir.path(), Some(id)).unwrap();
+        let mut resumed = Screen::open(false).unwrap();
+        resumed.active = true;
+        show(&db, &mut resumed).unwrap();
+        assert_eq!(live.body(), resumed.body());
+        for w in [11, 37, 80] {
+            let frame = |s: &Screen| {
+                let mut term =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 30)).unwrap();
+                term.draw(|f| s.draw_working(f, "", std::time::Duration::ZERO))
+                    .unwrap();
+                term.backend().buffer().clone()
+            };
+            assert_eq!(frame(&live), frame(&resumed));
+        }
+        live.active = false;
+        resumed.active = false;
+    }
 
     #[test]
     fn oversized_grapheme_preserves_both_characters() {

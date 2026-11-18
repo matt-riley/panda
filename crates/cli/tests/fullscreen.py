@@ -27,6 +27,7 @@ with tempfile.TemporaryDirectory() as tmp:
             {"Assistant":{"text":"","calls":[{"id":"one","name":"edit","args":{"path":"style.css","old":"serif","new":"mono"}}]}},
             {"Result":{"id":"one","isError":False,"text":"saved\n  1  before\n− 2  font: serif;\n+ 2  font: mono;\n  3  after"}}
         ]
+        saved["history"].append({"Assistant":{"text":"## Summary\n\nUse **bold** and `inline`.","calls":[]}})
         db.execute("update sessions set data=? where id=1",(json.dumps(saved),))
     pid, fd = pty.fork()
     if pid == 0:
@@ -58,6 +59,8 @@ with tempfile.TemporaryDirectory() as tmp:
         expect('− 2  font: serif;'.encode())
         expect(b'\x1b[32;48;5;22m')
         expect(b'+ 2  font: mono;')
+        expect(b'bold')
+        assert b'** and `inline`' not in pending
         expect(b'deepseek-flash')
         os.write(fd,b'\x1b[5~')
         expect(b'older message 0')

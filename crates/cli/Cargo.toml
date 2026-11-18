@@ -21,6 +21,7 @@ libc = "0.2"
 walkdir = "2"
 shlex = "2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+tui-markdown = { version = "0.3.13", default-features = false }
 [[bin]]
 name = "panda"
 path = "src/main.rs"

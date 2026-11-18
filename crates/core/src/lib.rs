@@ -194,6 +194,7 @@ pub enum Event {
     Reasoning(String),
     ToolOutput(String),
     Text(String),
+    AssistantComplete(String),
     Usage(Value),
     Calling(Call),
     Result(String),
@@ -341,6 +342,7 @@ pub fn turn_message(
         if !thought.is_empty() {
             s.history.push(Message::Reasoning(thought));
         }
+        emit(Event::AssistantComplete(text.clone()));
         s.history.push(Message::Assistant {
             text,
             calls: calls.clone(),
