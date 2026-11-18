@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/matt-riley/panda/compare/v0.1.8...v0.1.9) (2026-11-18)
+
+
+### Features
+
+* **cli:** navigate and branch within a session tree ([#19](https://github.com/matt-riley/panda/issues/19)) ([6b42d1d](https://github.com/matt-riley/panda/commit/6b42d1d01136e0a50ecc51bf8b6ccbc5a44e82ac))
+
 ## [0.1.8](https://github.com/matt-riley/panda/compare/v0.1.7...v0.1.8) (2026-11-18)
 
 
