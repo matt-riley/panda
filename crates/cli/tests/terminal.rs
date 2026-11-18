@@ -137,3 +137,38 @@ fn rpc_replies_with_correlated_json_and_continue_reopens_session() {
         assert_eq!(record["session_id"], 1);
     }
 }
+
+#[test]
+fn login_and_model_pickers_accept_provider_names_and_route_gpt() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut p = Command::new(env!("CARGO_BIN_EXE_panda"))
+        .current_dir(repo.path())
+        .env("PANDA_HOME", &state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    p.stdin.take().unwrap().write_all(b"/login\nOpenAI\ncancel\n/model\n/cancel\n/model openrouter openai/gpt-fixture\n/quit\n").unwrap();
+    let out = p.wait_with_output().unwrap();
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        transcript.contains("Choose a login provider"),
+        "{transcript}"
+    );
+    assert!(transcript.contains("Codex login method"), "{transcript}");
+    assert!(
+        transcript.contains("Choose a model provider"),
+        "{transcript}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("model.json")).unwrap(),
+        r#"["openai-codex","gpt-fixture"]"#
+    );
+}
