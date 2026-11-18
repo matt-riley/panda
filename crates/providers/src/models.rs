@@ -3,7 +3,16 @@ use crate::{auth, checked, wire};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::{path::Path, time::Duration};
+pub struct Catalogue {
+    pub models: Vec<(String, Option<u64>)>,
+    pub efforts: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(String, Option<u64>)>> {
+    Ok(catalogue(provider, state, key)?.models)
+}
+
+pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Catalogue> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
@@ -29,6 +38,7 @@ pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(Stri
                 _ => bail!("unknown provider"),
             };
             let v: Value = checked(request.send().await?).await?.json().await?;
+            let mut efforts = std::collections::BTreeMap::new();
             let mut ids: Vec<_> = v["data"]
                 .as_array()
                 .or(v["models"].as_array())
@@ -36,8 +46,18 @@ pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(Stri
                 .iter()
                 .filter(|m| m["visibility"] != "hide")
                 .filter_map(|m| {
+                    let id = m["id"].as_str().or(m["slug"].as_str())?;
+                    if let Some(levels) = m["supported_reasoning_levels"].as_array() {
+                        efforts.insert(
+                            id.to_owned(),
+                            levels
+                                .iter()
+                                .filter_map(|l| l["effort"].as_str().map(str::to_owned))
+                                .collect(),
+                        );
+                    }
                     Some((
-                        m["id"].as_str().or(m["slug"].as_str())?.to_owned(),
+                        id.to_owned(),
                         m["context_window"]
                             .as_u64()
                             .or(m["context_length"].as_u64()),
@@ -46,7 +66,10 @@ pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(Stri
                 .collect();
             ids.sort();
             ids.dedup();
-            Ok(ids)
+            Ok(Catalogue {
+                models: ids,
+                efforts,
+            })
         })
 }
 
