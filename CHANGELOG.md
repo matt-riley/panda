@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/matt-riley/panda/compare/v0.1.6...v0.1.7) (2026-11-18)
+
+
+### Features
+
+* **cli:** complete Normal-mode commands in both prompts ([#15](https://github.com/matt-riley/panda/issues/15)) ([f7426f3](https://github.com/matt-riley/panda/commit/f7426f317cc5aea1395a2cbc355554be1a1b6c82))
+
 ## [0.1.6](https://github.com/matt-riley/panda/compare/v0.1.5...v0.1.6) (2026-11-18)
 
 
