@@ -1,0 +1,4 @@
+data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call","name":"read","arguments":"{}"}}
+
+data: {"type":"response.completed","response":{"status":"completed"}}
+

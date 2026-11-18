@@ -1,0 +1,20 @@
+[package]
+name = "panda-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+panda-core = { path = "../core" }
+panda-local = { path = "../local" }
+panda-coding = { path = "../coding" }
+panda-providers = { path = "../providers" }
+ctrlc = "3"
+tempfile = "3"
+[[bin]]
+name = "panda"
+path = "src/main.rs"
+[dev-dependencies]
+tempfile = "3"
+panda-memory = { path = "../memory" }

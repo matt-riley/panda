@@ -1,0 +1,19 @@
+[tools]
+rust = { version = "1.99.1", components = ["rustfmt", "clippy"] }
+
+[tasks.fmt]
+run = ["cargo fmt --all -- --check", "cargo fmt --manifest-path fuzz/Cargo.toml -- --check"]
+
+[tasks.lint]
+run = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run the complete suite on native macOS, including Seatbelt isolation"
+run = "cargo test --locked --workspace -- --include-ignored"
+
+[tasks.portable-test]
+description = "Exercise the reusable host, agent loop, and providers on Linux"
+run = "cargo test --locked -p panda-core -p panda-coding -p panda-memory -p panda-providers"
+
+[tasks.build]
+run = "cargo build --locked --release -p panda-cli --bin panda"

@@ -1,0 +1,25 @@
+[package]
+name = "panda-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+[package.metadata]
+cargo-fuzz = true
+[dependencies]
+libfuzzer-sys = "0.4"
+panda-core = {path="../crates/core"}
+panda-providers = {path="../crates/providers"}
+[[bin]]
+name = "provider_stream"
+path = "fuzz_targets/provider_stream.rs"
+test = false
+doc = false
+bench = false
+[workspace]
+
+[[bin]]
+name = "subscription_stream"
+path = "fuzz_targets/subscription_stream.rs"
+test = false
+doc = false
+bench = false
