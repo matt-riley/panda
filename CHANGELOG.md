@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/matt-riley/panda/compare/v0.1.5...v0.1.6) (2026-11-18)
+
+
+### Features
+
+* **cli:** edit steering prompts with Vim and run colon commands ([8e82927](https://github.com/matt-riley/panda/commit/8e829277512f07da9ff9aa37620f1046ed479d87))
+
 ## [0.1.5](https://github.com/matt-riley/panda/compare/v0.1.4...v0.1.5) (2026-11-18)
 
 
