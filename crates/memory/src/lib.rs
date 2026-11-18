@@ -19,11 +19,31 @@ impl Store for MemoryStore {
 pub struct Files(pub BTreeMap<String, String>);
 impl Workspace for Files {
     fn invoke(&self, name: &str, args: &Value, _: &Cancel) -> Result<String> {
+        if name == "instructions" {
+            let file = std::path::Path::new(field(args, "path")?);
+            let dirs: Vec<_> = file
+                .parent()
+                .into_iter()
+                .flat_map(std::path::Path::ancestors)
+                .collect();
+            return Ok(dirs
+                .into_iter()
+                .rev()
+                .filter_map(|d| {
+                    let p = d.join("AGENTS.md");
+                    self.0
+                        .get(p.to_str()?)
+                        .map(|text| format!("Instructions from {}:\n{text}", p.display()))
+                })
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
         ensure!(name == "read", "unknown operation");
-        self.0
+        let text = self
+            .0
             .get(field(args, "path")?)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing file"))
+            .ok_or_else(|| anyhow::anyhow!("missing file"))?;
+        panda_coding::read_range(text.as_bytes(), args)
     }
     fn instructions(&self) -> Result<Vec<(String, String)>> {
         Ok(vec![])
