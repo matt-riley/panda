@@ -176,6 +176,9 @@ pub fn run(
                                     screen.commands.push_back(command);
                                 }
                             }
+                            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                                screen.commands.push_back(":copy".into())
+                            }
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => cancel.stop(),
                             (KeyCode::Enter, mods) if !draft.trim().is_empty() => {
                                 let follow = mods.contains(KeyModifiers::ALT);

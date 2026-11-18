@@ -34,7 +34,7 @@ fn fixture() {
                 Message::BranchSummary(summary),
                 Message::User(question),
             ] = history
-                && text == "Granite"
+                && text == "Granite **🐼**\n\n    sample\n"
                 && summary == "Quartz finding"
                 && question == "What survived?"
             {
@@ -45,8 +45,8 @@ fn fixture() {
                 bail!("unexpected branch context");
             };
             let answer = match text.as_str() {
-                "Choose stone" => "Granite",
-                "Choose stone instead" => "Quartz",
+                "Choose stone" => "Granite **🐼**\n\n    sample\n",
+                "Choose stone instead" => "Quartz **🐼**\n\n    sample\n",
                 _ => bail!("unexpected edited prompt: {text}"),
             };
             emit(Event::Text(answer.into()));

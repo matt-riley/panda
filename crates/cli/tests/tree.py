@@ -1,4 +1,5 @@
 """Drive the normal editor in two processes with an offline provider."""
+import base64
 import fcntl
 import json
 import os
@@ -7,6 +8,8 @@ import select
 import signal
 import sqlite3
 import struct
+import subprocess
+import uuid
 import sys
 import tempfile
 import termios
@@ -65,10 +68,25 @@ def active_history(state):
     return json.loads(rows[0][1])["history"]
 
 
+def read_copy():
+    script = """ObjC.import('AppKit'); function run(args){
+        const b=$.NSPasteboard.pasteboardWithName(args[0]);
+        const d=b.dataForType('public.utf8-plain-text');
+        return d.isNil() ? '' : ObjC.unwrap(d.base64EncodedStringWithOptions(0));
+    }"""
+    return base64.b64decode(subprocess.check_output(
+        ["/usr/bin/osascript","-l","JavaScript","-e",script,os.environ["PANDA_TEST_PASTEBOARD"]]
+    )).decode()
+
+
+os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
     with panda(repo, state) as (send, expect):
+        send(":copy\r")
+        expect("No assistant reply")
+        expect("deepseek-flash")
         send("Choose stone\r")
         expect("Granite")
         expect("deepseek-flash")
@@ -89,7 +107,12 @@ with tempfile.TemporaryDirectory() as tmp:
             expect("session 1 (Code)")
             expect(answer)
             expect("deepseek-flash")
-            assert active_history(state)[-1]["Assistant"]["text"] == answer
+            assert active_history(state)[-1]["Assistant"]["text"] == answer + " **🐼**\n\n    sample\n"
+            if len(sys.argv) == 2:
+                send(":copy\r" if answer == "Granite" else "\x18")
+                expect("Copied last reply")
+                expect("deepseek-flash")
+                assert read_copy() == answer + " **🐼**\n\n    sample\n"
 
     source = active_history(state)
     for slow in (True, False):
@@ -110,9 +133,12 @@ with tempfile.TemporaryDirectory() as tmp:
     with panda(repo, state, sys.argv[2] if len(sys.argv) > 2 else None, startup="Quartz finding") as (send, expect):
         saved = active_history(state)
         assert saved[-1] == {"BranchSummary":"Quartz finding"}
-        assert saved[-2]["Assistant"]["text"] == "Granite"
+        assert saved[-2]["Assistant"]["text"] == "Granite **🐼**\n\n    sample\n"
 
     with panda(repo, state) as (send, expect):
+        send(":copy\r")
+        expect("Copied last reply")
+        assert read_copy() == "Granite **🐼**\n\n    sample\n"
         send("What survived?\r")
         expect("Context verified")
         expect("deepseek-flash")

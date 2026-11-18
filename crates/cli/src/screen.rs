@@ -671,6 +671,13 @@ impl Screen {
             ReedlineEvent::ExecuteHostCommand("paste-image".into()),
         );
         let mut normal = default_vi_normal_keybindings();
+        for bindings in [&mut insert, &mut normal] {
+            bindings.add_binding(
+                KeyModifiers::CONTROL,
+                KeyCode::Char('x'),
+                ReedlineEvent::ExecuteHostCommand(":copy".into()),
+            );
+        }
         let mut visual = default_vi_visual_keybindings();
         for bindings in [&mut insert, &mut normal, &mut visual] {
             for (key, name) in [('o', "expand"), ('t', "thoughts")] {
