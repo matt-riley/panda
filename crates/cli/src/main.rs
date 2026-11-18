@@ -75,7 +75,8 @@ fn show(db: &Disk, interactive: bool) -> Result<Mode> {
     println!("session {} ({:?})", db.id(), s.mode);
     for m in &s.history {
         match m {
-            Message::User(t) => println!("you> {}", safe(t)),
+            Message::Reasoning(_) => {}
+            Message::Images { text: t, .. } | Message::User(t) => println!("you> {}", safe(t)),
             Message::Assistant { text, calls } => {
                 println!("{}", safe(text));
                 for c in calls {
@@ -284,7 +285,7 @@ fn main() -> Result<()> {
                                 safe(&c.args.to_string())
                             ),
                             Event::Result(s) => println!("{}", safe(&s)),
-                            Event::Usage(_) => {}
+                            Event::Usage(_) | Event::ToolOutput(_) | Event::Reasoning(_) => {}
                         },
                     )?;
                     println!();

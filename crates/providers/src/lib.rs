@@ -51,6 +51,9 @@ impl Stream {
                 self.finished = true;
             }
             let d = &choice["delta"];
+            if let Some(t) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()) {
+                emit(Event::Reasoning(t.into()));
+            }
             if let Some(t) = d["content"].as_str() {
                 self.text.push_str(t);
                 emit(Event::Text(t.into()))
@@ -101,14 +104,30 @@ pub struct Api {
 }
 fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content":system})];
+    let mut thought = None;
     for msg in history {
         let message = match msg {
+            Message::Reasoning(t) => {
+                thought = Some(t);
+                continue;
+            }
+            Message::Images { text, urls } => {
+                let mut parts = vec![json!({"type":"text","text":text})];
+                parts.extend(
+                    urls.iter()
+                        .map(|u| json!({"type":"image_url","image_url":{"url":u}})),
+                );
+                json!({"role":"user","content":parts})
+            }
             Message::User(text) => json!({"role":"user","content":text}),
             Message::Result { id, text, .. } => {
                 json!({"role":"tool","tool_call_id":id,"content":text})
             }
             Message::Assistant { text, calls } => {
                 let mut m = json!({"role":"assistant","content":text});
+                if let Some(t) = thought.take() {
+                    m["reasoning_content"] = json!(t);
+                }
                 if !calls.is_empty() {
                     m["tool_calls"]=Value::Array(calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.args.to_string()}})).collect())
                 }
@@ -128,23 +147,40 @@ impl Provider for Api {
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<(String, Vec<Call>)> {
+        self.reply_with_effort(system, h, tools, cancel, emit, None)
+    }
+    fn reply_with_effort(
+        &mut self,
+        system: &str,
+        h: &[Message],
+        tools: &[Value],
+        cancel: &Cancel,
+        emit: &mut Emit,
+        effort: Option<&str>,
+    ) -> Result<(String, Vec<Call>)> {
         cancel.check()?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let request = async {
-            let mut body =
-                json!({"model": self.model, "messages": messages(system,h), "stream": true});
+            let mut body = json!({"model": self.model, "messages": messages(system,h), "stream": true, "stream_options":{"include_usage":true}});
+            if let Some(effort) = effort {
+                if self.endpoint.contains("api.deepseek.com") {
+                    body["reasoning_effort"] = json!(effort);
+                } else {
+                    body["reasoning"] = json!({"effort":effort});
+                }
+            }
             if !tools.is_empty() {
                 body["tools"] = tools.into();
             }
-            let mut response = reqwest::Client::new()
+            let response = reqwest::Client::new()
                 .post(&self.endpoint)
                 .bearer_auth(&self.key)
                 .json(&body)
                 .send()
-                .await?
-                .error_for_status()?;
+                .await?;
+            let mut response = checked(response).await?;
             let mut stream = Stream::default();
             while let Some(chunk) = response.chunk().await? {
                 cancel.check()?;
@@ -165,6 +201,29 @@ impl Provider for Api {
     }
 }
 pub mod subscription;
+
+pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let error = response.json::<Value>().await.unwrap_or(Value::Null);
+    let code = error["error"]["code"].as_str().unwrap_or_default();
+    let message = error["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    if matches!(code, "context_length_exceeded" | "context_window_exceeded")
+        || (status.as_u16() == 400
+            && message.contains("context")
+            && (message.contains("exceed") || message.contains("maximum")))
+    {
+        return Err(panda_core::ContextOverflow.into());
+    }
+    anyhow::bail!("provider returned HTTP {status} {code}")
+}
+
+pub mod models;
 
 #[cfg(test)]
 mod tests {

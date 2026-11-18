@@ -82,6 +82,17 @@ impl Provider for Subscription {
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<(String, Vec<Call>)> {
+        self.reply_with_effort(system, h, tools, cancel, emit, None)
+    }
+    fn reply_with_effort(
+        &mut self,
+        system: &str,
+        h: &[Message],
+        tools: &[Value],
+        cancel: &Cancel,
+        emit: &mut Emit,
+        effort: Option<&str>,
+    ) -> Result<(String, Vec<Call>)> {
         cancel.check()?;
         let client = client()?;
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -93,17 +104,21 @@ impl Provider for Subscription {
                 "unknown subscription provider"
             );
             let cred = auth::credential(&self.state, auth::CODEX, &client).await?;
-            let mut response = client
+            let mut body = wire::responses_body(&self.model, system, h, tools);
+            if let Some(e) = effort {
+                body["reasoning"] = serde_json::json!({"effort":e,"summary":"auto"});
+            }
+            let response = client
                 .post("https://chatgpt.com/backend-api/codex/responses")
                 .bearer_auth(wire::string(&cred, "access")?)
                 .header("chatgpt-account-id", wire::string(&cred, "accountId")?)
                 .header("OpenAI-Beta", "responses=experimental")
                 .header("originator", "panda")
                 .header("Accept", "text/event-stream")
-                .json(&wire::responses_body(&self.model, system, h, tools))
+                .json(&body)
                 .send()
-                .await?
-                .error_for_status()?;
+                .await?;
+            let mut response = crate::checked(response).await?;
             let mut stream = wire::Responses::default();
             while let Some(bytes) = response.chunk().await? {
                 stream.push(&bytes, emit)?
