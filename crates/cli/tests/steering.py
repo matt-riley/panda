@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 if not sent and b"RUNNINGFIXTURE" in output:
                     os.write(fd, b"wrong\x1b")
                     time.sleep(0.08)
-                    os.write(fd, b"0cwcorrection\rnext\x1b\r")
+                    os.write(fd, b":mo\t\r0cwcorrection\rnext\x1b\r")
                     sent = True
         if time.monotonic() >= deadline:
             os.kill(pid, signal.SIGKILL)

@@ -8,7 +8,65 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct State {
     vi: Vi,
-    command: Option<reedline::LineBuffer>,
+    command: Option<CommandLine>,
+}
+
+#[derive(Default)]
+struct CommandLine {
+    line: reedline::LineBuffer,
+    // Keep the initial matches while Tab cycles through inserted names.
+    cycle: Option<(Vec<&'static str>, usize)>,
+}
+
+impl CommandLine {
+    fn matches(&self) -> Vec<&'static str> {
+        let text = self.line.get_buffer();
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        if self.line.insertion_point() != end {
+            return Vec::new();
+        }
+        crate::command_matches(&text[..end]).collect()
+    }
+
+    fn complete(&mut self, backwards: bool) {
+        let (matches, index) = match self.cycle.take() {
+            Some((matches, index)) => {
+                let count = matches.len();
+                let next = if backwards {
+                    (index + count - 1) % count
+                } else {
+                    (index + 1) % count
+                };
+                (matches, next)
+            }
+            None => {
+                let matches = self.matches();
+                if matches.is_empty() {
+                    return;
+                }
+                let index = if backwards { matches.len() - 1 } else { 0 };
+                (matches, index)
+            }
+        };
+        let name = &matches[index][1..];
+        let end = self.line.insertion_point();
+        self.line.replace_range(..end, name);
+        self.line.set_insertion_point(name.len());
+        self.cycle = Some((matches, index));
+    }
+
+    fn hints(&self) -> String {
+        if let Some((matches, index)) = &self.cycle {
+            // Put the selected name first so it stays visible on narrow terminals.
+            return matches[*index..]
+                .iter()
+                .chain(&matches[..*index])
+                .copied()
+                .collect::<Vec<_>>()
+                .join("  ");
+        }
+        self.matches().join("  ")
+    }
 }
 
 /// The painter and key dispatcher see the same modal state, including a
@@ -37,7 +95,8 @@ impl Vim {
 
     pub fn label(&self) -> String {
         let state = self.0.lock().unwrap();
-        if let Some(line) = &state.command {
+        if let Some(command) = &state.command {
+            let line = &command.line;
             let (left, right) = line.get_buffer().split_at(line.insertion_point());
             return format!(":{left}▏{right}");
         }
@@ -47,6 +106,16 @@ impl Vim {
             _ => "insert",
         }
         .into()
+    }
+
+    pub fn hints(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .command
+            .as_ref()
+            .map(CommandLine::hints)
+            .filter(|s| !s.is_empty())
     }
 
     pub fn commanding(&self) -> bool {
@@ -63,8 +132,19 @@ impl EditMode for Vim {
     }
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let mut state = self.0.lock().unwrap();
-        if let Some(line) = &mut state.command {
-            match Event::from(event) {
+        if let Some(command) = &mut state.command {
+            let raw = Event::from(event);
+            if let Event::Key(key) = &raw {
+                if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                    command.complete(
+                        key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
+                    );
+                    return ReedlineEvent::Repaint;
+                }
+                command.cycle = None;
+            }
+            let line = &mut command.line;
+            match raw {
                 Event::Key(key) => match key.code {
                     KeyCode::Enter => {
                         let command = format!(":{}", line.get_buffer().trim());
@@ -91,7 +171,10 @@ impl EditMode for Vim {
                     }
                     _ => {}
                 },
-                Event::Paste(s) => line.insert_str(&crate::ui::inline(&s, usize::MAX)),
+                Event::Paste(s) => {
+                    command.cycle = None;
+                    line.insert_str(&crate::ui::inline(&s, usize::MAX));
+                }
                 _ => {}
             }
             return ReedlineEvent::Repaint;
@@ -225,7 +308,76 @@ mod tests {
         assert_eq!(prompt.editor.current_buffer_contents(), "acd");
     }
 
+    #[test]
+    fn editing_a_completion_refilters_and_arguments_are_left_alone() {
+        let vim = vim();
+        let mut editor = Reedline::create().with_edit_mode(Box::new(vim.clone()));
+        let mut prompt = Steering {
+            editor: &mut editor,
+            vim,
+        };
+        prompt.input(key(KeyCode::Esc));
+        for c in ":mo".chars() {
+            prompt.input(key(KeyCode::Char(c)));
+        }
+        prompt.input(key(KeyCode::Tab));
+        prompt.input(key(KeyCode::Char('s')));
+        prompt.input(key(KeyCode::Tab));
+        assert_eq!(prompt.vim.hints().as_deref(), Some(":models"));
+        prompt.input(Event::Paste(" openrouter".into()));
+        prompt.input(key(KeyCode::BackTab));
+        assert!(prompt.vim.hints().is_none());
+        assert_eq!(
+            prompt.input(key(KeyCode::Enter)).as_deref(),
+            Some(":models openrouter")
+        );
+    }
+
     proptest! {
+        #[test]
+        fn command_completion_key_sequences(
+            prefix in prop::sample::select(vec!["mo", "q", "res", "unknown", "🐼"]),
+            cycles in prop::collection::vec(any::<bool>(), 1..40),
+            argument in "[a-z🐼é]{0,20}",
+            cancel in any::<bool>()
+        ) {
+            let vim = vim();
+            let mut editor = Reedline::create().with_edit_mode(Box::new(vim.clone()));
+            let mut prompt = Steering { editor: &mut editor, vim: vim.clone() };
+            prompt.replace("keep 🐼 draft".into());
+            prompt.input(key(KeyCode::Esc));
+            prompt.input(key(KeyCode::Char('0')));
+            prompt.input(key(KeyCode::Char(':')));
+            // Complete the first word with an existing argument to its right.
+            prompt.input(Event::Paste(format!("{prefix} {argument}")));
+            prompt.input(key(KeyCode::Home));
+            for _ in prefix.chars() { prompt.input(key(KeyCode::Right)); }
+            let names: &[&str] = match prefix {
+                "mo" => &["model","models"], "q" => &["q","quit"], "res" => &["resume"], _ => &[],
+            };
+            let mut selected = None;
+            for back in cycles {
+                let code = if back {KeyCode::BackTab} else {KeyCode::Tab};
+                prop_assert_eq!(prompt.input(key(code)), None);
+                if !names.is_empty() {
+                    let n = names.len();
+                    selected = Some(match selected {
+                        None if back => n - 1, None => 0,
+                        Some(i) if back => (i+n-1)%n, Some(i) => (i+1)%n,
+                    });
+                }
+                let expected = selected.map_or(prefix, |i: usize| names[i]);
+                prop_assert_eq!(vim.label(), format!(":{expected}▏ {argument}"));
+            }
+            let name = selected.map_or(prefix, |i| names[i]);
+            let expected = format!(":{name} {argument}").trim_end().to_owned();
+            let keycode = if cancel { KeyCode::Esc } else { KeyCode::Enter };
+            prop_assert_eq!(prompt.input(key(keycode)), (!cancel).then_some(expected));
+            prop_assert_eq!(prompt.editor.current_buffer_contents(), "keep 🐼 draft");
+            prop_assert_eq!(prompt.editor.current_insertion_point(), 0);
+            prop_assert_eq!(vim.label(), "normal");
+        }
+
         #[test]
         fn steering_key_sequences_follow_a_grapheme_model(actions in prop::collection::vec(0u8..10, 1..80)) {
             let vim = vim();

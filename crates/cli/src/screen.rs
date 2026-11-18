@@ -144,7 +144,7 @@ impl Footer {
             &format!(
                 "{}\n{}\n{}",
                 "─".repeat(width),
-                line(&self.location),
+                line(self.vim.hints().as_deref().unwrap_or(&self.location)),
                 line(&stats)
             ),
             color,
