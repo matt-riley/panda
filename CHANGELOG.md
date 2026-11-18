@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/matt-riley/panda/compare/v0.1.10...v0.1.11) (2026-11-18)
+
+
+### Features
+
+* **cli:** copy the last reply on the active branch ([#23](https://github.com/matt-riley/panda/issues/23)) ([7b88ecf](https://github.com/matt-riley/panda/commit/7b88ecf50323682fc3e57f667da75c847f67feb5))
+
 ## [0.1.10](https://github.com/matt-riley/panda/compare/v0.1.9...v0.1.10) (2026-11-18)
 
 
