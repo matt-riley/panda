@@ -35,6 +35,16 @@ impl Subscription {
         self.login_with_cancel(&Cancel::default())
     }
     pub fn login_with_cancel(&self, cancel: &Cancel) -> Result<()> {
+        let browser =
+            match prompt("Codex login method [browser/device_code] (default browser):")?.as_str() {
+                "" | "browser" => true,
+                "device_code" => false,
+                "cancel" | "/cancel" => bail!("login cancelled"),
+                _ => bail!("unknown login method"),
+            };
+        self.login_with_method(cancel, browser)
+    }
+    pub fn login_with_method(&self, cancel: &Cancel, browser: bool) -> Result<()> {
         let client = client()?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -43,12 +53,6 @@ impl Subscription {
             self.provider == auth::CODEX,
             "unknown subscription provider"
         );
-        let browser =
-            match prompt("Codex login method [browser/device_code] (default browser):")?.as_str() {
-                "" | "browser" => true,
-                "device_code" => false,
-                _ => bail!("unknown login method"),
-            };
         let token = rt.block_on(cancellable(cancel, async {
             if browser {
                 auth::browser_login(&client).await
