@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/matt-riley/panda/compare/v0.1.11...v0.1.12) (2026-11-18)
+
+
+### Features
+
+* **core:** recover transient requests and compact against the model window ([#25](https://github.com/matt-riley/panda/issues/25)) ([6ca88f8](https://github.com/matt-riley/panda/commit/6ca88f8f06821969ab013b7ad6fb82ed5c053f9c))
+
 ## [0.1.11](https://github.com/matt-riley/panda/compare/v0.1.10...v0.1.11) (2026-11-18)
 
 
