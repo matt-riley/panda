@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/matt-riley/panda/compare/v0.1.12...v0.1.13) (2026-11-19)
+
+
+### Features
+
+* add opt-in read-only Codemode ([#27](https://github.com/matt-riley/panda/issues/27)) ([24ee26f](https://github.com/matt-riley/panda/commit/24ee26fa1f30d70fa1f6235706b6aadf368583fc))
+
 ## [0.1.12](https://github.com/matt-riley/panda/compare/v0.1.11...v0.1.12) (2026-11-18)
 
 
