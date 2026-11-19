@@ -82,6 +82,17 @@ Print mode writes the final answer. JSON mode emits one object per line, ending 
 
 To follow up on a specific conversation, pass its numeric `session_id` from the JSON `done` object to either output mode, for example `panda --print --session 42 "Explain the first finding"`. The ID must identify an existing session in the current workspace. A JSON follow-up returns the same ID. The `--session` flag conflicts with `--continue` and `--no-session`.
 
+Import a Pi v3 JSONL file in the workspace where you want to continue it. Import prints a new Panda session ID. For example, if it prints `{"session_id":42}`, run:
+
+```sh
+panda --import-session review.jsonl
+panda --print --session 42 "Continue the review"
+panda --export-session 42 continued.jsonl
+pi --session continued.jsonl
+```
+
+Import and export also accept a trailing `--session-dir DIR`. Export creates a new file and includes all branches. Pi opens the selected branch, including its compaction checkpoint. Imported entries retain their IDs, parent links and extension payloads. The exported header points to the importing workspace. Panda uses its own configured model and tools when continuing. For Panda-authored entries that lack original timestamps or model metadata, the export uses the time of first export and identifies the model as unknown.
+
 Use `--session-dir DIR` to choose where a print or JSON run creates and looks up sessions, for example `panda --print --session-dir ../review-sessions --continue "Summarize the review"`. The SQLite database and session locks live in that directory. Both `--session ID` and `--continue` look there for conversations in the current workspace. Choose a private directory outside the workspace and configured toolchains. Panda creates it if needed. Credentials, model settings, and user instructions still come from `PANDA_HOME`, which is also the default session store. With `--no-session`, Panda skips the session directory entirely.
 
 For print and JSON runs, put options before the prompt. Use `--model MODEL` for an exact model ID on the configured provider, or add `--provider PROVIDER` to select a different provider. `--thinking LEVEL` accepts the same levels as `:thinking`, including `default`. These choices apply to this invocation. Add `--no-session` to keep the conversation in memory. In this mode the JSON session ID is `null`, and `--continue` is incompatible. Add `--codemode` to the same command to enable Codemode.

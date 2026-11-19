@@ -339,6 +339,44 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     Ok(s.mode)
 }
 
+fn transfer_session(args: &[String]) -> Result<()> {
+    let root = std::env::current_dir()?.canonicalize()?;
+    let native = Native::new(&root, &std::env::current_exe()?)?;
+    let (args, dir) = match args {
+        [args @ .., flag, dir] if flag == "--session-dir" => {
+            (args, native.session_dir(Path::new(dir))?)
+        }
+        _ => (args, state_dir()?),
+    };
+    match args {
+        [flag, file] if flag == "--import-session" => {
+            let input = std::io::BufReader::new(std::fs::File::open(file)?);
+            let disk = Disk::import_pi(&dir, &root, input)?;
+            println!("{}", serde_json::json!({"session_id":disk.id()}));
+        }
+        [flag, id, file] if flag == "--export-session" => {
+            let mut disk = Disk::open(
+                &dir,
+                &root,
+                Some(id.parse().context("expected numeric session ID")?),
+            )?;
+            let path = Path::new(file);
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+            disk.export_pi(std::io::BufWriter::new(temp.as_file_mut()))?;
+            temp.persist_noclobber(path)
+                .with_context(|| format!("creating export {file}"))?;
+        }
+        _ => anyhow::bail!(
+            "expected --import-session FILE or --export-session ID FILE, optionally followed by --session-dir DIR"
+        ),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     run(args, provider)
@@ -371,9 +409,15 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes Pi v3 JSONL.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
+    }
+    if args
+        .first()
+        .is_some_and(|a| matches!(a.as_str(), "--import-session" | "--export-session"))
+    {
+        return transfer_session(&args);
     }
     let interactive_terminal = io::stdin().is_terminal()
         && io::stdout().is_terminal()

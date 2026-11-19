@@ -1,3 +1,4 @@
+mod pi;
 mod tree;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
@@ -45,6 +46,22 @@ impl Disk {
                 s.checkpoint = None;
             }
         }
+        if !s.context_edits.is_empty() {
+            // A fork starts a new tree with the visible path as its seed.
+            let mut boundaries = vec![0];
+            for i in 0..s.history.len() {
+                boundaries.push(boundaries[i] + s.context_edits.get(&i).map_or(1, Vec::len));
+            }
+            if let Some(cp) = &mut s.checkpoint {
+                cp.through = boundaries[cp.through];
+            }
+            for u in &mut s.usage {
+                u.through = boundaries[u.through];
+                u.checkpoint_through = boundaries[u.checkpoint_through];
+            }
+            s.history = s.resolved(0..s.history.len());
+            s.context_edits.clear();
+        }
         s.name = name.into();
         s.parent = Some(self.id);
         s.revision = 0;
@@ -91,16 +108,27 @@ impl Disk {
         Ok(sessions)
     }
     fn open_seed(dir: &Path, repo: &Path, id: Option<i64>, seed: &Session) -> Result<Self> {
+        Self::open_initialized(dir, repo, id, seed, |_, _| Ok(()))
+    }
+
+    fn open_initialized(
+        dir: &Path,
+        repo: &Path,
+        id: Option<i64>,
+        seed: &Session,
+        initialize: impl FnOnce(&rusqlite::Transaction, i64) -> Result<()>,
+    ) -> Result<Self> {
         let path = dir.join("sessions.sqlite3");
         if let Some(id) = id {
             ensure!(path.try_exists()?, "unknown session {id}");
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)")?;
         let root = repo.to_str().context("non UTF-8 workspace")?;
+        let tx = conn.transaction()?;
         let id = match id {
             Some(id) => {
-                let owner: String = conn
+                let owner: String = tx
                     .query_row("SELECT repo FROM sessions WHERE id=?", [id], |r| r.get(0))
                     .optional()?
                     .with_context(|| format!("unknown session {id}"))?;
@@ -108,11 +136,11 @@ impl Disk {
                 id
             }
             None => {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO sessions(repo,data) VALUES (?,?)",
                     params![root, serde_json::to_string(seed)?],
                 )?;
-                conn.last_insert_rowid()
+                tx.last_insert_rowid()
             }
         };
         let lock = fs::OpenOptions::new()
@@ -122,6 +150,8 @@ impl Disk {
             .write(true)
             .open(dir.join(format!("session-{id}.lock")))?;
         lock.try_lock().context("session already open")?;
+        initialize(&tx, id)?;
+        tx.commit()?;
         Ok(Self {
             conn,
             id,

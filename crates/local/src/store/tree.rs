@@ -1,7 +1,7 @@
 use super::{Disk, save_snapshot};
 use anyhow::{Result, ensure};
 use panda_core::{Cancel, Message, Session, Store};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 
 pub struct TreeEntry {
@@ -15,23 +15,33 @@ pub struct TreeEntry {
 
 // History is append-only between navigations. Archive its new suffix on demand,
 // keeping the normal turn write path and legacy session snapshots unchanged.
-const ANCESTORS: &str = "WITH RECURSIVE path(id,parent,depth) AS (
+pub(super) const ANCESTORS: &str = "WITH RECURSIVE path(id,parent,depth) AS (
     SELECT id,parent,depth FROM tree_nodes WHERE session=?1 AND id=?2
     UNION ALL SELECT n.id,n.parent,n.depth FROM tree_nodes n JOIN path p ON n.id=p.parent
     WHERE n.session=?1) ";
 
-fn sync(conn: &Connection, id: i64, session: &Session) -> Result<i64> {
-    ensure!(
-        !session.active,
-        "inspect the interrupted turn and use :ack before navigating"
-    );
+pub(super) fn schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tree_nodes (
         id INTEGER PRIMARY KEY, session INTEGER NOT NULL, parent INTEGER NOT NULL,
         depth INTEGER NOT NULL, message TEXT NOT NULL, usage TEXT, checkpoint TEXT);
         CREATE INDEX IF NOT EXISTS tree_session ON tree_nodes(session);
-        CREATE TABLE IF NOT EXISTS tree_heads(session INTEGER PRIMARY KEY, tip INTEGER NOT NULL);",
+        CREATE TABLE IF NOT EXISTS tree_heads(session INTEGER PRIMARY KEY, tip INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS pi_context_edits(node INTEGER PRIMARY KEY,start INTEGER NOT NULL,end INTEGER NOT NULL,replacement TEXT NOT NULL);",
     )?;
+    Ok(())
+}
+
+pub(super) fn sync(conn: &Connection, id: i64, session: &Session) -> Result<i64> {
+    ensure!(
+        !session.active,
+        "inspect the interrupted turn and use :ack before navigating"
+    );
+    archive(conn, id, session)
+}
+
+pub(super) fn archive(conn: &Connection, id: i64, session: &Session) -> Result<i64> {
+    schema(conn)?;
     let (mut tip, depth): (i64,usize) = conn.query_row(
         "SELECT coalesce(h.tip,0), coalesce(n.depth,0) FROM sessions s
          LEFT JOIN tree_heads h ON h.session=s.id LEFT JOIN tree_nodes n ON n.id=h.tip WHERE s.id=?",
@@ -47,10 +57,9 @@ fn sync(conn: &Connection, id: i64, session: &Session) -> Result<i64> {
         )?;
         tip = conn.last_insert_rowid();
     }
-    set_head(conn, id, tip)?;
     // Usage and compaction boundaries belong to a specific path. In particular,
     // a later summary from a sibling must never enter the next model request.
-    let mut stmt = conn.prepare(&(ANCESTORS.to_owned() + "SELECT id FROM path ORDER BY depth"))?;
+    let mut stmt = conn.prepare(&(ANCESTORS.to_owned() + "SELECT n.id FROM path JOIN tree_nodes n USING(id) WHERE n.message != 'null' ORDER BY n.id"))?;
     let path = stmt
         .query_map([id, tip], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -62,19 +71,87 @@ fn sync(conn: &Connection, id: i64, session: &Session) -> Result<i64> {
             )?;
         }
     }
-    if let Some(cp) = &session.checkpoint
-        && let Some(node) = cp.through.checked_sub(1).and_then(|i| path.get(i))
-    {
-        conn.execute(
-            "UPDATE tree_nodes SET checkpoint=? WHERE id=?",
-            params![serde_json::to_string(cp)?, node],
-        )?;
+    if let Some(cp) = &session.checkpoint {
+        let raw = serde_json::to_string(cp)?;
+        let previous: Option<String> = conn.query_row(&(ANCESTORS.to_owned() +
+            "SELECT n.checkpoint FROM path JOIN tree_nodes n USING(id) WHERE n.checkpoint IS NOT NULL ORDER BY n.id DESC LIMIT 1"),
+            [id,tip], |r| r.get(0)).optional()?;
+        if previous.as_ref() != Some(&raw) {
+            // A checkpoint is created on this branch, even when its retained
+            // suffix starts at a node shared with a sibling.
+            if session.history.len() == depth {
+                // The selected node already exists. A new checkpoint becomes
+                // its child so existing descendants and raw imports stay intact.
+                conn.execute("INSERT INTO tree_nodes(session,parent,depth,message,checkpoint) VALUES (?,?,?,'null',?)",
+                    params![id,tip,depth,raw])?;
+                tip = conn.last_insert_rowid();
+            } else {
+                conn.execute(
+                    "UPDATE tree_nodes SET checkpoint=? WHERE id=?",
+                    params![raw, tip],
+                )?;
+            }
+        }
     }
+    set_head(conn, id, tip)?;
     Ok(tip)
 }
 
-fn set_head(conn: &Connection, id: i64, tip: i64) -> Result<()> {
+pub(super) fn set_head(conn: &Connection, id: i64, tip: i64) -> Result<()> {
     conn.execute("INSERT INTO tree_heads(session,tip) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET tip=excluded.tip",[id,tip])?;
+    Ok(())
+}
+
+pub(super) fn restore_path(
+    conn: &Connection,
+    id: i64,
+    tip: i64,
+    session: &mut Session,
+) -> Result<()> {
+    session.history.clear();
+    session.context_edits.clear();
+    session.usage.clear();
+    session.checkpoint = None;
+    {
+        let mut stmt=conn.prepare(&(ANCESTORS.to_owned()+"SELECT n.message,n.usage,n.checkpoint,e.start,e.end,e.replacement FROM path p JOIN tree_nodes n ON n.id=p.id LEFT JOIN pi_context_edits e ON e.node=n.id ORDER BY n.id"))?;
+        let mut rows = stmt.query([id, tip])?;
+        while let Some(r) = rows.next()? {
+            if let Some(message) = serde_json::from_str(&r.get::<_, String>(0)?)? {
+                session.history.push(message);
+            }
+            if let Some(start) = r.get::<_, Option<usize>>(3)? {
+                let end: usize = r.get(4)?;
+                for slot in start..end {
+                    session.context_edits.insert(slot, vec![]);
+                }
+                session
+                    .context_edits
+                    .insert(start, serde_json::from_str(&r.get::<_, String>(5)?)?);
+            }
+            if let Some(u) = r.get::<_, Option<String>>(1)? {
+                session.usage.push(serde_json::from_str(&u)?);
+            }
+            if let Some(c) = r.get::<_, Option<String>>(2)? {
+                session.checkpoint = Some(serde_json::from_str(&c)?);
+            }
+        }
+    }
+    // An imported partial tool round has unknown outcomes. Let Panda's usual
+    // acknowledgement path close it without ever dispatching historical calls.
+    let mut completed = std::collections::HashSet::new();
+    for msg in session.history.iter().rev() {
+        match msg {
+            Message::Result { id, .. } => {
+                completed.insert(id);
+            }
+            Message::Reasoning(_) => {}
+            Message::Assistant { calls, .. } => {
+                session.active = calls.iter().any(|c| !completed.contains(&c.id));
+                break;
+            }
+            _ => break,
+        }
+    }
     Ok(())
 }
 
@@ -84,7 +161,9 @@ fn destination(conn: &Connection, session: i64, node: i64) -> Result<(i64, Optio
         [session, node],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let message: Message = serde_json::from_str(&raw)?;
+    let Some(message) = serde_json::from_str::<Option<Message>>(&raw)? else {
+        return Ok((node, None));
+    };
     let (tip, draft) = match message {
         Message::BranchSummary(_) => (node, None),
         Message::User(_) | Message::Images { .. } => (parent, Some(message)),
@@ -101,7 +180,7 @@ impl Disk {
         let mut children: HashMap<i64, Vec<(i64, bool, Option<String>)>> = HashMap::new();
         {
             let mut stmt=tx.prepare("SELECT id,parent, json_type(message,'$.User') IS NOT NULL OR json_type(message,'$.Images') IS NOT NULL,
-                substr(coalesce('Branch summary · ' || json_extract(message,'$.BranchSummary'),json_extract(message,'$.User'), json_extract(message,'$.Images.text'),
+                substr(coalesce(CASE WHEN message='null' THEN CASE WHEN checkpoint IS NULL THEN 'Session metadata' ELSE 'Compaction checkpoint' END END, 'Branch summary · ' || json_extract(message,'$.BranchSummary'),json_extract(message,'$.User'), json_extract(message,'$.Images.text'),
                 CASE WHEN json_array_length(message,'$.Assistant.calls')=0 THEN json_extract(message,'$.Assistant.text') END),1,512)
                 FROM tree_nodes WHERE session=? ORDER BY id DESC")?;
             let mut rows = stmt.query([self.id])?;
@@ -158,7 +237,7 @@ impl Disk {
             let (target, _) = destination(&tx, self.id, node)?;
             let ancestors = |tip| -> Result<Vec<i64>> {
                 let mut stmt =
-                    tx.prepare(&(ANCESTORS.to_owned() + "SELECT id FROM path ORDER BY depth"))?;
+                    tx.prepare(&(ANCESTORS.to_owned() + "SELECT n.id FROM path JOIN tree_nodes n USING(id) WHERE n.message != 'null' ORDER BY n.id"))?;
                 Ok(stmt
                     .query_map([self.id, tip], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?)
@@ -175,7 +254,7 @@ impl Disk {
         if common == session.history.len() {
             return self.navigate(node);
         }
-        let text = generate(&session.history[common..])?;
+        let text = generate(&session.resolved(common..session.history.len()))?;
         ensure!(!text.trim().is_empty(), "empty branch summary");
         cancel.check()?;
         self.switch(node, Some((text, cancel)))
@@ -187,24 +266,7 @@ impl Disk {
         let previous = sync(&tx, self.id, &session)?;
         let (tip, draft) = destination(&tx, self.id, node)?;
         if tip != previous {
-            session.history.clear();
-            session.usage.clear();
-            session.checkpoint = None;
-            {
-                let mut stmt=tx.prepare(&(ANCESTORS.to_owned()+"SELECT n.message,n.usage,n.checkpoint FROM path p JOIN tree_nodes n ON n.id=p.id ORDER BY p.depth"))?;
-                let mut rows = stmt.query([self.id, tip])?;
-                while let Some(r) = rows.next()? {
-                    session
-                        .history
-                        .push(serde_json::from_str(&r.get::<_, String>(0)?)?);
-                    if let Some(u) = r.get::<_, Option<String>>(1)? {
-                        session.usage.push(serde_json::from_str(&u)?);
-                    }
-                    if let Some(c) = r.get::<_, Option<String>>(2)? {
-                        session.checkpoint = Some(serde_json::from_str(&c)?);
-                    }
-                }
-            }
+            restore_path(&tx, self.id, tip, &mut session)?;
             set_head(&tx, self.id, tip)?;
             if let Some((text, cancel)) = &summary {
                 session.history.push(Message::BranchSummary(text.clone()));
