@@ -174,7 +174,21 @@ impl<'a> Codemode<'a> {
 
 impl Toolset for Codemode<'_> {
     fn system(&self) -> Result<String> {
-        self.inner.system()
+        let mut prompt = self.inner.system()?;
+        prompt.push_str(
+            r#"
+For repository-wide match counts or rankings, start with one codemode call. search already covers the workspace. Aggregate each page inside the script and stop when next_offset is null.
+Example: count lines matching "FIXME" across the repository:
+let offset = 0, count = 0;
+do {
+    const page = tools.search({query: "FIXME", offset});
+    count += page.items.length;
+    offset = page.next_offset;
+} while (offset !== null);
+text(count);
+For per-file results, group the items by their path in the same loop and emit only the requested aggregate."#,
+        );
+        Ok(prompt)
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         let mut schemas = self.inner.schemas(mode);
