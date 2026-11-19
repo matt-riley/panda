@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/matt-riley/panda/compare/v0.1.14...v0.1.15) (2026-11-19)
+
+
+### Features
+
+* support tool selection for print and JSON runs ([#36](https://github.com/matt-riley/panda/issues/36)) ([ded2efc](https://github.com/matt-riley/panda/commit/ded2efc93ed5b556ecda8b03334f484657049694))
+
 ## [0.1.14](https://github.com/matt-riley/panda/compare/v0.1.13...v0.1.14) (2026-11-19)
 
 
