@@ -11,6 +11,7 @@ pub struct TreeEntry {
     pub starts_branch: bool,
     pub is_prompt: bool,
     pub text: String,
+    pub label: Option<String>,
     pub current: bool,
 }
 
@@ -178,6 +179,16 @@ impl Disk {
         let s = self.load()?;
         let tx = self.conn.transaction()?;
         let tip = sync(&tx, self.id, &s)?;
+        let mut stmt = tx.prepare(
+            "SELECT l.node,l.label FROM tree_labels l JOIN tree_nodes n ON n.id=l.node
+            WHERE n.session=? AND l.label IS NOT NULL",
+        )?;
+        let mut labels = stmt
+            .query_map([self.id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        drop(stmt);
         let mut children: HashMap<i64, Vec<(i64, bool, Option<String>)>> = HashMap::new();
         {
             let mut stmt=tx.prepare("SELECT id,parent, json_type(message,'$.User') IS NOT NULL OR json_type(message,'$.Images') IS NOT NULL,
@@ -201,6 +212,7 @@ impl Disk {
                     id,
                     is_prompt,
                     text,
+                    label: labels.remove(&id),
                     branch_depth,
                     starts_branch,
                     current: id == tip,
@@ -217,6 +229,24 @@ impl Disk {
         }
         tx.commit()?;
         Ok(entries)
+    }
+
+    pub fn set_tree_label(&mut self, node: i64, text: &str) -> Result<()> {
+        let mut session = self.load()?;
+        let tx = self.conn.transaction()?;
+        schema(&tx)?;
+        let label = text.trim();
+        let updated = tx.execute(
+            "INSERT INTO tree_labels(node,label,stamp)
+             SELECT id,NULLIF(?3,''),strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM tree_nodes
+             WHERE session=?1 AND id=?2
+             ON CONFLICT(node) DO UPDATE SET label=excluded.label,stamp=excluded.stamp",
+            params![self.id, node, label],
+        )?;
+        ensure!(updated == 1, "unknown tree entry");
+        save_snapshot(&tx, self.id, &mut session)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Seed a separate session from the selected prompt's ancestry without moving this tree's head.

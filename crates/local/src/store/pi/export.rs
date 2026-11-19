@@ -165,14 +165,38 @@ pub(super) fn write_entries(
         }
         last = tail;
     }
-    let active = &nodes[&tip].tail;
+    let mut active = nodes[&tip].tail.clone();
+    let mut edits = conn.prepare(
+        "SELECT l.node,l.label,l.stamp FROM tree_labels l
+        JOIN tree_nodes n ON n.id=l.node WHERE n.session=? AND l.stamp IS NOT NULL ORDER BY l.node",
+    )?;
+    let mut rows = edits.query([sid])?;
+    while let Some(row) = rows.next()? {
+        let target: i64 = row.get(0)?;
+        let link = &nodes[&target];
+        // A standalone native checkpoint has a compaction record but no message entry.
+        let target_id = link
+            .entry
+            .as_ref()
+            .or(link.tail.as_ref())
+            .context("label target has no Pi entry")?;
+        let id = fresh_id(&format!("label-{target}"));
+        let mut record = json!({"type":"label","id":id,"parentId":active,"targetId":target_id,
+                                "timestamp":row.get::<_,String>(2)?});
+        if let Some(label) = row.get::<_, Option<String>>(1)? {
+            record["label"] = label.into();
+        }
+        writeln!(out, "{record}")?;
+        active = Some(id);
+        last.clone_from(&active);
+    }
     if name != imported_name(conn, sid)? {
         writeln!(
             out,
             "{}",
             json!({"type":"session_info","name":name,"id":fresh_id("name"),"parentId":active,"timestamp":now})
         )?;
-    } else if active != &last {
+    } else if active != last {
         // Pi selects the final record on reopen, even for an interior branch.
         writeln!(
             out,

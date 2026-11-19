@@ -25,6 +25,25 @@ fn schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// A null stamp means the original label event is already in pi_records.
+// Local edits get their own timestamp and are emitted once on export.
+pub(super) fn migrate_labels(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE TABLE tree_labels(node INTEGER PRIMARY KEY,label TEXT,stamp TEXT)")?;
+    if conn.table_exists(None, "pi_records")? {
+        conn.execute_batch(
+            "INSERT OR REPLACE INTO tree_labels(node,label)
+             SELECT t.node,NULLIF(json_extract(e.raw,'$.label'),'') FROM pi_records e
+             JOIN tree_nodes event ON event.id=e.node
+             JOIN pi_records t ON t.external_id=json_extract(e.raw,'$.targetId')
+             JOIN tree_nodes target ON target.id=t.node AND target.session=event.session
+             WHERE json_extract(e.raw,'$.type')='label'
+               AND (json_type(e.raw,'$.label') IS NULL OR json_type(e.raw,'$.label') IN ('text','null'))
+             ORDER BY e.node",
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Default)]
 struct Position {
     node: i64,
@@ -186,6 +205,15 @@ fn import_entry(
         conn.execute(
             "INSERT INTO pi_context_edits VALUES (?,?,?,?)",
             params![pos.node, target.before, target.depth, replacement],
+        )?;
+    }
+    if kind == "label"
+        && let Some(target) = e["targetId"].as_str().and_then(|id| entries.get(id))
+        && (e["label"].is_string() || e["label"].is_null())
+    {
+        conn.execute(
+            "INSERT OR REPLACE INTO tree_labels(node,label) VALUES (?,NULLIF(?,''))",
+            params![target.node, e["label"].as_str()],
         )?;
     }
     entries.insert(id.to_owned(), pos);

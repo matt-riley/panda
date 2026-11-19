@@ -715,32 +715,47 @@ fn run(
                     mode = show(&db, &mut screen)?;
                 }
                 ":tree" if interactive => {
-                    let entries = db.tree()?;
+                    let mut entries = db.tree()?;
                     if entries.is_empty() {
                         screen.line(Tone::Dim, "This session has no prompts or answers yet.");
                         return Ok(());
                     }
-                    let Some((node, action)) = picker::tree(&entries)? else {
-                        return Ok(());
-                    };
-                    let draft = match action {
-                        picker::TreeAction::Fork => {
-                            let (child, prompt) = db.fork_prompt(&state, &root, node)?;
-                            db = child;
-                            Some(prompt)
-                        }
-                        picker::TreeAction::Switch => db.navigate(node)?,
-                        picker::TreeAction::Summarize => {
-                            cancel.reset();
-                            db.navigate_summarized(node, &cancel, |messages| {
-                                eprintln!("Summarizing branch… Ctrl-C to cancel");
-                                summarize_branch(
-                                    provider(&state, &p, &model)?.as_mut(),
-                                    messages,
-                                    &cancel,
-                                )
-                            })?
-                        }
+                    let mut selection =
+                        picker::Selection::at(entries.iter().position(|e| e.current).unwrap_or(0));
+                    let draft = loop {
+                        let Some((node, action)) = picker::tree(&entries, &mut selection)? else {
+                            return Ok(());
+                        };
+                        break match action {
+                            picker::TreeAction::EditLabel => {
+                                let entry = entries.iter_mut().find(|e| e.id == node).unwrap();
+                                let current = entry.label.as_deref().unwrap_or_default();
+                                if let Some(label) = picker::edit_label(current)?
+                                    && label != current
+                                {
+                                    db.set_tree_label(node, &label)?;
+                                    entry.label = (!label.is_empty()).then_some(label);
+                                }
+                                continue;
+                            }
+                            picker::TreeAction::Fork => {
+                                let (child, prompt) = db.fork_prompt(&state, &root, node)?;
+                                db = child;
+                                Some(prompt)
+                            }
+                            picker::TreeAction::Switch => db.navigate(node)?,
+                            picker::TreeAction::Summarize => {
+                                cancel.reset();
+                                db.navigate_summarized(node, &cancel, |messages| {
+                                    eprintln!("Summarizing branch… Ctrl-C to cancel");
+                                    summarize_branch(
+                                        provider(&state, &p, &model)?.as_mut(),
+                                        messages,
+                                        &cancel,
+                                    )
+                                })?
+                            }
+                        };
                     };
                     screen.clear();
                     mode = show(&db, &mut screen)?;
