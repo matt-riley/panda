@@ -35,6 +35,8 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 
 ## Prompt, tools and sessions
 
+In plan and code mode, `read` accepts UTF-8 text files and images. PNG, JPEG and WebP images can be up to 8 MiB each. Panda recognizes images by their contents and sends the original bytes to the model. Use `offset` and `limit` for text line ranges. In Codemode, `tools.read({path: "diagram.png"})` returns a short description to the script and attaches the image when the script succeeds.
+
 In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new":"after"}` replacement or a batch such as `{"path":"src/app.rs","edits":[{"old":"fn check()","new":"fn verify()"},{"old":"    check();","new":"    verify();"}]}`. Each target must occur exactly once in the original file. Edits may be listed in any order. A valid batch writes the file once and returns one numbered diff. A missing, ambiguous, or overlapping target rejects the entire batch.
 
 | To do this | In Panda |
@@ -61,9 +63,9 @@ Each invocation starts a fresh QuickJS worker under macOS Seatbelt. The script c
 
 `tools.ls()` lists the workspace root. Pass `{path: "src"}` to list the immediate entries in a directory. Each item contains its `name` and `type` (file, directory, symlink, or other). Listings include dotfiles and ignored names, report symlinks without following them, and return up to 50 entries in lexical order. Pass `next_offset` back as `offset` with the same path for the next page. An empty directory returns an empty page. A missing path produces an error.
 
-Search and map honor workspace and nested `.gitignore` rules before returning up to 50 matching items per page. A later `!` rule can re-include a file if its parent directories are visible. Pass `next_offset` back as `offset` with the same arguments until it is `null`. Search items contain `path`, one-based `line`, and `text`. A positive `context` adds `before` and `after` arrays of text in file order, clipped at file boundaries. Each line is limited to 500 characters. Only matching lines count toward the offset. A context-heavy page can end early to fit the 1 MiB tool-result limit. Map items are paths. `tools.read({path, offset, limit})` returns text and accepts an optional line offset and limit. Use `text(value)` to select what goes into the saved tool result and the next model request. Nested calls appear live in the terminal and as `nested_call` events in JSON and RPC.
+Search and map honor workspace and nested `.gitignore` rules before returning up to 50 matching items per page. A later `!` rule can re-include a file if its parent directories are visible. Pass `next_offset` back as `offset` with the same arguments until it is `null`. Search items contain `path`, one-based `line`, and `text`. A positive `context` adds `before` and `after` arrays of text in file order, clipped at file boundaries. Each line is limited to 500 characters. Only matching lines count toward the offset. A context-heavy page can end early to fit the 1 MiB tool-result limit. Map items are paths. Use `text(value)` to select the text included in the saved tool result and the next model request. Nested calls appear live in the terminal and as `nested_call` events in JSON and RPC.
 
-A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls and 16 KiB of selected output. Ctrl-C cancels the worker and its active workspace read.
+A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls, 16 KiB of selected text and 12 MiB of base64-encoded image URLs. Ctrl-C cancels the worker and its active workspace read.
 
 ## Scripting
 

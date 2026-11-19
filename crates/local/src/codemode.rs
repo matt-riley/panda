@@ -2,7 +2,7 @@
 mod vm;
 
 use anyhow::{Context, Result, ensure};
-use panda_core::{Call, Cancel, Emit, Event, Mode, Toolset};
+use panda_core::{Call, Cancel, Emit, Event, Mode, ToolOutput, Toolset};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -20,6 +20,8 @@ const SCRIPT_BYTES: usize = 64 * 1024;
 const OUTPUT_BYTES: usize = 16 * 1024;
 const ARG_BYTES: usize = 16 * 1024;
 const MAX_CALLS: usize = 64;
+// Bound the total retained across nested calls, including base64 expansion.
+const MAX_IMAGE_URL_BYTES: usize = 12 * 1024 * 1024;
 const HELPERS: &[(&str, &str)] = &[
     (
         "ls",
@@ -35,7 +37,7 @@ const HELPERS: &[(&str, &str)] = &[
     ),
     (
         "read",
-        "tools.read({path,offset?,limit?}) returns a string.",
+        "tools.read({path,offset?,limit?}) returns file text or a short image description. Reading a PNG, JPEG or WebP attaches the original image when the script succeeds; only text supports line ranges.",
     ),
 ];
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
@@ -109,7 +111,13 @@ impl<'a> Codemode<'a> {
             .filter(|(name, _)| schemas.iter().any(|s| s["function"]["name"] == *name))
     }
 
-    fn execute(&self, mode: Mode, call: &Call, cancel: &Cancel, emit: &mut Emit) -> Result<String> {
+    fn execute(
+        &self,
+        mode: Mode,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<ToolOutput> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
         let allowed: Vec<_> = Self::helpers(&self.inner.schemas(mode))
@@ -151,12 +159,14 @@ impl<'a> Codemode<'a> {
             let result = (|| {
                 send(&mut output, &(script, &allowed))?;
                 let mut count = 0;
+                let mut images = Vec::new();
+                let mut image_bytes = 0;
                 loop {
                     match receive(&mut input, REQUEST_FRAME)? {
                         WorkerMessage::Finished(result) => {
                             let text = result.map_err(anyhow::Error::msg)?;
                             ensure!(text.len() <= OUTPUT_BYTES, "Codemode output exceeds 16 KiB");
-                            return Ok(text);
+                            return Ok(ToolOutput { text, images });
                         }
                         WorkerMessage::Invoke { name, args } => {
                             cancel.check()?;
@@ -183,13 +193,21 @@ impl<'a> Codemode<'a> {
                             cancel.check()?;
                             let reply = self
                                 .inner
-                                .run(mode, &child_call, &nested)
-                                .and_then(|s| {
+                                .run_stream(mode, &child_call, &nested, &mut |_| {})
+                                .and_then(|result| {
                                     ensure!(
-                                        s.len() <= crate::MAX_TOOL_RESULT_BYTES,
+                                        result.text.len() <= crate::MAX_TOOL_RESULT_BYTES,
                                         "nested result exceeds 1 MiB"
                                     );
-                                    Ok(s)
+                                    let added =
+                                        result.images.iter().map(|url| url.len()).sum::<usize>();
+                                    ensure!(
+                                        image_bytes + added <= MAX_IMAGE_URL_BYTES,
+                                        "Codemode image budget exceeded"
+                                    );
+                                    image_bytes += added;
+                                    images.extend(result.images);
+                                    Ok(result.text)
                                 })
                                 .map_err(|err| err.to_string());
                             send(&mut output, &reply)?;
@@ -236,13 +254,14 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Limits: 64 calls, 10 seconds, 16 KiB output."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Limits: 64 calls, 10 seconds, 16 KiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
     }
     fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
         self.run_stream(mode, call, cancel, &mut |_| {})
+            .map(|output| output.text)
     }
     fn run_stream(
         &self,
@@ -250,7 +269,7 @@ impl Toolset for Codemode<'_> {
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<String> {
+    ) -> Result<ToolOutput> {
         if call.name == "codemode" {
             self.execute(mode, call, cancel, emit)
         } else {

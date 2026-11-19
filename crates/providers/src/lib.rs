@@ -105,7 +105,11 @@ pub struct Api {
 fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content":system})];
     let mut thought = None;
-    for msg in history {
+    // Chat tool messages accept text. Finish every outstanding tool response
+    // before sending its images in a multimodal user message.
+    let mut image_parts = Vec::new();
+    let mut history = history.iter().peekable();
+    while let Some(msg) = history.next() {
         let message = match msg {
             Message::BranchSummary(s) => {
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")})
@@ -123,7 +127,14 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
                 json!({"role":"user","content":parts})
             }
             Message::User(text) => json!({"role":"user","content":text}),
-            Message::Result { id, text, .. } => {
+            Message::Result {
+                id, text, images, ..
+            } => {
+                image_parts.extend(
+                    images
+                        .iter()
+                        .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
+                );
                 json!({"role":"tool","tool_call_id":id,"content":text})
             }
             Message::Assistant { text, calls } => {
@@ -138,6 +149,9 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
             }
         };
         out.push(message);
+        if !image_parts.is_empty() && !matches!(history.peek(), Some(Message::Result { .. })) {
+            out.push(json!({"role":"user","content":std::mem::take(&mut image_parts)}));
+        }
     }
     out
 }

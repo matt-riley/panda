@@ -39,6 +39,7 @@ impl Toolset for SelectedTools<'_> {
     }
     fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
         self.run_stream(mode, call, cancel, &mut |_| {})
+            .map(|output| output.text)
     }
     fn run_stream(
         &self,
@@ -46,7 +47,7 @@ impl Toolset for SelectedTools<'_> {
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<String> {
+    ) -> Result<ToolOutput> {
         anyhow::ensure!(
             self.names.contains(&call.name),
             "tool {} unavailable for this run",
@@ -62,8 +63,8 @@ pub trait Workspace {
         args: &Value,
         cancel: &Cancel,
         _emit: &mut Emit,
-    ) -> Result<String> {
-        self.invoke(name, args, cancel)
+    ) -> Result<ToolOutput> {
+        self.invoke(name, args, cancel).map(Into::into)
     }
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String>;
     fn instructions(&self) -> Result<Vec<(String, String)>>;
@@ -96,8 +97,9 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
     }
     fn run(&self, mode: Mode, c: &Call, k: &Cancel) -> Result<String> {
         self.run_stream(mode, c, k, &mut |_| {})
+            .map(|output| output.text)
     }
-    fn run_stream(&self, mode: Mode, c: &Call, k: &Cancel, emit: &mut Emit) -> Result<String> {
+    fn run_stream(&self, mode: Mode, c: &Call, k: &Cancel, emit: &mut Emit) -> Result<ToolOutput> {
         k.check()?;
         anyhow::ensure!(
             catalog(mode)
@@ -107,8 +109,8 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
             c.name
         );
         match c.name.as_str() {
-            "skill_search" => self.skills.search(field(&c.args, "query")?),
-            "skill_load" => self.skills.load(field(&c.args, "path")?),
+            "skill_search" => self.skills.search(field(&c.args, "query")?).map(Into::into),
+            "skill_load" => self.skills.load(field(&c.args, "path")?).map(Into::into),
             _ => self.workspace.invoke_stream(&c.name, &c.args, k, emit),
         }
     }
@@ -146,7 +148,7 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "read",
-            "Read a UTF-8 workspace file. Optional one-based offset (first line) and limit (line count).",
+            "Read a workspace file as UTF-8 text or a PNG, JPEG or WebP image. Text accepts a one-based offset (first line) and limit (line count).",
             &["path"],
             false,
         ),
@@ -218,6 +220,18 @@ fn catalog(mode: Mode) -> Vec<Value> {
             json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}})
         })
         .collect()
+}
+
+pub fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[255, 216, 255]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 /// Select one-based lines without allocating skipped lines. Preserve original newlines.

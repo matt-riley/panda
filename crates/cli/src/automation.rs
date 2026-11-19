@@ -206,7 +206,7 @@ impl Toolset for PromptedTools<'_> {
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<String> {
+    ) -> Result<panda_core::ToolOutput> {
         self.tools.run_stream(mode, call, cancel, emit)
     }
 }

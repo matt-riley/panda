@@ -182,6 +182,7 @@ mod tests {
             Message::Result {
                 id: "1".into(),
                 text: "hidden tool output".into(),
+                images: vec![],
                 is_error: false,
             },
             Message::Assistant {

@@ -1,9 +1,11 @@
 mod edit;
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use panda_coding::field;
+use panda_core::ToolOutput;
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::{
@@ -32,13 +34,10 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
             page(root, name, args, offset)
         };
     }
-    let path = field(args, "path")?;
-    ensure!(
-        Path::new(path)
-            .components()
-            .all(|p| matches!(p, Component::Normal(_) | Component::CurDir)),
-        "expected relative workspace path"
-    );
+    if name == "read" {
+        return Ok(read_output(root, args)?.text);
+    }
+    let path = relative_path(args)?;
     if name == "instructions" {
         let mut output = String::new();
         let parents: Vec<_> = Path::new(path)
@@ -60,12 +59,6 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
     }
     let path = root.join(path);
     match name {
-        "read" if args.get("offset").is_some() || args.get("limit").is_some() => {
-            let file = fs::File::open(path)?;
-            ensure!(file.metadata()?.is_file(), "expected regular file");
-            panda_coding::read_range(std::io::BufReader::new(file), args)
-        }
-        "read" => read(&path),
         "write" | "edit" => {
             let parent = path
                 .parent()
@@ -96,13 +89,71 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
         _ => bail!("unknown file tool"),
     }
 }
+fn relative_path(args: &Value) -> Result<&str> {
+    let path = field(args, "path")?;
+    ensure!(
+        Path::new(path)
+            .components()
+            .all(|p| matches!(p, Component::Normal(_) | Component::CurDir)),
+        "expected relative workspace path"
+    );
+    Ok(path)
+}
+
+pub(crate) const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+pub fn read_output(root: &Path, args: &Value) -> Result<ToolOutput> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let path = relative_path(args)?;
+    let root = root.canonicalize()?;
+    let target = root.join(path).canonicalize()?;
+    let relative = target
+        .strip_prefix(&root)
+        .context("read target outside workspace")?;
+    // Follow in-workspace aliases once, then open the resolved components
+    // relative to pinned directory descriptors. A swapped symlink fails closed.
+    let mut fd = fs::File::open(&root)?.into();
+    let mut parts = relative.iter().peekable();
+    while let Some(part) = parts.next() {
+        let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+        if parts.peek().is_some() {
+            flags |= OFlags::DIRECTORY;
+        }
+        fd = openat(&fd, part, flags, Mode::empty())?;
+    }
+    let file = fs::File::from(fd);
+    ensure!(file.metadata()?.is_file(), "expected regular file");
+    let mut reader = BufReader::new(file);
+    let ranged = args.get("offset").is_some() || args.get("limit").is_some();
+    if let Some(mime) = panda_coding::image_mime_type(reader.fill_buf()?) {
+        ensure!(!ranged, "offset and limit apply only to text files");
+        let mut bytes = Vec::new();
+        reader
+            .take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= MAX_IMAGE_BYTES, "image exceeds 8 MiB");
+        return Ok(ToolOutput {
+            text: format!("Read {mime} ({} bytes)", bytes.len()),
+            images: vec![format!("data:{mime};base64,{}", STANDARD.encode(bytes))],
+        });
+    }
+    if ranged {
+        return panda_coding::read_range(reader, args).map(Into::into);
+    }
+    read_text(reader).map(Into::into)
+}
+
 pub(super) fn read(path: &Path) -> Result<String> {
     read_file(fs::File::open(path)?)
 }
 pub(super) fn read_file(f: fs::File) -> Result<String> {
     ensure!(f.metadata()?.is_file(), "expected regular file");
+    read_text(f)
+}
+fn read_text(input: impl Read) -> Result<String> {
     let mut bytes = Vec::new();
-    f.take(1_048_577).read_to_end(&mut bytes)?;
+    input.take(1_048_577).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1_048_576, "file exceeds 1 MiB");
     Ok(String::from_utf8(bytes)?)
 }

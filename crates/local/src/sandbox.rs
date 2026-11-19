@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use panda_coding::{Workspace, field};
-use panda_core::Cancel;
+use panda_core::{Cancel, ToolOutput};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -148,6 +148,7 @@ impl Native {
         fn drain(
             mut pipe: impl Read + Send + 'static,
             updates: Option<std::sync::mpsc::Sender<String>>,
+            limit: usize,
         ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
             std::thread::spawn(move || {
                 let mut out = Vec::new();
@@ -157,7 +158,7 @@ impl Native {
                     if n == 0 {
                         break;
                     }
-                    let count = n.min(1_100_000 - out.len());
+                    let count = n.min(limit - out.len());
                     if let Some(tx) = &updates
                         && count > 0
                     {
@@ -168,13 +169,21 @@ impl Native {
                 Ok(out)
             })
         }
+        let image_capable_read = cmd == self.worker && args == ["--file-worker", "read"];
         let stdout = drain(
             child.stdout.take().unwrap(),
             (cmd == Path::new("/bin/sh")).then(|| updates.clone()),
+            if image_capable_read {
+                // An 8 MiB base64 image or 1 MiB of JSON-escaped UTF-8 text.
+                crate::files::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024
+            } else {
+                1_100_000
+            },
         );
         let stderr = drain(
             child.stderr.take().unwrap(),
             (cmd == Path::new("/bin/sh")).then_some(updates),
+            1_100_000,
         );
         let start = Instant::now();
         let result = loop {
@@ -203,6 +212,10 @@ impl Native {
             emit(panda_core::Event::ToolOutput(chunk));
         }
         let error = String::from_utf8_lossy(&err);
+        if image_capable_read {
+            ensure!(status.success(), "command {status}: {error}");
+            return Ok(String::from_utf8(out)?);
+        }
         ensure!(
             status.success(),
             "command {status}: {error} {}",
@@ -214,6 +227,7 @@ impl Native {
 impl Workspace for Native {
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         self.invoke_stream(name, args, cancel, &mut |_| {})
+            .map(|output| output.text)
     }
     fn invoke_stream(
         &self,
@@ -221,25 +235,32 @@ impl Workspace for Native {
         args: &Value,
         cancel: &Cancel,
         emit: &mut panda_core::Emit,
-    ) -> Result<String> {
+    ) -> Result<ToolOutput> {
         if name == "shell" {
-            return self.exec(
-                Path::new("/bin/sh"),
-                &["-c", field(args, "command")?],
-                &[],
-                true,
-                cancel,
-                emit,
-            );
+            return self
+                .exec(
+                    Path::new("/bin/sh"),
+                    &["-c", field(args, "command")?],
+                    &[],
+                    true,
+                    cancel,
+                    emit,
+                )
+                .map(Into::into);
         }
-        self.exec(
+        let result = self.exec(
             &self.worker,
             &["--file-worker", name],
             &serde_json::to_vec(args)?,
             matches!(name, "write" | "edit"),
             cancel,
             emit,
-        )
+        )?;
+        if name == "read" {
+            Ok(serde_json::from_str(&result)?)
+        } else {
+            Ok(result.into())
+        }
     }
     fn instructions(&self) -> Result<Vec<(String, String)>> {
         use std::os::unix::fs::OpenOptionsExt;

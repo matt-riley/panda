@@ -64,16 +64,7 @@ pub fn prepare_with_prefix(
         file.take(8_388_609).read_to_end(&mut bytes)?;
         total += bytes.len();
         ensure!(total <= 8_388_608, "attachments exceed 8 MiB");
-        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            Some("image/png")
-        } else if bytes.starts_with(&[255, 216, 255]) {
-            Some("image/jpeg")
-        } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-            Some("image/webp")
-        } else {
-            None
-        };
-        if let Some(mime) = mime {
+        if let Some(mime) = panda_coding::image_mime_type(&bytes) {
             urls.push(format!("data:{mime};base64,{}", STANDARD.encode(bytes)));
         } else {
             let content = std::str::from_utf8(&bytes).context("unsupported attachment format")?;
