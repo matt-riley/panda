@@ -58,12 +58,26 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         assert result.returncode == 0, (result.stdout, result.stderr)
         return result.stdout.splitlines()
 
+    def done(output):
+        events = [json.loads(line) for line in output if line.startswith("{")]
+        assert events[-1]["type"] == "done"
+        return events[-1]
+
     # A fresh state directory should never acquire a database or lock for an ephemeral run.
     run(["--print", "--session", "1", "probe"], "", error="unknown session")
     run(["--mode", "json", "--model", "one-off", "--no-session"], "stdin-only prompt")
     path, body = requests.pop()
     assert path == "/deepseek" and body["model"] == "one-off"
     assert body["messages"][-1]["content"] == "stdin-only prompt"
+    ephemeral = root / "unused store"
+    for interface in (["--print"], ["--mode", "json"]):
+        output = run(interface + ["--session-dir", str(ephemeral), "--no-session", "ephemeral"], "")
+        assert len(requests) == 1
+        _, body = requests.pop()
+        assert body["messages"][-1]["content"] == "ephemeral"
+        if interface == ["--mode", "json"]:
+            assert done(output)["session_id"] is None
+        assert not ephemeral.exists()
     assert {p.name for p in state.iterdir()} == {"model.json"}
 
     # Resolve the Codex alias and validate the effort using its model catalogue.
@@ -199,11 +213,6 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert [m["content"] for m in body["messages"] if m["role"] == "user"] == [
         "seed conversation", "follow up", "last turn"]
 
-    def done(output):
-        events = [json.loads(line) for line in output if line.startswith("{")]
-        assert events[-1]["type"] == "done"
-        return events[-1]
-
     def new_session(prompt):
         result = done(run(["--mode", "json", prompt], ""))
         assert len(requests) == 1
@@ -243,3 +252,52 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         for conflict in ("--continue", "--no-session"):
             run(interface + [conflict, "--session", str(a), "probe"], "", error="conflicts")
     assert snapshot() == before
+
+    # Both stores have session 1, but the default store's latest session is B.
+    custom = root / "custom store"
+    selected = ["--session-dir", "../custom store"]
+    output = run(["--mode", "json"] + selected + ["Custom review"], "")
+    assert done(output)["session_id"] == 1
+    assert len(requests) == 1
+    _, body = requests.pop()
+    assert body["model"] == "saved-model"
+    assert {p.name for p in custom.iterdir()} == {"sessions.sqlite3", "session-1.lock"}
+    assert snapshot() == before
+
+    def followups(store_flags, selector, session_id, users):
+        for interface in (["--print"], ["--mode", "json"]):
+            follow_up = f"Follow-up {len(users)} on {users[0]}"
+            output = run(interface + store_flags + selector + [follow_up], "")
+            assert len(requests) == 1
+            _, body = requests.pop()
+            users.append(follow_up)
+            assert [m["content"] for m in body["messages"] if m["role"] == "user"] == users
+            if interface == ["--mode", "json"]:
+                assert done(output)["session_id"] == session_id
+            else:
+                assert "reviewed" in output
+
+    custom_users = ["Custom review"]
+    followups(selected, ["--session", "1"], 1, custom_users)
+    followups(selected, ["--continue"], 1, custom_users)
+    run(["--print"] + selected + ["--session", str(b), "probe"], "", error="unknown session")
+    run(["--print", "--session-dir", str(custom), "--session", "1", "probe"], "",
+        cwd=foreign, error="another workspace")
+    assert snapshot() == before
+    custom_db = custom / "sessions.sqlite3"
+    custom_before = custom_db.read_bytes()
+    followups([], ["--session", "1"], 1, ["seed conversation", "follow up", "last turn"])
+    followups([], ["--continue"], b, ["Review B"])
+    assert custom_db.read_bytes() == custom_before
+
+    workspace_store = repo / "unsafe-store"
+    workspace_store.mkdir(mode=0o700)
+    alias = root / "alias"
+    alias.symlink_to(workspace_store)
+    run(["--print", "--session-dir", str(alias), "probe"], "", error="workspace overlaps")
+    assert not list(workspace_store.iterdir())
+    shared = root / "shared-store"
+    shared.mkdir()
+    shared.chmod(0o755)
+    run(["--print", "--session-dir", str(shared), "probe"], "", error="private directory")
+    assert not list(shared.iterdir())

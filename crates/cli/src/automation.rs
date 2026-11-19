@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     io::{self, BufRead, IsTerminal, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, mpsc},
     time::Duration,
 };
@@ -25,6 +25,7 @@ pub struct Options {
     pub tools: Option<BTreeSet<String>>,
     pub resume: bool,
     pub session_id: Option<i64>,
+    pub session_dir: Option<PathBuf>,
     pub no_session: bool,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -56,6 +57,14 @@ impl Options {
                     out.tools = Some(names);
                 }
                 "--no-session" => out.no_session = true,
+                "--session-dir" => {
+                    ensure!(out.session_dir.is_none(), "specify --session-dir once");
+                    let dir = it
+                        .next()
+                        .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                        .context("expected a directory after --session-dir")?;
+                    out.session_dir = Some(PathBuf::from(dir));
+                }
                 "--session" => {
                     ensure!(out.session_id.is_none(), "specify --session once");
                     let id = it
@@ -122,6 +131,7 @@ impl Options {
         }
         if out.no_session
             || out.session_id.is_some()
+            || out.session_dir.is_some()
             || out.model.is_some()
             || out.thinking.is_some()
             || out.provider.is_some()
@@ -439,6 +449,11 @@ mod tests {
             "--print --session 1 --session 2",
             "--print --session 1 -c",
             "--print --session 1 --no-session",
+            "--session-dir sessions",
+            "--mode rpc --session-dir sessions",
+            "--print --session-dir",
+            "--print --session-dir --continue",
+            "--print --session-dir one --session-dir two",
             "--mode rpc --model foo",
             "--no-session",
             "--tools read",
