@@ -11,6 +11,7 @@ import threading
 
 requests = []
 next_calls = []
+length_stops = []
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -18,6 +19,7 @@ class Provider(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         payload = json.loads(body)
         requests.append((self.path, payload))
+        usage = None
         if payload["messages"][0]["content"].startswith("Summarize the supplied conversation"):
             choice = {"delta": {"content": "Saved old exchange"}, "finish_reason": "stop"}
         elif next_calls:
@@ -25,9 +27,20 @@ class Provider(BaseHTTPRequestHandler):
             call = {"index": 0, "id": "fixture-call", "type": "function",
                     "function": {"name": name, "arguments": json.dumps(args)}}
             choice = {"delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}
+        elif length_stops:
+            partial, used = length_stops.pop(0)
+            delta = {"content": partial, "tool_calls": [{
+                "index": 0, "id": "cut-off", "function": {"name": "shell",
+                "arguments": json.dumps({"command": "touch cut-off-tool-ran"})}}]}
+            choice = {"delta": delta, "finish_reason": "length"}
+            if used is not None:
+                usage = {"prompt_tokens": 80, "completion_tokens": used}
         else:
             choice = {"delta": {"content": "reviewed"}, "finish_reason": "stop"}
-        response = ("data: " + json.dumps({"choices": [choice]}) + "\n\ndata: [DONE]\n\n").encode()
+        events = [{"choices": [choice]}]
+        if usage is not None:
+            events.append({"choices": [], "usage": usage})
+        response = ("".join("data: " + json.dumps(e) + "\n\n" for e in events) + "data: [DONE]\n\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(response)))
@@ -47,7 +60,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     state.mkdir(mode=0o700)
     (state / "model.json").write_text('["deepseek","saved-model"]')
 
-    def run(args, stdin, *, cwd=repo, error=None):
+    def run(args, stdin, *, cwd=repo, error=None, expected_requests=0):
         env = dict(os.environ, PANDA_HOME=str(state), HOME=str(root),
                    PANDA_ONESHOT_ARGS=json.dumps(args),
                    PANDA_ONESHOT_SERVER=f"http://127.0.0.1:{server.server_port}")
@@ -56,10 +69,14 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
                                 capture_output=True, timeout=20)
         if error is not None:
             assert result.returncode != 0 and error in result.stderr, (result.stdout, result.stderr)
-            assert not requests, requests
+            assert len(requests) == expected_requests, requests
             return
         assert result.returncode == 0, (result.stdout, result.stderr)
         return result.stdout.splitlines()
+
+    def saved_session(sid):
+        with sqlite3.connect(state / "sessions.sqlite3") as db:
+            return json.loads(db.execute("SELECT data FROM sessions WHERE id=?", (sid,)).fetchone()[0])
 
     def done(output):
         events = [json.loads(line) for line in output if line.startswith("{")]
@@ -414,11 +431,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         if not automatic:
             run(["--continue"], ":compact\n:q\n")
 
-        def saved():
-            with sqlite3.connect(state / "sessions.sqlite3") as db:
-                return json.loads(db.execute("SELECT data FROM sessions WHERE id=?", (sid,)).fetchone()[0])
-
-        session = saved()
+        session = saved_session(sid)
         raw = session["history"]
         assert len(raw) == 6 and raw[:3] == [
             {"User": old}, {"Assistant": {"text": "reviewed", "calls": []}}, {"User": recent}]
@@ -437,7 +450,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
         # The entire remaining exchange fits. A second compact makes no request.
         run(["--continue"], ":compact\n:q\n")
-        assert not requests and saved() == session
+        assert not requests and saved_session(sid) == session
         run(["--print", "--continue", follow_up], "")
         (_, request), = requests
         summary_message = {"role": "user", "content": "Earlier conversation summary:\nSaved old exchange"}
@@ -447,7 +460,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         assert request["messages"][1:] == [
             summary_message, {"role": "user", "content": recent}, tool_call, tool_result,
             {"role": "assistant", "content": "reviewed"}, {"role": "user", "content": follow_up}]
-        assert saved()["history"] == raw + [{"User": follow_up}, raw[5]]
+        assert saved_session(sid)["history"] == raw + [{"User": follow_up}, raw[5]]
         requests.clear()
 
     # Zero is explicit, and removing the setting restores manual compact-all
@@ -465,3 +478,57 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         requests.clear()
     path.write_text('{"compaction":{"keepRecentTokens":-1}}')
     run(["--print", "--no-session", "probe"], "", error="settings.json")
+
+    path.unlink()
+    (state / "catalog-openrouter-output.json").write_text(json.dumps({"fixture": 128}))
+    model = ["--provider", "openrouter", "--model", "fixture"]
+    sid = new_session("Older exchange", model)
+    prompt = "Check the marker"
+    next_calls.append(("shell", {"command": "echo once >> calls; echo tool-marker"}))
+    length_stops.append(("unfinished draft", 12))
+    result = done(run(["--mode", "json", "--continue", *model, prompt], ""))
+    assert result["text"] == "reviewed" and result["session_id"] == sid
+    initial, stopped, summary, retry = [r for _, r in requests]
+    assert [m["content"] for m in initial["messages"] if m["role"] == "user"].count(prompt) == 1
+    assert stopped["max_tokens"] == retry["max_tokens"] == 128
+    assert summary["messages"][0]["content"].startswith("Summarize")
+    assert "Older exchange" in summary["messages"][1]["content"]
+    assert all(marker not in str(summary) for marker in (prompt, "tool-marker", "unfinished draft", "cut-off"))
+    projected = retry["messages"][1:]
+    assert [m["role"] for m in projected] == ["user", "user", "assistant", "tool"]
+    assert [m["content"] for m in projected[:2]] == ["Earlier conversation summary:\nSaved old exchange", prompt]
+    assert projected[-2:] == stopped["messages"][-2:] and "tool-marker" in projected[-1]["content"]
+    assert all(marker not in str(retry) for marker in ("unfinished draft", "cut-off"))
+    assert (repo / "calls").read_text() == "once\n"
+    partial, = [m["Truncated"] for m in saved_session(sid)["history"] if "Truncated" in m]
+    assert partial["text"] == "unfinished draft" and partial["output_tokens"] == 12
+    assert partial["tool_fragments"][0]["id"] == "cut-off"
+    requests.clear()
+    run(["--print", "--continue", *model, "follow up"], "")
+    (_, reopened), = requests
+    assert reopened["messages"][1:] == projected + [
+        {"role": "assistant", "content": "reviewed"}, {"role": "user", "content": "follow up"}]
+    requests.clear()
+
+    archive = root / "truncated.jsonl"
+    run(["--export-session", str(sid), str(archive)], "")
+    imported = run(["--import-session", str(archive)], "")
+    restored = next(json.loads(line)["session_id"] for line in imported if line.startswith("{"))
+    assert {"Truncated": partial} in saved_session(restored)["history"]
+    run(["--print", "--session", str(restored), *model, "after import"], "")
+    (_, after_import), = requests
+    assert after_import["messages"][1:] == reopened["messages"][1:] + [
+        {"role": "assistant", "content": "reviewed"}, {"role": "user", "content": "after import"}]
+    requests.clear()
+
+    for counts in ([128], [None], [5, 7]):
+        length_stops.extend((f"truncated attempt {i}", n) for i, n in enumerate(counts))
+        run(["--print", *model, "stop test"], "", error="length", expected_requests=len(counts))
+        assert not length_stops
+        requests.clear()
+    assert not (repo / "cut-off-tool-ran").exists()
+
+    length_stops.append(("unknown allowance", 1))
+    run(["--print", "--provider", "openrouter", "--model", "uncatalogued", "unknown cap"], "",
+        error="length", expected_requests=1)
+    assert "max_tokens" not in requests.pop()[1]

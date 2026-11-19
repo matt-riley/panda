@@ -502,12 +502,15 @@ mod tests {
         let Ok(args) = std::env::var("PANDA_ONESHOT_ARGS") else {
             return Ok(());
         };
-        crate::run(serde_json::from_str(&args)?, |_, provider, model| {
-            Ok(Box::new(panda_providers::Api {
-                endpoint: format!("{}/{provider}", std::env::var("PANDA_ONESHOT_SERVER")?),
-                model: model.to_owned(),
-                key: "fixture".into(),
-            }))
+        crate::run(serde_json::from_str(&args)?, |state, provider, model| {
+            Ok(Box::new(
+                panda_providers::Api {
+                    endpoint: format!("{}/{provider}", std::env::var("PANDA_ONESHOT_SERVER")?),
+                    model: model.to_owned(),
+                    key: "fixture".into(),
+                }
+                .with_output_limit(crate::output_limit(state, provider, model)?),
+            ))
         })
     }
 

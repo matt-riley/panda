@@ -119,6 +119,11 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
         None
     };
     let catalogue = panda_providers::models::catalogue(id, state, key.as_deref().map(str::trim))?;
+    if id == "openrouter" {
+        let mut file = tempfile::NamedTempFile::new_in(state)?;
+        serde_json::to_writer(&mut file, &catalogue.output_limits)?;
+        file.persist(state.join("catalog-openrouter-output.json"))?;
+    }
     if subscription(id) {
         let mut file = tempfile::NamedTempFile::new_in(state)?;
         serde_json::to_writer(&mut file, &catalogue.efforts)?;
@@ -217,6 +222,14 @@ fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option
 fn subscription(p: &str) -> bool {
     p == "openai-codex"
 }
+fn output_limit(state: &Path, provider: &str, model: &str) -> Result<Option<u64>> {
+    let path = state.join("catalog-openrouter-output.json");
+    if provider != "openrouter" || !path.try_exists()? {
+        return Ok(None);
+    }
+    let limits: std::collections::BTreeMap<String, u64> = serde_json::from_slice(&fs::read(path)?)?;
+    Ok(limits.get(model).copied().filter(|&n| n > 0))
+}
 fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> {
     if subscription(p) {
         return Ok(Box::new(Subscription {
@@ -233,11 +246,14 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
         "deepseek" => "https://api.deepseek.com/chat/completions",
         _ => "https://openrouter.ai/api/v1/chat/completions",
     };
-    Ok(Box::new(Api {
-        key: key.trim().into(),
-        model: m.into(),
-        endpoint: endpoint.into(),
-    }))
+    Ok(Box::new(
+        Api {
+            key: key.trim().into(),
+            model: m.into(),
+            endpoint: endpoint.into(),
+        }
+        .with_output_limit(output_limit(state, p, m)?),
+    ))
 }
 fn login(state: &Path, p: &str, cancel: &Cancel, browser: Option<bool>) -> Result<()> {
     if subscription(p) {
@@ -332,6 +348,13 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     let mut calls_by_id = std::collections::HashMap::new();
     for m in &s.history {
         match m {
+            Message::Truncated(partial) => {
+                screen.line(Tone::Dim, "Partial reply (output length limit)");
+                if !partial.reasoning.is_empty() {
+                    screen.line(Tone::Thought, &partial.reasoning);
+                }
+                screen.finish_reply(&partial.text);
+            }
             Message::BranchSummary(t) => {
                 screen.line(Tone::Dim, &format!("Branch summary · {}", safe(t)))
             }

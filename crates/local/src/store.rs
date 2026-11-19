@@ -79,8 +79,14 @@ impl Disk {
         if !s.context_edits.is_empty() {
             // A fork starts a new tree with the visible path as its seed.
             let mut boundaries = vec![0];
-            for i in 0..s.history.len() {
-                boundaries.push(boundaries[i] + s.context_edits.get(&i).map_or(1, Vec::len));
+            let mut history = Vec::with_capacity(s.history.len());
+            for (i, message) in s.history.drain(..).enumerate() {
+                if let Some(replacement) = s.context_edits.remove(&i) {
+                    history.extend(replacement);
+                } else {
+                    history.push(message);
+                }
+                boundaries.push(history.len());
             }
             if let Some(cp) = &mut s.checkpoint {
                 cp.through = boundaries[cp.through];
@@ -89,7 +95,7 @@ impl Disk {
                 u.through = boundaries[u.through];
                 u.checkpoint_through = boundaries[u.checkpoint_through];
             }
-            s.history = s.resolved(0..s.history.len());
+            s.history = history;
             s.context_edits.clear();
         }
         s.name = name.into();

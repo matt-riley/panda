@@ -50,6 +50,11 @@ fn content(value: &Value) -> Result<Content> {
 
 pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
     let kind = string(entry, "type")?;
+    if kind == "custom" && entry["customType"] == "panda.truncated-reply" {
+        return Ok(vec![Message::Truncated(serde_json::from_value(
+            entry["data"].clone(),
+        )?)]);
+    }
     if kind == "branch_summary" {
         return Ok(vec![Message::BranchSummary(
             string(entry, "summary")?.into(),
@@ -126,6 +131,11 @@ pub(super) fn encode(
     thinking: Option<&str>,
 ) -> Result<Value> {
     let mut m = match message {
+        Message::Truncated(partial) => {
+            return Ok(
+                json!({"type":"custom","customType":"panda.truncated-reply","data":partial}),
+            );
+        }
         Message::User(t) => json!({"role":"user","content":t}),
         Message::Images { text, urls } => json!({"role":"user","content":blocks(text,urls)?}),
         Message::Result {
