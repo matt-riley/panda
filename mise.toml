@@ -1,4 +1,6 @@
 [tools]
+# CI installs repository tools before running tasks with --skip-tools.
+pi = { version = "1.5.2", os = ["macos"] }
 rust = { version = "1.99.1", components = ["rustfmt", "clippy"] }
 
 [tasks.fmt]
@@ -9,7 +11,6 @@ run = "cargo clippy --locked --workspace --all-targets -- -D warnings"
 
 [tasks.test]
 description = "Run the complete suite on native macOS, including Seatbelt isolation"
-tools = { pi = "1.5.2" }
 run = 'pi_bin=$(command -v pi) && PANDA_TEST_PI="$pi_bin" cargo test --locked --workspace -- --include-ignored'
 
 [tasks.portable-test]
