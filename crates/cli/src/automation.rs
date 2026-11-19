@@ -24,6 +24,7 @@ pub struct Options {
     pub codemode: bool,
     pub tools: Option<BTreeSet<String>>,
     pub resume: bool,
+    pub session_id: Option<i64>,
     pub no_session: bool,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -55,6 +56,15 @@ impl Options {
                     out.tools = Some(names);
                 }
                 "--no-session" => out.no_session = true,
+                "--session" => {
+                    ensure!(out.session_id.is_none(), "specify --session once");
+                    let id = it
+                        .next()
+                        .and_then(|value| value.parse::<i64>().ok())
+                        .filter(|&id| id > 0)
+                        .context("expected a positive numeric session ID after --session")?;
+                    out.session_id = Some(id);
+                }
                 "--system-prompt" | "--append-system-prompt" => {
                     let value = it
                         .next()
@@ -111,6 +121,7 @@ impl Options {
             out.interface = Interface::Print;
         }
         if out.no_session
+            || out.session_id.is_some()
             || out.model.is_some()
             || out.thinking.is_some()
             || out.provider.is_some()
@@ -123,6 +134,10 @@ impl Options {
                 "one-shot options apply to print and JSON runs"
             );
         }
+        ensure!(
+            out.session_id.is_none() || !(out.resume || out.no_session),
+            "--session conflicts with --continue or --no-session"
+        );
         ensure!(
             !out.no_session || !out.resume,
             "--no-session conflicts with --continue"
@@ -414,6 +429,16 @@ mod tests {
             "--print --model",
             "--print --thinking --no-session",
             "--no-session --continue --mode json",
+            "--session 1",
+            "--mode rpc --session 1",
+            "--print --session",
+            "--print --session invalid",
+            "--print --session 0",
+            "--print --session -1",
+            "--print --session 9223372036854775808",
+            "--print --session 1 --session 2",
+            "--print --session 1 -c",
+            "--print --session 1 --no-session",
             "--mode rpc --model foo",
             "--no-session",
             "--tools read",
