@@ -57,6 +57,14 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
 | Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
+To keep recent exchanges verbatim during manual and automatic compaction, set an estimated token budget in `$PANDA_HOME/settings.json` and restart Panda. This example keeps up to 20,000 estimated tokens.
+
+```json
+{"compaction": {"keepRecentTokens": 20000}}
+```
+
+Panda keeps the newest whole user exchanges that fit, including their tool calls and results, and summarizes the older messages. When all eligible messages fit, compaction skips the summary request. A budget of `0` summarizes all eligible messages. With the setting omitted, manual compaction covers the full history and automatic threshold compaction uses its model-based retention budget.
+
 ## Codemode
 
 Start `panda --codemode` to let the model combine read-only workspace tools in JavaScript. For example, ask “Rank the five files with the most TODO lines.” The script can walk every search page, count matches, and send the model just the ranking. Codemode works in both plan and code mode, and the flag also works with print, JSON and RPC.

@@ -282,7 +282,34 @@ fn usage(s: &Session) -> String {
     }
     text
 }
-fn model_window(db: &mut dyn Store, state: &Path, id: &str, model: &str) -> Result<()> {
+fn keep_recent_tokens(state: &Path) -> Result<Option<u64>> {
+    #[derive(serde::Deserialize, Default)]
+    struct Compaction {
+        #[serde(rename = "keepRecentTokens")]
+        keep_recent_tokens: Option<u64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Settings {
+        #[serde(default)]
+        compaction: Compaction,
+    }
+
+    let path = state.join("settings.json");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let settings: Settings = serde_json::from_slice(&fs::read(&path)?)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(settings.compaction.keep_recent_tokens)
+}
+
+fn configure_context(
+    db: &mut dyn Store,
+    state: &Path,
+    id: &str,
+    model: &str,
+    keep_recent_tokens: Option<u64>,
+) -> Result<()> {
     let path = state.join(format!("catalog-{id}.json"));
     let window = if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
         let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
@@ -291,7 +318,8 @@ fn model_window(db: &mut dyn Store, state: &Path, id: &str, model: &str) -> Resu
         None
     };
     let mut s = db.load()?;
-    if s.model_window != window {
+    if s.model_window != window || s.keep_recent_tokens != keep_recent_tokens {
+        s.keep_recent_tokens = keep_recent_tokens;
         s.model_window = window;
         db.save(&mut s)?;
     }
@@ -426,6 +454,7 @@ fn run(
     let mut options = automation::Options::parse(&args, interactive_terminal)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
+    let recent = keep_recent_tokens(&state)?;
     let native = Native::new(&root, &std::env::current_exe()?)?;
     let sessions = match &options.session_dir {
         Some(dir) if !options.no_session => native.session_dir(dir)?,
@@ -544,7 +573,7 @@ fn run(
         Some(disk) => disk,
         None => &mut memory,
     };
-    model_window(store, &state, &p, &model)?;
+    configure_context(store, &state, &p, &model, recent)?;
     let cancel = Cancel::default();
     let signal = cancel.clone();
     ctrlc::set_handler(move || signal.stop())?;
@@ -711,7 +740,7 @@ fn run(
                     screen.clipboard = None;
                     screen.clear();
                     screen.footer.usage.clear();
-                    model_window(&mut db, &state, &p, &model)?;
+                    configure_context(&mut db, &state, &p, &model, recent)?;
                     mode = show(&db, &mut screen)?;
                 }
                 ":tree" if interactive => {
@@ -874,7 +903,7 @@ fn run(
                         }
                         screen.clear();
                         screen.footer.usage.clear();
-                        model_window(&mut db, &state, &p, &model)?;
+                        configure_context(&mut db, &state, &p, &model, recent)?;
                         mode = show(&db, &mut screen)?
                     }
                 }
@@ -929,7 +958,7 @@ fn run(
                     let id = provider_id(words.next().unwrap_or(&p))?;
                     let filter = words.next().unwrap_or("").to_lowercase();
                     let entries = model_entries(&state, id, false)?;
-                    model_window(&mut db, &state, &p, &model)?;
+                    configure_context(&mut db, &state, &p, &model, recent)?;
                     catalogue = entries
                         .into_iter()
                         .map(|(m, _)| m)
@@ -1007,7 +1036,7 @@ fn run(
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
                         (p, model) = (id.into(), m.into());
-                        model_window(&mut db, &state, &p, &model)?;
+                        configure_context(&mut db, &state, &p, &model, recent)?;
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))
                 }

@@ -92,6 +92,12 @@ pub struct Session {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub context_budget: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "keepRecentTokens"
+    )]
+    pub keep_recent_tokens: Option<u64>,
     // Imported context edits replace contributions to the model while keeping
     // history positions stable for checkpoints and branch navigation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -130,17 +136,15 @@ impl UsageRecord {
     }
 }
 impl Session {
+    fn resolved_at(&self, i: usize) -> &[Message] {
+        self.context_edits
+            .get(&i)
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| std::slice::from_ref(&self.history[i]))
+    }
+
     pub fn resolved(&self, range: std::ops::Range<usize>) -> Vec<Message> {
-        range
-            .flat_map(|i| {
-                self.context_edits
-                    .get(&i)
-                    .map(Vec::as_slice)
-                    .unwrap_or_else(|| std::slice::from_ref(&self.history[i]))
-                    .iter()
-                    .cloned()
-            })
-            .collect()
+        range.flat_map(|i| self.resolved_at(i)).cloned().collect()
     }
 
     pub fn projected(&self) -> Vec<Message> {
@@ -188,21 +192,39 @@ impl Session {
     }
     // Keep whole recent user exchanges where possible. Never leave tool results
     // without their assistant call at the start of the retained suffix.
-    fn compact_through(&self, limit: usize) -> usize {
+    fn compact_through(&self, limit: usize, default_tokens: u64) -> usize {
+        let tokens = self.keep_recent_tokens.unwrap_or(default_tokens);
+        if tokens == 0 {
+            return limit;
+        }
         let previous = self.checkpoint.as_ref().map_or(0, |c| c.through);
-        let target = (self.token_budget() / 4).min(20000) * 4;
+        let target = tokens.saturating_mul(4);
         let mut bytes = 0u64;
         let mut boundary = limit;
         for (i, message) in self.history.iter().enumerate().skip(previous).rev() {
-            bytes = bytes.saturating_add(message.summary_text().len() as u64 + 1);
-            if bytes > target {
-                break;
+            let mut starts_exchange = message.user();
+            if self.keep_recent_tokens.is_some() {
+                let visible = self.resolved_at(i);
+                starts_exchange = visible.first().is_some_and(Message::user);
+                for m in visible {
+                    let size = serde_json::to_vec(m).map_or(u64::MAX, |v| v.len() as u64 + 1);
+                    bytes = bytes.saturating_add(size);
+                }
+            } else {
+                bytes = bytes.saturating_add(message.summary_text().len() as u64 + 1);
             }
-            if i > previous && i <= limit && message.user() {
+            if bytes > target {
+                return boundary;
+            }
+            if i > previous && i <= limit && starts_exchange {
                 boundary = i;
             }
         }
-        boundary
+        if self.keep_recent_tokens.is_some() {
+            previous
+        } else {
+            boundary
+        }
     }
     fn needs_compaction(&self, system: &str, tools: &[Value]) -> bool {
         self.context_budget
@@ -342,7 +364,10 @@ pub fn compact_with_instructions(
 ) -> Result<()> {
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
-    let end = s.history.len();
+    let end = s.compact_through(s.history.len(), 0);
+    if s.keep_recent_tokens.is_some() && end <= s.checkpoint.as_ref().map_or(0, |c| c.through) {
+        return Ok(());
+    }
     let prompt = summary_prompt(COMPACTION_PROMPT, instructions);
     checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {})?;
     store.save(&mut s)
@@ -457,10 +482,12 @@ pub fn turn_message(
         });
         let mut compacted = false;
         let schemas = tools.schemas(s.mode);
+        let previous = s.checkpoint.as_ref().map_or(0, |c| c.through);
         if s.needs_compaction(&system, &schemas)
-            && keep > s.checkpoint.as_ref().map_or(0, |c| c.through)
+            && keep > previous
+            && let end = s.compact_through(keep, (s.token_budget() / 4).min(20000))
+            && end > previous
         {
-            let end = s.compact_through(keep);
             checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
             store.save(&mut s)?;
             compacted = true;
@@ -490,12 +517,12 @@ pub fn turn_message(
             })
         };
         let (text, calls) = match request(p, &s, &mut relay) {
-            Err(e)
-                if !compacted
-                    && e.is::<ContextOverflow>()
-                    && keep > s.checkpoint.as_ref().map_or(0, |c| c.through) =>
-            {
-                checkpoint(p, &mut s, keep, COMPACTION_PROMPT, cancel, &mut relay)?;
+            Err(e) if !compacted && e.is::<ContextOverflow>() && keep > previous => {
+                let end = s.compact_through(keep, 0);
+                if end <= previous {
+                    return Err(e);
+                }
+                checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, &mut relay)?;
                 store.save(&mut s)?;
                 request(p, &s, &mut relay)?
             }
@@ -600,3 +627,42 @@ impl std::fmt::Display for ContextOverflow {
     }
 }
 impl std::error::Error for ContextOverflow {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn retention_uses_the_visible_exchange_after_a_checkpoint(
+            text in ".{1,120}", tokens in 0u64..160,
+        ) {
+            let mut session = Session {
+                checkpoint: Some(Checkpoint { through: 1, summary: "prior summary".into() }),
+                history: vec![
+                    Message::User("already covered".into()),
+                    Message::User("old".repeat(400)),
+                    Message::Assistant { text: "obsolete".into(), calls: vec![] },
+                    Message::User("omitted".repeat(400)),
+                ],
+                keep_recent_tokens: Some(tokens),
+                ..Session::default()
+            };
+            let exchange = vec![
+                Message::User("check".into()),
+                Message::Assistant { text: String::new(), calls: vec![Call {
+                    id: "c".into(), name: "shell".into(), args: serde_json::json!({}),
+                }] },
+                Message::Result { id: "c".into(), text, images: vec![], is_error: true },
+            ];
+            // An imported edit can replace several raw messages at one index.
+            let bytes = serde_json::to_vec(&exchange).unwrap().len() - 1;
+            session.context_edits.insert(2, exchange);
+            session.context_edits.insert(3, vec![]);
+            let end = session.history.len();
+            let expected = if bytes as u64 <= tokens * 4 { 2 } else { end };
+            prop_assert_eq!(session.compact_through(end, 0), expected);
+        }
+    }
+}
