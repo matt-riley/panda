@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 panda-core = { path = "../core" }
+panda-memory = { path = "../memory" }
 panda-local = { path = "../local" }
 panda-coding = { path = "../coding" }
 panda-providers = { path = "../providers" }
@@ -28,4 +29,3 @@ path = "src/main.rs"
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
-panda-memory = { path = "../memory" }

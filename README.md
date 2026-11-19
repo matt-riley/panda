@@ -66,10 +66,15 @@ A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls and 16 Ki
 ```sh
 panda --print "Where are sessions stored?"
 panda --mode json "Read Cargo.toml and identify the workspace members"
+git diff | panda --print --provider deepseek --model deepseek-flash --thinking high --no-session "Review this change"
 panda --continue --mode rpc
 ```
 
-Print mode writes the final answer. JSON mode emits one object per line, ending with a `done` object containing the answer and session ID. Both modes accept a prompt from standard input. RPC accepts one JSON object per input line and echoes its `id` on replies and turn events.
+Print mode writes the final answer. JSON mode emits one object per line, ending with a `done` object containing the answer and session ID. Both accept a prompt from standard input. If you also supply a prompt argument, Panda prepends the piped text verbatim, separates it from the prompt with a blank line, and resolves attachments from the argument.
+
+For print and JSON runs, put options before the prompt. Use `--model MODEL` for an exact model ID on the configured provider, or add `--provider PROVIDER` to select a different provider. `--thinking LEVEL` accepts the same levels as `:thinking`, including `default`. These choices apply to this invocation. Add `--no-session` to keep the conversation in memory. In this mode the JSON session ID is `null`, and `--continue` is incompatible. Add `--codemode` to the same command to enable Codemode.
+
+RPC accepts one JSON object per input line and echoes its `id` on replies and turn events.
 
 ```json
 {"id":1,"type":"prompt","text":"Read Cargo.toml and describe the workspace"}

@@ -1,10 +1,9 @@
 use crate::attachments;
 use anyhow::{Context, Result, bail, ensure};
 use panda_core::*;
-use panda_local::store::Disk;
 use serde_json::{Value, json};
 use std::{
-    io::{self, BufRead, Read},
+    io::{self, BufRead, IsTerminal, Read},
     path::Path,
     sync::{Mutex, mpsc},
     time::Duration,
@@ -23,6 +22,10 @@ pub struct Options {
     pub interface: Interface,
     pub codemode: bool,
     pub resume: bool,
+    pub no_session: bool,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
     pub prompt: String,
 }
 impl Options {
@@ -32,6 +35,19 @@ impl Options {
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "--codemode" => out.codemode = true,
+                "--no-session" => out.no_session = true,
+                "--provider" | "--model" | "--thinking" => {
+                    let value = it
+                        .next()
+                        .filter(|s| !s.trim().is_empty() && !s.starts_with('-'))
+                        .with_context(|| format!("expected a value for {arg}"))?
+                        .clone();
+                    match arg.as_str() {
+                        "--provider" => out.provider = Some(crate::provider_id(&value)?.to_owned()),
+                        "--model" => out.model = Some(value),
+                        _ => out.thinking = Some(value),
+                    }
+                }
                 "--continue" | "-c" => out.resume = true,
                 "--print" | "-p" => out.interface = Interface::Print,
                 "--mode" => {
@@ -63,12 +79,28 @@ impl Options {
         if out.interface == Interface::Terminal && !out.prompt.is_empty() {
             out.interface = Interface::Print;
         }
+        if out.no_session || out.model.is_some() || out.thinking.is_some() || out.provider.is_some()
+        {
+            ensure!(
+                matches!(out.interface, Interface::Print | Interface::Json),
+                "--provider, --model, --thinking and --no-session apply to print and JSON runs"
+            );
+        }
+        ensure!(
+            !out.no_session || !out.resume,
+            "--no-session conflicts with --continue"
+        );
+        ensure!(
+            out.provider.is_none() || out.model.is_some(),
+            "--provider requires --model"
+        );
         Ok(out)
     }
 }
 
 pub struct Host<'a> {
-    pub db: &'a mut Disk,
+    pub db: &'a mut (dyn Store + Send),
+    pub session_id: Option<i64>,
     pub tools: &'a (dyn Toolset + Sync),
     pub connect: &'a dyn Fn() -> Result<Box<dyn Provider + Send>>,
     pub root: &'a Path,
@@ -79,13 +111,14 @@ impl Host<'_> {
         if options.interface == Interface::Rpc {
             return self.rpc();
         }
-        let mut text = options.prompt;
-        if text.is_empty() {
-            io::stdin().read_to_string(&mut text)?;
-        }
-        ensure!(!text.trim().is_empty(), "missing prompt");
-        let input = attachments::prepare(self.root, &text, None)?;
+        let input = one_shot_input(self.root, &options.prompt)?;
         let mut p = (self.connect)()?;
+        if let Some(level) = options.thinking {
+            p = Box::new(FixedEffort {
+                provider: p,
+                level: (level != "default").then_some(level),
+            });
+        }
         let structured = options.interface == Interface::Json;
         turn_message(
             p.as_mut(),
@@ -107,7 +140,7 @@ impl Host<'_> {
         if structured {
             println!(
                 "{}",
-                json!({"type":"done","session_id":self.db.id(),"text":text})
+                json!({"type":"done","session_id":self.session_id,"text":text})
             );
         } else {
             println!("{text}");
@@ -130,7 +163,7 @@ impl Host<'_> {
             let result = (|| -> Result<Value> {
                 Ok(match r["type"].as_str() {
                     Some("session") => {
-                        json!({"id":id,"type":"session","session_id":self.db.id(),"session":self.db.load()?})
+                        json!({"id":id,"type":"session","session_id":self.session_id,"session":self.db.load()?})
                     }
                     Some("ack") => {
                         acknowledge(self.db)?;
@@ -208,7 +241,7 @@ impl Host<'_> {
                         let undelivered = [steer, follow].concat();
                         match run {
                             Ok(()) => {
-                                json!({"id":id,"type":"done","session_id":self.db.id(),"undelivered":undelivered})
+                                json!({"id":id,"type":"done","session_id":self.session_id,"undelivered":undelivered})
                             }
                             Err(e) => {
                                 json!({"id":id,"type":"error","error":e.to_string(),"undelivered":undelivered})
@@ -226,6 +259,48 @@ impl Host<'_> {
         Ok(())
     }
 }
+
+// Apply the override at the request boundary, including retries and summary
+// requests. A continued session keeps its own saved reasoning preference.
+struct FixedEffort {
+    provider: Box<dyn Provider + Send>,
+    level: Option<String>,
+}
+impl Provider for FixedEffort {
+    fn reply(
+        &mut self,
+        system: &str,
+        history: &[Message],
+        tools: &[Value],
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(String, Vec<Call>)> {
+        self.provider
+            .reply_with_effort(system, history, tools, cancel, emit, self.level.as_deref())
+    }
+}
+
+fn one_shot_input(root: &Path, prompt: &str) -> Result<Message> {
+    let mut piped = String::new();
+    if prompt.is_empty() || !io::stdin().is_terminal() {
+        io::stdin().read_to_string(&mut piped)?;
+    }
+    if prompt.is_empty() {
+        ensure!(!piped.trim().is_empty(), "missing prompt");
+        return attachments::prepare(root, &piped, None);
+    }
+    ensure!(
+        !prompt.trim().is_empty() || !piped.trim().is_empty(),
+        "missing prompt"
+    );
+    if !piped.is_empty() {
+        if !piped.ends_with('\n') {
+            piped.push('\n');
+        }
+        piped.push('\n');
+    }
+    attachments::prepare_with_prefix(root, piped, prompt, None)
+}
 fn decode(line: &str) -> Option<Value> {
     match serde_json::from_str(line) {
         Ok(v) => Some(v),
@@ -239,11 +314,58 @@ fn decode(line: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use panda_local::store::Disk;
     use panda_memory::{EmptySkills, Files, Reader};
     use std::{
         io::Write,
         process::{Command, Stdio},
     };
+
+    #[test]
+    fn rejects_invalid_one_shot_options() {
+        for args in [
+            "--print --provider deepseek",
+            "--print --provider unknown --model foo",
+            "--print --model",
+            "--print --thinking --no-session",
+            "--no-session --continue --mode json",
+            "--mode rpc --model foo",
+            "--no-session",
+        ] {
+            let args = args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(Options::parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn oneshot_fixture() -> Result<()> {
+        let Ok(args) = std::env::var("PANDA_ONESHOT_ARGS") else {
+            return Ok(());
+        };
+        crate::run(serde_json::from_str(&args)?, |_, provider, model| {
+            Ok(Box::new(panda_providers::Api {
+                endpoint: format!("{}/{provider}", std::env::var("PANDA_ONESHOT_SERVER")?),
+                model: model.to_owned(),
+                key: "fixture".into(),
+            }))
+        })
+    }
+
+    #[test]
+    #[ignore = "requires the native macOS host and a loopback HTTP fixture"]
+    fn reproducible_one_shot_requests() {
+        assert!(
+            Command::new("python3")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oneshot.py"))
+                .arg(std::env::current_exe().unwrap())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 
     #[test]
     fn fixture() {
@@ -256,8 +378,10 @@ mod tests {
             workspace: Files([("hello.txt".into(), "fixture answer".into())].into()),
             skills: EmptySkills,
         };
+        let mut db = Disk::open(root, root, None).unwrap();
         Host {
-            db: &mut Disk::open(root, root, None).unwrap(),
+            session_id: Some(db.id()),
+            db: &mut db,
             tools: &coding,
             connect: &|| Ok(Box::new(Reader)),
             root,

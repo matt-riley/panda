@@ -33,7 +33,16 @@ pub fn paths(text: &str) -> Vec<&str> {
 }
 
 pub fn prepare(root: &Path, input: &str, clipboard: Option<&str>) -> Result<Message> {
-    let mut text = input.to_owned();
+    prepare_with_prefix(root, String::new(), input, clipboard)
+}
+
+pub fn prepare_with_prefix(
+    root: &Path,
+    mut text: String,
+    input: &str,
+    clipboard: Option<&str>,
+) -> Result<Message> {
+    text.push_str(input);
     let mut urls: Vec<String> = clipboard.iter().map(|s| s.to_string()).collect();
     let mut total = 0;
     for name in paths(input) {
