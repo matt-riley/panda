@@ -332,9 +332,12 @@ fn run(
         );
         return Ok(());
     }
+    if args == ["--codemode-worker"] {
+        return panda_local::codemode::worker();
+    }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
@@ -389,6 +392,9 @@ fn run(
         workspace: native,
         skills: Library::new(roots),
     };
+    let executable = std::env::current_exe()?;
+    let codemode = panda_local::codemode::Codemode::new(&coding, &executable);
+    let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { &coding };
     let initial = if options.resume {
         Disk::latest(&state, &root)?
     } else {
@@ -420,7 +426,7 @@ fn run(
     if !terminal_mode {
         return automation::Host {
             db: &mut db,
-            tools: &coding,
+            tools,
             connect: &|| provider(&state, &p, &model),
             root: &root,
             cancel: &cancel,
@@ -646,7 +652,7 @@ fn run(
                         &format!(
                             "Context {} bytes · estimated {} / {} input tokens · byte limit {} · {} messages covered by summary",
                             s.context_bytes(),
-                            s.estimated_tokens(&coding.system()?, &coding.schemas(s.mode)),
+                            s.estimated_tokens(&tools.system()?, &tools.schemas(s.mode)),
                             s.token_budget(),
                             s.context_budget.map_or_else(|| "unset".into(), |n| n.to_string()),
                             s.checkpoint.map_or(0, |c| c.through)
@@ -927,7 +933,7 @@ fn run(
                     active::run(
                         engine.as_mut(),
                         &mut db,
-                        &coding,
+                        tools,
                         input,
                         &cancel,
                         &mut screen,

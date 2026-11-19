@@ -60,6 +60,14 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
             }
         }
         Event::Text(s) => screen.stream(&s),
+        Event::NestedCall { call, .. } => {
+            let line = format!("  {}", ui::header(&call));
+            if screen.active {
+                screen.line(Tone::Tool, &line);
+            } else {
+                println!("{line}");
+            }
+        }
         Event::AssistantComplete(s) => {
             if screen.active {
                 screen.finish_reply(&s);

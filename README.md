@@ -49,6 +49,14 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
 | Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
+## Codemode
+
+Start `panda --codemode` to let the model combine read-only workspace tools in JavaScript. For example, ask “Rank the five files with the most TODO lines.” The script can walk every search page, count matches, and send the model just the ranking. Codemode works in both plan and code mode, and the flag also works with print, JSON and RPC.
+
+Each invocation starts a fresh QuickJS worker under macOS Seatbelt. The script can call `tools.search({query, offset})`, `tools.repo_map({offset})` and `tools.read({path, offset, limit})`. Offsets and limits are optional. Search and map return objects with `items` and `next_offset`. Read returns text. Use `text(value)` to select what goes into the saved tool result and the next model request. Nested calls appear live in the terminal and as `nested_call` events in JSON and RPC.
+
+A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls and 16 KiB of selected output. Ctrl-C cancels the worker and its active workspace read.
+
 ## Scripting
 
 ```sh
