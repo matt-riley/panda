@@ -1,5 +1,7 @@
+mod checkpoint_files;
 mod recovery;
 use anyhow::{Result, bail};
+pub use checkpoint_files::CheckpointFiles;
 pub use recovery::TransientFailure;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +71,8 @@ pub enum Message {
         images: Vec<String>,
         #[serde(default, rename = "isError")]
         is_error: bool,
+        #[serde(default, rename = "nestedReads", skip_serializing_if = "Vec::is_empty")]
+        nested_reads: Vec<String>,
     },
 }
 
@@ -133,6 +137,8 @@ pub struct Session {
 pub struct Checkpoint {
     pub through: usize,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<CheckpointFiles>,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -179,7 +185,7 @@ impl Session {
             from = c.through;
             out.push(Message::User(format!(
                 "Earlier conversation summary:\n{}",
-                c.summary
+                c.summary_with_files()
             )));
         }
         out.extend(self.resolved(from..self.history.len()));
@@ -299,6 +305,7 @@ fn checkpoint(
     s.checkpoint = Some(Checkpoint {
         through: end,
         summary,
+        files: Some(s.files_through(end)),
     });
     Ok(())
 }
@@ -412,6 +419,7 @@ pub enum Event {
     AssistantComplete(String),
     Usage(Value),
     Calling(Call),
+    NestedRead(String),
     NestedCall { parent: String, call: Call },
     Result(String),
 }
@@ -623,7 +631,13 @@ pub fn turn_message(
         for call in calls {
             cancel.check()?;
             emit(Event::Calling(call.clone()));
-            let result = tools.run_stream(s.mode, &call, cancel, emit);
+            let mut nested_reads = std::collections::BTreeSet::new();
+            let result = tools.run_stream(s.mode, &call, cancel, &mut |event| match event {
+                Event::NestedRead(path) => {
+                    nested_reads.insert(path);
+                }
+                other => emit(other),
+            });
             let is_error = result.is_err();
             let output = result.unwrap_or_else(|e| format!("tool error: {e}").into());
             cancel.check()?;
@@ -633,6 +647,7 @@ pub fn turn_message(
             s.history.push(Message::Result {
                 id: call.id,
                 is_error,
+                nested_reads: nested_reads.into_iter().collect(),
                 text: output.text.clone(),
                 images: output.images,
             });
@@ -671,6 +686,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                     s.history.push(Message::Result {
                         id,
                         is_error: true,
+                        nested_reads: vec![],
                         images: vec![],
                         text: "Interrupted: outcome unknown; inspect workspace before retrying."
                             .into(),
@@ -708,7 +724,7 @@ mod tests {
             text in ".{1,120}", tokens in 0u64..160,
         ) {
             let mut session = Session {
-                checkpoint: Some(Checkpoint { through: 1, summary: "prior summary".into() }),
+                checkpoint: Some(Checkpoint { through: 1, summary: "prior summary".into(), ..Default::default() }),
                 history: vec![
                     Message::User("already covered".into()),
                     Message::User("old".repeat(400)),
@@ -723,7 +739,7 @@ mod tests {
                 Message::Assistant { text: String::new(), calls: vec![Call {
                     id: "c".into(), name: "shell".into(), args: serde_json::json!({}),
                 }] },
-                Message::Result { id: "c".into(), text, images: vec![], is_error: true },
+                Message::Result { id: "c".into(), text, images: vec![], is_error: true, nested_reads: vec![] },
             ];
             // An imported edit can replace several raw messages at one index.
             let bytes = serde_json::to_vec(&exchange).unwrap().len() - 1;

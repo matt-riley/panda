@@ -323,7 +323,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(session.estimated_tokens("",&[]),input+output);
         session.history.push(Message::User(text));
         proptest::prop_assert!(session.estimated_tokens("",&[])>input+output);
-        session.checkpoint=Some(Checkpoint{through:1,summary:"short".into()});
+        session.checkpoint=Some(Checkpoint{through:1,summary:"short".into(), ..Default::default()});
         let estimate=session.estimated_tokens("",&[]);
         session.usage.clear();
         proptest::prop_assert_eq!(estimate,session.estimated_tokens("",&[]));

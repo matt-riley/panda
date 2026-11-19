@@ -28,10 +28,11 @@ class Provider(BaseHTTPRequestHandler):
                     "function": {"name": name, "arguments": json.dumps(args)}}
             choice = {"delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}
         elif length_stops:
-            partial, used = length_stops.pop(0)
+            partial, used, *override = length_stops.pop(0)
+            name, args = override or ("shell", {"command": "touch cut-off-tool-ran"})
             delta = {"content": partial, "tool_calls": [{
-                "index": 0, "id": "cut-off", "function": {"name": "shell",
-                "arguments": json.dumps({"command": "touch cut-off-tool-ran"})}}]}
+                "index": 0, "id": "cut-off", "function": {"name": name,
+                "arguments": json.dumps(args)}}]}
             choice = {"delta": delta, "finish_reason": "length"}
             if used is not None:
                 usage = {"prompt_tokens": 80, "completion_tokens": used}
@@ -388,16 +389,19 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     run(["--export-session", str(sid), str(exported)], "", error="creating export")
     assert exported.read_bytes() == saved
 
-    if os.environ.get("PANDA_TEST_PI"):
+    def pi_session(archive, commands):
         env = dict(PATH=os.environ["PATH"], HOME=str(root), PI_CODING_AGENT_DIR=str(root / "pi-agent"))
         cmd = [os.environ["PANDA_TEST_PI"], "--offline", "-ne", "-ns", "-np", "-nc", "--no-themes",
-               "--mode", "rpc", "--session", str(exported)]
-        commands = ["get_entries", "get_tree", "get_messages"]
+               "--mode", "rpc", "--session", str(archive)]
         pi = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True, timeout=20,
                             input="".join(json.dumps({"type": c}) + "\n" for c in commands))
         assert pi.returncode == 0, pi.stderr
         replies = {e["command"]: e for e in map(json.loads, pi.stdout.splitlines()) if e["type"] == "response"}
         assert all(replies[c]["success"] for c in commands), replies
+        return replies
+
+    if os.environ.get("PANDA_TEST_PI"):
+        replies = pi_session(exported, ["get_entries", "get_tree", "get_messages"])
         loaded = replies["get_entries"]["data"]["entries"]
         assert loaded[:len(records)-1] == records[1:]
         # Pi can record its local thinking/model setting when opening the file.
@@ -439,7 +443,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         result = raw[4]["Result"]
         assert call["name"] == "shell" and result["id"] == call["id"] and result["isError"]
         assert result["text"].count(compiler_error) == 1 and raw[5] == raw[1]
-        assert session["checkpoint"] == {"through": 2, "summary": "Saved old exchange"}
+        assert session["checkpoint"] == {"through": 2, "summary": "Saved old exchange", "files": {"readFiles": [], "modifiedFiles": []}}
         initial, second, third = [req["messages"] for _, req in requests]
         assert initial[-1]["content"] == recent
         summary, tool_exchange = (second, third) if automatic else (third, second)
@@ -532,3 +536,59 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     run(["--print", "--provider", "openrouter", "--model", "uncatalogued", "unknown cap"], "",
         error="length", expected_requests=1)
     assert "max_tokens" not in requests.pop()[1]
+
+    # The unit-test CLI hosts the loopback provider. Its sandbox must launch the real file worker.
+    build = subprocess.check_output(["cargo", "build", "--locked", "--bin", "panda", "--message-format=json"],
+                                    cwd=Path(__file__).parent, text=True)
+    os.environ["PANDA_TEST_WORKER"] = next(m["executable"] for m in map(json.loads, build.splitlines())
+                                          if m.get("executable") and m["target"]["name"] == "panda")
+
+    # This model always summarizes as "Saved old exchange", without filenames.
+    for file in ("a.rs", "b.rs", "d.rs"):
+        (repo / file).write_text("before")
+    sid = new_session("Track the workspace", model)
+    selected = ["--session", str(sid)]
+    next_calls.append(("codemode", {"code": 'tools.read({path:"a.rs"}); tools.read({path:"a.rs"}); throw Error("later failure")'}))
+    next_calls.extend(("read", {"path": file}) for file in ("b.rs", "missing.rs", "b.rs"))
+    run(["--print", "--codemode", *selected, *model, "Inspect inputs"], "")
+    run(["--continue"], ":compact\n:q\n")
+    assert saved_session(sid)["checkpoint"]["files"] == {"readFiles": ["a.rs", "b.rs"], "modifiedFiles": []}
+    requests.clear()
+    next_calls.extend([
+        ("edit", {"path": "b.rs", "old": "before", "new": "after"}),
+        ("write", {"path": "c.rs", "text": "new"}),
+        ("edit", {"path": "a.rs", "old": "absent", "new": "bad"}),
+    ])
+    length_stops.append(("incomplete edit", 12, "edit", {"path": "d.rs", "old": "before", "new": "bad"}))
+    run(["--print", *selected, *model, "Update outputs"], "")
+    assert [(repo / f).read_text() for f in ("a.rs", "b.rs", "c.rs", "d.rs")] == ["before", "after", "new", "before"]
+    run(["--continue"], ":compact\n:q\n")
+    requests.clear()
+
+    summary = "Saved old exchange\n\n<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\nc.rs\n</modified-files>"
+    def check_files(session_id):
+        run(["--print", "--session", str(session_id), *model, "Continue"], "")
+        (_, payload), = requests
+        messages = payload["messages"][1:]
+        assert messages[0]["content"] == "Earlier conversation summary:\n" + summary, messages
+        assert all(json.dumps(messages).count(f) == 1 for f in ("a.rs", "b.rs", "c.rs"))
+        assert all(f not in json.dumps(messages) for f in ("d.rs", "missing.rs"))
+        requests.clear()
+
+    check_files(sid)
+    archive = root / "file-activity.jsonl"
+    run(["--export-session", str(sid), str(archive)], "")
+    checkpoints = [e for e in map(json.loads, archive.read_text().splitlines()) if e["type"] == "compaction"]
+    assert checkpoints[-1]["summary"] == summary
+    assert checkpoints[-1]["details"] == {"readFiles": ["a.rs"], "modifiedFiles": ["b.rs", "c.rs"]}
+    if os.environ.get("PANDA_TEST_PI"):
+        replies = pi_session(archive, ["get_messages"])
+        pi_context = json.dumps(replies["get_messages"]["data"]["messages"])
+        assert all(pi_context.count(f) == 1 for f in ("a.rs", "b.rs", "c.rs"))
+        assert "d.rs" not in pi_context and "missing.rs" not in pi_context
+    imported = run(["--import-session", str(archive)], "")
+    restored = next(json.loads(line)["session_id"] for line in imported if line.startswith("{"))
+    check_files(restored)
+    run(["--continue"], ":compact\n:q\n")
+    requests.clear()
+    check_files(restored)

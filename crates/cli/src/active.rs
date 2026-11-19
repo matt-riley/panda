@@ -73,6 +73,7 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
             }
         }
         Event::Text(s) => screen.stream(&s),
+        Event::NestedRead(_) => {}
         Event::NestedCall { call, .. } => {
             let line = format!("  {}", ui::header(&call));
             if screen.active {

@@ -113,6 +113,7 @@ fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
             text: "image".into(),
             images: vec!["data:image/png;base64,YQ==".into()],
             is_error: false,
+            nested_reads: vec![],
         },
         Message::Assistant {
             text: "done".into(),
@@ -122,6 +123,7 @@ fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
     s.checkpoint = Some(Checkpoint {
         through: 1,
         summary: "summary".into(),
+        ..Default::default()
     });
     db.save(&mut s)?;
     let records = export(&mut db)?;

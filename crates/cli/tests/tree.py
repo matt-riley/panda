@@ -162,7 +162,7 @@ def test_manual_compaction(repo, state):
         expect("deepseek-flash")
     saved = saved_session(state)
     assert saved["context_budget"] == 16384 and saved["history"] == raw
-    assert saved["checkpoint"] == {"summary": "Checkpoint answer", "through": 2}
+    assert saved["checkpoint"] == {"summary": "Checkpoint answer", "through": 2, "files": {"readFiles": [], "modifiedFiles": []}}
     first, guided = request_log(state)
     assert guided["system"].count(instructions) == 1
     assert instructions not in str(guided["history"]) and instructions not in str(first)

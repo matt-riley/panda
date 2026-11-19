@@ -154,12 +154,12 @@ pub(super) fn write_entries(
                 }
                 p = nodes[&p].parent;
             }
-            writeln!(
-                out,
-                "{}",
-                json!({"type":"compaction","id":id,"parentId":tail,"timestamp":node_time,
-                "summary":cp.summary,"firstKeptEntryId":kept,"tokensBefore":0})
-            )?;
+            let mut record = json!({"type":"compaction","id":id,"parentId":tail,"timestamp":node_time,
+                "summary":cp.summary_with_files(),"firstKeptEntryId":kept,"tokensBefore":0});
+            if let Some(files) = cp.files {
+                record["details"] = serde_json::to_value(files)?;
+            }
+            writeln!(out, "{record}")?;
             tail = Some(id);
             nodes.get_mut(&node).unwrap().tail = tail.clone();
         }
