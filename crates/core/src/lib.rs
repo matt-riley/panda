@@ -210,10 +210,13 @@ impl Session {
             || self.estimated_tokens(system, tools) > self.token_budget()
     }
 }
+const COMPACTION_PROMPT: &str = "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.";
+
 fn checkpoint(
     p: &mut dyn Provider,
     s: &mut Session,
     end: usize,
+    prompt: &str,
     cancel: &Cancel,
     emit: &mut Emit,
 ) -> Result<()> {
@@ -230,7 +233,7 @@ fn checkpoint(
         &s.resolved(start..end),
         prior,
         (s.token_budget().clamp(1, 24576)) as usize,
-        "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.",
+        prompt,
         cancel,
         emit,
     )?;
@@ -313,10 +316,24 @@ impl Message {
     }
 }
 pub fn compact(p: &mut dyn Provider, store: &mut dyn Store, cancel: &Cancel) -> Result<()> {
+    compact_with_instructions(p, store, "", cancel)
+}
+pub fn compact_with_instructions(
+    p: &mut dyn Provider,
+    store: &mut dyn Store,
+    instructions: &str,
+    cancel: &Cancel,
+) -> Result<()> {
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
     let end = s.history.len();
-    checkpoint(p, &mut s, end, cancel, &mut |_| {})?;
+    let prompt = match instructions.trim() {
+        "" => COMPACTION_PROMPT,
+        guidance => {
+            &format!("{COMPACTION_PROMPT}\n\nAdditional instructions from the user:\n{guidance}")
+        }
+    };
+    checkpoint(p, &mut s, end, prompt, cancel, &mut |_| {})?;
     store.save(&mut s)
 }
 #[derive(Debug, Clone, Serialize)]
@@ -433,7 +450,7 @@ pub fn turn_message(
             && keep > s.checkpoint.as_ref().map_or(0, |c| c.through)
         {
             let end = s.compact_through(keep);
-            checkpoint(p, &mut s, end, cancel, emit)?;
+            checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
             store.save(&mut s)?;
             compacted = true;
         }
@@ -467,7 +484,7 @@ pub fn turn_message(
                     && e.is::<ContextOverflow>()
                     && keep > s.checkpoint.as_ref().map_or(0, |c| c.through) =>
             {
-                checkpoint(p, &mut s, keep, cancel, &mut relay)?;
+                checkpoint(p, &mut s, keep, COMPACTION_PROMPT, cancel, &mut relay)?;
                 store.save(&mut s)?;
                 request(p, &s, &mut relay)?
             }
