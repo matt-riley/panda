@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -799,10 +799,17 @@ fn run(
                 ":context" | ":compact" => {
                     if first == ":compact" {
                         cancel.reset();
-                        compact(provider(&state, &p, &model)?.as_mut(), &mut db, &cancel)?;
+                        compact_with_instructions(
+                            provider(&state, &p, &model)?.as_mut(),
+                            &mut db,
+                            &line[first.len()..],
+                            &cancel,
+                        )?;
                     }
                     let mut s = db.load()?;
-                    if let Some(arg) = words.next() {
+                    if first == ":context"
+                        && let Some(arg) = words.next()
+                    {
                         let bytes: usize = arg.parse()?;
                         ensure!(bytes >= 4096, "minimum context budget is 4096 bytes");
                         s.context_budget = Some(bytes);

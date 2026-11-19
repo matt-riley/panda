@@ -68,11 +68,62 @@ def panda(repo, state, released=None, slow=False, startup=None, args=None, one_s
         os.waitpid(pid, 0)
 
 
-def active_history(state):
+def saved_session(state):
     with sqlite3.connect(state / "sessions.sqlite3") as db:
         rows = db.execute("select id,data from sessions").fetchall()
     assert len(rows) == 1 and rows[0][0] == 1
-    return json.loads(rows[0][1])["history"]
+    return json.loads(rows[0][1])
+
+
+def active_history(state):
+    return saved_session(state)["history"]
+
+
+def request_log(state):
+    return [json.loads(line) for line in (state / "requests.jsonl").read_text().splitlines()]
+
+
+def test_manual_compaction(repo, state):
+    # A numeric first word also catches accidentally treating guidance as a new byte limit.
+    instructions = "8192  is the ticket number. Preserve its decision."
+    with panda(repo, state, args=["Discuss the ticket"], startup="First answer") as (send, expect):
+        send(":context 16384\r")
+        expect("byte limit 16384")
+        expect("deepseek-flash")
+        raw = active_history(state)
+        send(":compact " + instructions + "\r")
+        expect("2 messages")
+        expect("deepseek-flash")
+    saved = saved_session(state)
+    assert saved["context_budget"] == 16384 and saved["history"] == raw
+    assert saved["checkpoint"] == {"summary": "Checkpoint answer", "through": 2}
+    first, guided = request_log(state)
+    assert guided["system"].count(instructions) == 1
+    assert instructions not in str(guided["history"]) and instructions not in str(first)
+
+    with panda(repo, state, args=["--continue"]) as (send, expect):
+        send("What was decided?\r")
+        expect("Second answer")
+        expect("deepseek-flash")
+        before_failure = saved_session(state)
+        send(":compact Fail this summary\r")
+        expect("summary unavailable")
+        expect("deepseek-flash")
+        assert saved_session(state) == before_failure
+        send(":compact\r")
+        expect("4 messages")
+        expect("deepseek-flash")
+
+    _, _, follow_up, failed, bare = request_log(state)
+    assert follow_up["history"] == [
+        {"User": "Earlier conversation summary:\nCheckpoint answer"}, {"User": "What was decided?"}]
+    assert instructions not in str(follow_up)
+    assert failed["system"].count("Fail this summary") == 1
+    assert bare["system"] in guided["system"] and bare["system"].startswith("Summarize")
+    assert instructions not in str(bare) and "Fail this summary" not in str(bare)
+    final = saved_session(state)
+    assert final["history"] == before_failure["history"]
+    assert final["context_budget"] == 16384 and final["checkpoint"]["through"] == 4
 
 
 def read_copy():
@@ -90,6 +141,7 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    test_manual_compaction(repo, Path(tmp) / "compact")
     # Two identical prompts have different ancestors. Mark the second, then open
     # the exported tree in a fresh store so local node IDs cannot be relied on.
     source = Path(tmp) / "branches.jsonl"
@@ -192,7 +244,7 @@ with tempfile.TemporaryDirectory() as tmp:
     clears = [r for r in map(json.loads, cleared.read_text().splitlines()) if r["type"] == "label"]
     assert clears[-1]["targetId"] == "rightprompt" and "label" not in clears[-1]
     verify_in_pi(cleared, {})
-    assert [json.loads(line) for line in (imported / "requests.jsonl").read_text().splitlines()] == [
+    assert [r["history"] for r in request_log(imported)] == [
         [{"User": "right"}, {"User": "Duplicate prompt revised"}]]
 
     initial_state = Path(tmp) / "initial"
@@ -204,7 +256,7 @@ with tempfile.TemporaryDirectory() as tmp:
     history = active_history(initial_state)
     assert [m.get("User") for m in history if "User" in m] == ["/review startup", "Follow up"]
     assert [m["Assistant"]["text"] for m in history if "Assistant" in m] == ["First answer", "Second answer"]
-    requests = [json.loads(line) for line in (initial_state / "requests.jsonl").read_text().splitlines()]
+    requests = [r["history"] for r in request_log(initial_state)]
     assert requests == [history[:1], history[:3]]
 
     def saved_sessions():
@@ -212,7 +264,7 @@ with tempfile.TemporaryDirectory() as tmp:
             return {sid: json.loads(data) for sid, data in db.execute("SELECT id,data FROM sessions")}
 
     def logged_requests():
-        return [json.loads(line) for line in (initial_state / "requests.jsonl").read_text().splitlines()]
+        return [r["history"] for r in request_log(initial_state)]
 
     parent = saved_sessions()[1]
     with panda(repo, initial_state, args=["--continue"]) as (send, expect):

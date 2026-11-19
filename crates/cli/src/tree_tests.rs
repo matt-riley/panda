@@ -16,7 +16,15 @@ fn fixture() {
         ) -> Result<(String, Vec<Call>)> {
             if let Some(log) = std::env::var_os("PANDA_TEST_REQUEST_LOG") {
                 let mut file = fs::OpenOptions::new().append(true).create(true).open(log)?;
-                writeln!(file, "{}", serde_json::to_string(history)?)?;
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::json!({"system": system, "history": history})
+                )?;
+                if system.starts_with("Summarize") {
+                    ensure!(!system.contains("Fail this summary"), "summary unavailable");
+                    return Ok(("Checkpoint answer".into(), vec![]));
+                }
                 let answer = if history.len() == 1 {
                     "First answer"
                 } else if matches!(history.last(), Some(Message::User(text)) if text == "Follow up differently")
