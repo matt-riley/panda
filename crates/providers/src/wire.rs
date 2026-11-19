@@ -1,6 +1,6 @@
 //! Native SSE decoders for subscription endpoints.
 use anyhow::{Context, Result, bail, ensure};
-use panda_core::{Call, Emit, Event, Message};
+use panda_core::{Call, Emit, Event, LengthStop, Message};
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -38,8 +38,9 @@ pub(crate) fn string<'a>(v: &'a Value, k: &str) -> Result<&'a str> {
 pub struct Responses {
     lines: Lines,
     text: String,
-    calls: Vec<Call>,
+    calls: Vec<Value>,
     complete: bool,
+    cutoff: Option<(Option<u64>, Option<u64>)>,
 }
 impl Responses {
     pub fn push(&mut self, bytes: &[u8], emit: &mut Emit) -> Result<()> {
@@ -57,12 +58,20 @@ impl Responses {
                     emit(Event::Text(t.into()))
                 }
                 "response.output_item.done" if v["item"]["type"] == "function_call" => {
-                    let item = &v["item"];
-                    self.calls.push(Call {
-                        id: string(item, "call_id")?.into(),
-                        name: string(item, "name")?.into(),
-                        args: serde_json::from_str(string(item, "arguments")?)?,
-                    })
+                    self.calls.push(v["item"].clone());
+                }
+                "response.incomplete"
+                    if v["response"]["incomplete_details"]["reason"] == "max_output_tokens" =>
+                {
+                    let response = &v["response"];
+                    self.complete = true;
+                    self.cutoff = Some((
+                        response["usage"]["output_tokens"].as_u64(),
+                        response["max_output_tokens"].as_u64(),
+                    ));
+                    if !response["usage"].is_null() {
+                        emit(Event::Usage(response["usage"].clone()));
+                    }
                 }
                 "response.completed" => {
                     ensure!(
@@ -87,7 +96,32 @@ impl Responses {
             self.complete && self.lines.partial.is_empty(),
             "incomplete Responses stream"
         );
-        Ok((self.text, self.calls))
+        if let Some((output_tokens, output_limit)) = self.cutoff {
+            return Err(LengthStop {
+                text: self.text,
+                tool_fragments: self.calls,
+                output_tokens,
+                output_limit,
+                ..Default::default()
+            }
+            .into());
+        }
+        let calls = self
+            .calls
+            .iter()
+            .map(|item| {
+                ensure!(
+                    item.get("status").is_none() || item["status"] == "completed",
+                    "incomplete function call"
+                );
+                Ok(Call {
+                    id: string(item, "call_id")?.into(),
+                    name: string(item, "name")?.into(),
+                    args: serde_json::from_str(string(item, "arguments")?)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok((self.text, calls))
     }
 }
 fn call_id(id: &str) -> &str {
@@ -102,6 +136,7 @@ pub(crate) fn responses_body(
     let mut input = Vec::new();
     for m in history {
         match m {
+            Message::Truncated(_) => continue,
             Message::BranchSummary(s) => input.push(
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")}),
             ),

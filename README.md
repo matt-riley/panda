@@ -65,6 +65,10 @@ To keep recent exchanges verbatim during manual and automatic compaction, set an
 
 Panda keeps the newest whole user exchanges that fit, including their tool calls and results, and summarizes the older messages. When all eligible messages fit, compaction skips the summary request. A budget of `0` summarizes all eligible messages. With the setting omitted, manual compaction covers the full history and automatic threshold compaction uses its model-based retention budget.
 
+If a provider stops for length before using its output allowance, Panda saves the partial reply in the transcript and retries once. It can compact older exchanges before retrying. The retry carries the current prompt and completed tool results forward. Tool calls from a truncated reply never run. A full allowance or an unknown token count or limit ends the turn with a length error. A follow-up uses the completed conversation.
+
+Panda sends an explicit output limit for supported DeepSeek models and for OpenRouter models with an output limit in the cached catalogue. Refresh the OpenRouter catalogue with `:models openrouter`. For a Codex subscription, Panda uses the limit and usage returned with an incomplete response.
+
 ## Codemode
 
 Start `panda --codemode` to let the model combine read-only workspace tools in JavaScript. For example, ask “Rank the five files with the most TODO lines.” The script can walk every search page, count matches, and send the model just the ranking. Codemode works in both plan and code mode, and the flag also works with print, JSON and RPC.

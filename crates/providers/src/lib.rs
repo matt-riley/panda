@@ -10,6 +10,8 @@ pub struct Stream {
     calls: BTreeMap<u64, (String, String, String)>,
     done: bool,
     finished: bool,
+    length_stop: bool,
+    output_tokens: Option<u64>,
     total: usize,
 }
 impl Stream {
@@ -38,17 +40,20 @@ impl Stream {
                 "provider reported a streaming error"
             );
             if let Some(usage) = event.get("usage").filter(|v| !v.is_null()) {
+                self.output_tokens = usage["completion_tokens"].as_u64();
                 emit(Event::Usage(usage.clone()))
             }
             let Some(choice) = event["choices"].get(0) else {
                 continue;
             };
+            ensure!(!self.finished, "choice after finish reason");
             if let Some(reason) = choice["finish_reason"].as_str() {
                 ensure!(
-                    matches!(reason, "tool_calls" | "stop"),
+                    matches!(reason, "tool_calls" | "stop" | "length"),
                     "provider stopped: {reason}"
                 );
                 self.finished = true;
+                self.length_stop = reason == "length";
             }
             let d = &choice["delta"];
             if let Some(t) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()) {
@@ -78,10 +83,27 @@ impl Stream {
         Ok(())
     }
     pub fn finish(self) -> Result<(String, Vec<Call>)> {
+        self.finish_with_limit(None)
+    }
+    fn finish_with_limit(self, limit: Option<u64>) -> Result<(String, Vec<Call>)> {
         ensure!(
             self.done && self.finished && self.partial.is_empty(),
             "incomplete stream"
         );
+        if self.length_stop {
+            return Err(LengthStop {
+                text: self.text,
+                tool_fragments: self
+                    .calls
+                    .into_values()
+                    .map(|(id, name, arguments)| json!({"id":id,"name":name,"arguments":arguments}))
+                    .collect(),
+                output_tokens: self.output_tokens,
+                output_limit: limit,
+                ..Default::default()
+            }
+            .into());
+        }
         let calls = self
             .calls
             .into_values()
@@ -102,6 +124,18 @@ pub struct Api {
     pub model: String,
     pub key: String,
 }
+struct ChatProvider<A> {
+    api: A,
+    max_tokens: Option<u64>,
+}
+impl Api {
+    pub fn with_output_limit(self, max_tokens: Option<u64>) -> impl Provider + Send {
+        ChatProvider {
+            api: self,
+            max_tokens,
+        }
+    }
+}
 fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content":system})];
     let mut thought = None;
@@ -111,6 +145,7 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut history = history.iter().peekable();
     while let Some(msg) = history.next() {
         let message = match msg {
+            Message::Truncated(_) => continue,
             Message::BranchSummary(s) => {
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")})
             }
@@ -175,14 +210,60 @@ impl Provider for Api {
         emit: &mut Emit,
         effort: Option<&str>,
     ) -> Result<(String, Vec<Call>)> {
+        ChatProvider {
+            api: &*self,
+            max_tokens: None,
+        }
+        .reply_with_effort(system, h, tools, cancel, emit, effort)
+    }
+}
+impl<A: std::borrow::Borrow<Api>> Provider for ChatProvider<A> {
+    fn reply(
+        &mut self,
+        system: &str,
+        h: &[Message],
+        tools: &[Value],
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(String, Vec<Call>)> {
+        self.reply_with_effort(system, h, tools, cancel, emit, None)
+    }
+    fn reply_with_effort(
+        &mut self,
+        system: &str,
+        h: &[Message],
+        tools: &[Value],
+        cancel: &Cancel,
+        emit: &mut Emit,
+        effort: Option<&str>,
+    ) -> Result<(String, Vec<Call>)> {
+        let api = self.api.borrow();
         cancel.check()?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let request = async {
-            let mut body = json!({"model": self.model, "messages": messages(system,h), "stream": true, "stream_options":{"include_usage":true}});
+            let mut body = json!({"model": api.model, "messages": messages(system,h), "stream": true, "stream_options":{"include_usage":true}});
+            let deepseek = api.endpoint == "https://api.deepseek.com/chat/completions";
+            let limit = self.max_tokens.or_else(|| {
+                // Pin the documented DeepSeek default so the length comparison
+                // uses the allowance actually sent on this request.
+                (deepseek
+                    && matches!(
+                        api.model.as_str(),
+                        "deepseek-flash" | "deepseek-v4-pro" | "deepseek-v4-flash"
+                    ))
+                .then_some(match effort {
+                    Some("none") => 8192,
+                    Some("max") => 131072,
+                    _ => 65536,
+                })
+            });
+            if let Some(limit) = limit {
+                body["max_tokens"] = json!(limit);
+            }
             if let Some(effort) = effort {
-                if self.endpoint.contains("api.deepseek.com") {
+                if api.endpoint.contains("api.deepseek.com") {
                     body["reasoning_effort"] = json!(effort);
                 } else {
                     body["reasoning"] = json!({"effort":effort});
@@ -192,19 +273,25 @@ impl Provider for Api {
                 body["tools"] = tools.into();
             }
             let response = reqwest::Client::new()
-                .post(&self.endpoint)
-                .bearer_auth(&self.key)
+                .post(&api.endpoint)
+                .bearer_auth(&api.key)
                 .json(&body)
                 .send()
                 .await
                 .map_err(transport_error)?;
             let mut response = checked(response).await?;
             let mut stream = Stream::default();
-            while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+            while let Some(chunk) = response.chunk().await.map_err(|e| {
+                if stream.length_stop {
+                    e.without_url().into()
+                } else {
+                    transport_error(e)
+                }
+            })? {
                 cancel.check()?;
                 stream.push(&chunk, emit)?;
             }
-            stream.finish()
+            stream.finish_with_limit(limit)
         };
         rt.block_on(async {
             tokio::pin!(request);
@@ -287,6 +374,24 @@ pub mod models;
 #[cfg(test)]
 mod tests {
     use super::*;
+    proptest::proptest! {
+        #[test]
+        fn length_stop_survives_fragmented_terminal_delta(width in 1..100usize, used in 1..150u64) {
+            let terminal = json!({"choices":[{"finish_reason":"length","delta":{
+                "content":"partial café", "tool_calls":[{"index":0,"function":{"arguments":"{"}}]
+            }}]});
+            let usage = json!({"choices":[],"usage":{"completion_tokens":used}});
+            let wire = format!("data: {terminal}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+            let mut stream = Stream::default();
+            for chunk in wire.as_bytes().chunks(width) {
+                stream.push(chunk, &mut |_| {}).unwrap();
+            }
+            let cutoff = stream.finish_with_limit(Some(100)).unwrap_err().downcast::<LengthStop>().unwrap();
+            proptest::prop_assert_eq!(cutoff.text, "partial café");
+            proptest::prop_assert_eq!(cutoff.tool_fragments[0]["arguments"].as_str(), Some("{"));
+            proptest::prop_assert_eq!((cutoff.output_tokens, cutoff.output_limit), (Some(used), Some(100)));
+        }
+    }
     #[test]
     fn fragmented_call_at_every_chunk_width() {
         let data = concat!(

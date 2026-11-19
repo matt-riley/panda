@@ -40,6 +40,32 @@ fn decodes_fragmented_responses_and_preserves_call_identity() {
     }
 }
 #[test]
+fn incomplete_response_archives_unparseable_tool_arguments() {
+    let events = [
+        json!({"type":"response.output_text.delta","delta":"partial response"}),
+        json!({"type":"response.output_item.done","item":{"type":"function_call","status":"incomplete","call_id":"c","name":"read","arguments":"{\"path\":"}}),
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"max_output_tokens":10,"usage":{"output_tokens":10}}}),
+    ];
+    let mut decoder = Responses::default();
+    for event in events {
+        decoder
+            .push(format!("data: {event}\n\n").as_bytes(), &mut |_| {})
+            .unwrap();
+    }
+    let cutoff = decoder
+        .finish()
+        .unwrap_err()
+        .downcast::<panda_core::LengthStop>()
+        .unwrap();
+    assert_eq!(cutoff.text, "partial response");
+    assert_eq!(cutoff.tool_fragments[0]["arguments"], "{\"path\":");
+    assert_eq!(
+        (cutoff.output_tokens, cutoff.output_limit),
+        (Some(10), Some(10))
+    );
+}
+
+#[test]
 fn fresh_state_asks_user_to_login_without_an_external_runtime() {
     use panda_core::{Cancel, Provider};
     use panda_providers::subscription::Subscription;

@@ -50,6 +50,7 @@ impl From<String> for ToolOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    Truncated(LengthStop),
     BranchSummary(String),
     User(String),
     Reasoning(String),
@@ -70,6 +71,27 @@ pub enum Message {
         is_error: bool,
     },
 }
+
+/// A terminal provider response. Tool fragments are audit data, never executable calls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LengthStop {
+    pub text: String,
+    pub reasoning: String,
+    pub tool_fragments: Vec<Value>,
+    pub output_tokens: Option<u64>,
+    pub output_limit: Option<u64>,
+}
+impl LengthStop {
+    fn early(&self) -> bool {
+        matches!((self.output_tokens, self.output_limit), (Some(used), Some(limit)) if used < limit)
+    }
+}
+impl std::fmt::Display for LengthStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider stopped: length")
+    }
+}
+impl std::error::Error for LengthStop {}
 #[derive(Default, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Mode {
     Plan,
@@ -137,10 +159,11 @@ impl UsageRecord {
 }
 impl Session {
     fn resolved_at(&self, i: usize) -> &[Message] {
-        self.context_edits
-            .get(&i)
-            .map(Vec::as_slice)
-            .unwrap_or_else(|| std::slice::from_ref(&self.history[i]))
+        match self.context_edits.get(&i) {
+            Some(replacement) => replacement,
+            None if matches!(self.history[i], Message::Truncated(_)) => &[],
+            None => std::slice::from_ref(&self.history[i]),
+        }
     }
 
     pub fn resolved(&self, range: std::ops::Range<usize>) -> Vec<Message> {
@@ -176,6 +199,9 @@ impl Session {
             u.checkpoint_through == checkpoint
                 && u.through > checkpoint
                 && u.through <= self.history.len()
+                && !self.history[u.through - 1..]
+                    .iter()
+                    .any(|m| matches!(m, Message::Truncated(_)))
         }) {
             let tail = &self.history[u.through..];
             let bytes = serde_json::to_vec(tail).map_or(0, |v| v.len().saturating_sub(2));
@@ -202,6 +228,9 @@ impl Session {
         let mut bytes = 0u64;
         let mut boundary = limit;
         for (i, message) in self.history.iter().enumerate().skip(previous).rev() {
+            if matches!(message, Message::Truncated(_)) {
+                continue;
+            }
             let mut starts_exchange = message.user();
             if self.keep_recent_tokens.is_some() {
                 let visible = self.resolved_at(i);
@@ -375,6 +404,7 @@ pub fn compact_with_instructions(
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    Truncated { text: String, retrying: bool },
     Retry { attempt: u32, seconds: u64 },
     Reasoning(String),
     ToolOutput(String),
@@ -465,6 +495,8 @@ pub fn turn_message(
     );
     cancel.check()?;
     let system = tools.system()?;
+    let turn_start = s.history.len();
+    let mut retried_length = false;
     s.active = true;
     s.history.push(input);
     store.save(&mut s)?;
@@ -492,20 +524,20 @@ pub fn turn_message(
             store.save(&mut s)?;
             compacted = true;
         }
-        let mut reading = None;
-        let mut thought = String::new();
-        let mut relay = |e| {
-            if let Event::Usage(u) = &e {
-                reading = UsageRecord::from_event(u);
-            }
-            if let Event::Reasoning(t) = &e {
-                thought.push_str(t);
-            }
-            emit(e);
-        };
-        let request = |p: &mut dyn Provider, s: &Session, relay: &mut Emit| {
+        let (text, calls, thought, reading) = loop {
+            let mut reading = None;
+            let mut thought = String::new();
+            let mut relay = |e| {
+                if let Event::Usage(u) = &e {
+                    reading = UsageRecord::from_event(u);
+                }
+                if let Event::Reasoning(t) = &e {
+                    thought.push_str(t);
+                }
+                emit(e);
+            };
             let history = s.projected();
-            recovery::request(cancel, relay, |events| {
+            let reply = recovery::request(cancel, &mut relay, |events| {
                 p.reply_with_effort(
                     &system,
                     &history,
@@ -514,19 +546,56 @@ pub fn turn_message(
                     events,
                     s.reasoning.as_deref(),
                 )
-            })
-        };
-        let (text, calls) = match request(p, &s, &mut relay) {
-            Err(e) if !compacted && e.is::<ContextOverflow>() && keep > previous => {
-                let end = s.compact_through(keep, 0);
-                if end <= previous {
-                    return Err(e);
+            });
+            match reply {
+                Ok((text, calls)) => break (text, calls, thought, reading),
+                Err(e) if e.is::<LengthStop>() => {
+                    let mut partial = e.downcast::<LengthStop>()?;
+                    partial.reasoning = thought;
+                    let retrying = partial.early() && !retried_length;
+                    let notice = Event::Truncated {
+                        text: partial.text.clone(),
+                        retrying,
+                    };
+                    s.history.push(Message::Truncated(partial));
+                    if let Some(mut usage) = reading {
+                        usage.through = s.history.len();
+                        usage.checkpoint_through = s.checkpoint.as_ref().map_or(0, |cp| cp.through);
+                        s.usage.push(usage);
+                    }
+                    // All tool results from this attempt are already durable. A terminal
+                    // cutoff leaves no outstanding tool operation to acknowledge.
+                    s.active = retrying;
+                    store.save(&mut s)?;
+                    emit(notice);
+                    if !retrying {
+                        bail!("provider stopped: length; partial reply saved");
+                    }
+                    retried_length = true;
+                    cancel.check()?;
+                    let end = s.compact_through(turn_start, 0);
+                    if !compacted && end > previous {
+                        checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
+                        store.save(&mut s)?;
+                        compacted = true;
+                    }
                 }
-                checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, &mut relay)?;
-                store.save(&mut s)?;
-                request(p, &s, &mut relay)?
+                Err(e)
+                    if !compacted
+                        && !retried_length
+                        && e.is::<ContextOverflow>()
+                        && keep > previous =>
+                {
+                    let end = s.compact_through(keep, 0);
+                    if end <= previous {
+                        return Err(e);
+                    }
+                    checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
+                    store.save(&mut s)?;
+                    compacted = true;
+                }
+                Err(e) => return Err(e),
             }
-            other => other?,
         };
         cancel.check()?;
         let mut ids = std::collections::HashSet::new();
@@ -611,7 +680,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
             }
             Message::Result { id, .. } => completed.push(id.clone()),
             Message::Reasoning(_) => {}
-            Message::BranchSummary(_) => break,
+            Message::BranchSummary(_) | Message::Truncated(_) => break,
             Message::User(_) | Message::Images { .. } => break,
         }
     }

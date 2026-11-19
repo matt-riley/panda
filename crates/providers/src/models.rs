@@ -6,6 +6,7 @@ use std::{path::Path, time::Duration};
 pub struct Catalogue {
     pub models: Vec<(String, Option<u64>)>,
     pub efforts: std::collections::BTreeMap<String, Vec<String>>,
+    pub output_limits: std::collections::BTreeMap<String, u64>,
 }
 
 pub fn list(provider: &str, state: &Path, key: Option<&str>) -> Result<Vec<(String, Option<u64>)>> {
@@ -39,6 +40,7 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
             };
             let v: Value = checked(request.send().await?).await?.json().await?;
             let mut efforts = std::collections::BTreeMap::new();
+            let mut output_limits = std::collections::BTreeMap::new();
             let mut ids: Vec<_> = v["data"]
                 .as_array()
                 .or(v["models"].as_array())
@@ -47,6 +49,12 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                 .filter(|m| m["visibility"] != "hide")
                 .filter_map(|m| {
                     let id = m["id"].as_str().or(m["slug"].as_str())?;
+                    if let Some(limit) = m["top_provider"]["max_completion_tokens"]
+                        .as_u64()
+                        .filter(|&n| n > 0)
+                    {
+                        output_limits.insert(id.to_owned(), limit);
+                    }
                     if let Some(levels) = m["supported_reasoning_levels"].as_array() {
                         efforts.insert(
                             id.to_owned(),
@@ -69,6 +77,7 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
             Ok(Catalogue {
                 models: ids,
                 efforts,
+                output_limits,
             })
         })
 }

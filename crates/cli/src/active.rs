@@ -39,6 +39,19 @@ impl Drop for Raw {
 
 pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
     match event {
+        Event::Truncated { text, retrying } => {
+            if screen.active {
+                screen.finish_reply(&text);
+            }
+            screen.line(
+                Tone::Dim,
+                if retrying {
+                    "Partial reply saved. Retrying once."
+                } else {
+                    "Partial reply saved (output length limit)."
+                },
+            );
+        }
         Event::Retry { attempt, seconds } => {
             if screen.active {
                 screen.retry = Some((
