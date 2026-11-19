@@ -1,5 +1,7 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use panda_coding::field;
+use regex::Regex;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -122,17 +124,50 @@ pub(super) fn read_file(f: fs::File) -> Result<String> {
     ensure!(bytes.len() <= 1_048_576, "file exceeds 1 MiB");
     Ok(String::from_utf8(bytes)?)
 }
+enum LineQuery<'a> {
+    Literal(&'a str),
+    Regex(Regex),
+}
+
+impl<'a> LineQuery<'a> {
+    fn parse(args: &'a Value) -> Result<Self> {
+        let query = field(args, "query")?;
+        match args.get("regex") {
+            None | Some(Value::Bool(false)) => Ok(Self::Literal(query)),
+            Some(Value::Bool(true)) => Ok(Self::Regex(
+                Regex::new(query).map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?,
+            )),
+            _ => bail!("regex must be a boolean"),
+        }
+    }
+
+    fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::Literal(query) => line.contains(*query),
+            Self::Regex(regex) => regex.is_match(line),
+        }
+    }
+}
+
+fn path_filter(value: &Value) -> Result<GlobSet> {
+    let pattern = value.as_str().context("glob must be a string")?;
+    let glob = GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map_err(|e| anyhow::anyhow!("invalid glob: {e}"))?;
+    Ok(GlobSetBuilder::new().add(glob).build()?)
+}
+
 fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
     let offset = args
         .get("offset")
         .map(|v| v.as_u64().ok_or_else(|| anyhow::anyhow!("invalid offset")))
         .transpose()?
         .unwrap_or(0);
-    let query = if name == "search" {
-        Some(field(args, "query")?)
-    } else {
-        None
-    };
+    let query = (name == "search")
+        .then(|| LineQuery::parse(args))
+        .transpose()?;
+    let glob = args.get("glob").map(path_filter).transpose()?;
     let mut seen = 0u64;
     let mut items = Vec::new();
     let mut more = false;
@@ -163,13 +198,17 @@ fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path().strip_prefix(root)?.to_string_lossy();
-        if let Some(q) = query {
+        let relative = entry.path().strip_prefix(root)?;
+        if glob.as_ref().is_some_and(|g| !g.is_match(relative)) {
+            continue;
+        }
+        let path = relative.to_string_lossy();
+        if let Some(q) = &query {
             let Ok(text) = read(entry.path()) else {
                 continue;
             };
             for (i, line) in text.lines().enumerate() {
-                if line.contains(q)
+                if q.matches(line)
                     && !add(
                         json!({"path":path,"line":i+1,"text":line.chars().take(500).collect::<String>()}),
                     )
