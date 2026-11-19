@@ -35,7 +35,7 @@ pub struct Options {
     pub prompt: String,
 }
 impl Options {
-    pub fn parse(args: &[String]) -> Result<Self> {
+    pub fn parse(args: &[String], interactive_terminal: bool) -> Result<Self> {
         let mut out = Self::default();
         let mut it = args.iter();
         while let Some(arg) = it.next() {
@@ -126,10 +126,7 @@ impl Options {
             out.interface != Interface::Rpc || out.prompt.is_empty(),
             "RPC reads requests on stdin"
         );
-        if out.interface == Interface::Terminal && !out.prompt.is_empty() {
-            out.interface = Interface::Print;
-        }
-        if out.no_session
+        let one_shot = out.no_session
             || out.session_id.is_some()
             || out.session_dir.is_some()
             || out.model.is_some()
@@ -137,8 +134,14 @@ impl Options {
             || out.provider.is_some()
             || out.tools.is_some()
             || out.system_prompt.is_some()
-            || !out.append_system_prompt.is_empty()
+            || !out.append_system_prompt.is_empty();
+        if out.interface == Interface::Terminal
+            && !out.prompt.is_empty()
+            && (!interactive_terminal || one_shot)
         {
+            out.interface = Interface::Print;
+        }
+        if one_shot {
             ensure!(
                 matches!(out.interface, Interface::Print | Interface::Json),
                 "one-shot options apply to print and JSON runs"
@@ -472,7 +475,7 @@ mod tests {
                 .split_whitespace()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            assert!(Options::parse(&args).is_err(), "{args:?}");
+            assert!(Options::parse(&args, true).is_err(), "{args:?}");
         }
     }
 
@@ -542,11 +545,14 @@ mod tests {
             cancel: &Cancel::default(),
         }
         .run(
-            Options::parse(&match mode.as_str() {
-                "rpc" => vec!["--mode".into(), "rpc".into()],
-                "json" => vec!["--mode".into(), "json".into(), "read".into()],
-                _ => vec!["--print".into(), "read".into()],
-            })
+            Options::parse(
+                &match mode.as_str() {
+                    "rpc" => vec!["--mode".into(), "rpc".into()],
+                    "json" => vec!["--mode".into(), "json".into(), "read".into()],
+                    _ => vec!["--print".into(), "read".into()],
+                },
+                false,
+            )
             .unwrap(),
         )
         .unwrap();

@@ -366,11 +366,15 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
-    let mut options = automation::Options::parse(&args)?;
+    let interactive_terminal = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb");
+    let mut options = automation::Options::parse(&args, interactive_terminal)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
     let native = Native::new(&root, &std::env::current_exe()?)?;
@@ -390,11 +394,7 @@ fn run(
         roots.extend(std::env::split_paths(&extra))
     }
     let terminal_mode = options.interface == automation::Interface::Terminal;
-    let interactive = terminal_mode
-        && io::stdin().is_terminal()
-        && io::stdout().is_terminal()
-        && io::stderr().is_terminal()
-        && std::env::var("TERM").as_deref() != Ok("dumb");
+    let interactive = terminal_mode && interactive_terminal;
     let mut screen = Screen::open(interactive)?;
     if interactive {
         screen.footer.location = screen::Footer::location(&root, &home);
@@ -522,16 +522,21 @@ fn run(
     );
     let mut picker = None;
     let mut catalogue: Vec<(String, String)> = Vec::new();
+    let mut initial_prompt = (!options.prompt.is_empty()).then_some(options.prompt);
 
     loop {
-        let (line, recalled) = if let Some(command) = screen.commands.pop_front() {
-            (command, false)
-        } else if interactive {
+        if interactive {
             screen.footer.session = format!("{mode:?} · session {}", db.id());
             screen.footer.model = format!("{p}/{model}");
+        }
+        let (line, allow_commands) = if let Some(prompt) = initial_prompt.take() {
+            (prompt, false)
+        } else if let Some(command) = screen.commands.pop_front() {
+            (command, true)
+        } else if interactive {
             match screen.read(&mut editor)? {
-                reedline::Signal::Success(line) => (line, screen.recalled_images.is_some()),
-                reedline::Signal::HostCommand(command) => (command, false),
+                reedline::Signal::Success(line) => (line, screen.recalled_images.is_none()),
+                reedline::Signal::HostCommand(command) => (command, true),
                 reedline::Signal::CtrlD => break,
                 reedline::Signal::CtrlC(_) => {
                     screen.recalled_images = None;
@@ -544,21 +549,25 @@ fn run(
             if io::stdin().read_line(&mut line)? == 0 {
                 break;
             }
-            (line, false)
+            (line, true)
         };
-        let line = if recalled { line.as_str() } else { line.trim() };
+        let line = if allow_commands {
+            line.trim()
+        } else {
+            line.as_str()
+        };
         let alias;
-        let line = if !recalled && let Some(name) = line.strip_prefix('/') {
+        let line = if allow_commands && let Some(name) = line.strip_prefix('/') {
             alias = format!(":{name}");
             alias.as_str()
         } else {
             line
         };
-        if !recalled && matches!(line, ":q" | ":quit") {
+        if allow_commands && matches!(line, ":q" | ":quit") {
             break;
         }
-        if line.trim().is_empty() || (!recalled && line == ":") {
-            if recalled {
+        if line.trim().is_empty() || (allow_commands && line == ":") {
+            if !allow_commands {
                 screen.recalled_images = None;
             }
             continue;
@@ -566,7 +575,7 @@ fn run(
         if interactive {
             screen.line(Tone::User, &format!("❯ {line}"));
         }
-        if !recalled && line == ":cancel" {
+        if allow_commands && line == ":cancel" {
             picker = None;
             continue;
         }
@@ -589,7 +598,7 @@ fn run(
                 _ => line,
             };
             let chosen;
-            let line = if !recalled && interactive && matches!(line, ":login" | ":model") {
+            let line = if allow_commands && interactive && matches!(line, ":login" | ":model") {
                 let Some(cmd) = pick_command(&state, line, (&p, &model))? else {
                     return Ok(());
                 };
@@ -599,7 +608,11 @@ fn run(
                 line
             };
             let mut words = line.split_whitespace();
-            let first = if recalled { "" } else { words.next().unwrap() };
+            let first = if allow_commands {
+                words.next().unwrap()
+            } else {
+                ""
+            };
             match first {
                 ":plan" | ":code" => {
                     let mut s = db.load()?;
@@ -997,7 +1010,7 @@ fn run(
                     } else {
                         attachments::prepare(&root, line, screen.clipboard.as_deref())?
                     };
-                    if !recalled && let Some(name) = first.strip_prefix(":skill:") {
+                    if let Some(name) = first.strip_prefix(":skill:") {
                         let (path, body) = coding.skills.named(name)?;
                         screen.line(Tone::Dim, &format!("Skill loaded: {}", path.display()));
                         match &mut input {

@@ -19,11 +19,14 @@ from pathlib import Path
 
 
 @contextmanager
-def panda(repo, state, released=None, slow=False, startup=None):
+def panda(repo, state, released=None, slow=False, startup=None, args=None, one_shot=False):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(repo)
         os.environ.update(TERM="xterm-256color", PANDA_HOME=str(state), PANDA_TREE_FIXTURE="1")
+        if args is not None:
+            os.environ["PANDA_TREE_ARGS"] = json.dumps(args)
+            os.environ["PANDA_TEST_REQUEST_LOG"] = str(state / "requests.jsonl")
         if slow:
             os.environ["PANDA_SLOW_SUMMARY"] = "1"
         if released:
@@ -46,6 +49,10 @@ def panda(repo, state, released=None, slow=False, startup=None):
         del pending[:pending.index(marker) + len(marker)]
 
     try:
+        if one_shot:
+            yield lambda s: os.write(fd, s.encode()), expect
+            expect("test result: ok.")
+            return
         if startup:
             expect(startup)
         expect("deepseek-flash")
@@ -83,6 +90,20 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    initial_state = Path(tmp) / "initial"
+    with panda(repo, initial_state, args=["/review startup"], startup="First answer") as (send, expect):
+        assert [m.get("User") for m in active_history(initial_state) if "User" in m] == ["/review startup"]
+        send("Follow up\r")
+        expect("Second answer")
+        expect("deepseek-flash")
+    history = active_history(initial_state)
+    assert [m.get("User") for m in history if "User" in m] == ["/review startup", "Follow up"]
+    assert [m["Assistant"]["text"] for m in history if "Assistant" in m] == ["First answer", "Second answer"]
+    requests = [json.loads(line) for line in (initial_state / "requests.jsonl").read_text().splitlines()]
+    assert requests == [history[:1], history[:3]]
+    for flags in (["--print"], ["--mode", "json"], ["--no-session"]):
+        with panda(repo, Path(tmp) / "once", args=flags + ["/review startup"], one_shot=True) as (_, expect):
+            expect('"type":"done"' if flags == ["--mode", "json"] else "First answer\r\n")
     with panda(repo, state) as (send, expect):
         send(":copy\r")
         expect("No assistant reply")
