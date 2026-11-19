@@ -1,8 +1,9 @@
 use super::{Disk, save_snapshot};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use panda_core::{Cancel, Message, Session, Store};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct TreeEntry {
     pub id: i64,
@@ -218,6 +219,16 @@ impl Disk {
         Ok(entries)
     }
 
+    /// Seed a separate session from the selected prompt's ancestry without moving this tree's head.
+    pub fn fork_prompt(&self, dir: &Path, repo: &Path, node: i64) -> Result<(Self, Message)> {
+        let mut seed = self.load()?;
+        ensure!(!seed.active, "acknowledge interrupted turn before forking");
+        let (parent, draft) = destination(&self.conn, self.id, node)?;
+        let draft = draft.context("select a user prompt to fork")?;
+        restore_path(&self.conn, self.id, parent, &mut seed)?;
+        Ok((self.create_fork(dir, repo, seed, "")?, draft))
+    }
+
     /// A prompt becomes an editable draft at its parent. A completed answer
     /// becomes the active tip. Both changes share the snapshot transaction.
     pub fn navigate(&mut self, node: i64) -> Result<Option<Message>> {
@@ -344,6 +355,52 @@ mod tests {
         assert_eq!(entries.len(), 6);
         assert_eq!(entries.iter().filter(|e| e.current).count(), 1);
         assert!(entries[4].branch_depth > entries[1].branch_depth);
+    }
+
+    #[test]
+    fn fork_from_a_sibling_prompt_copies_its_ancestors_and_full_image_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut db = Disk::open(root, root, None).unwrap();
+        let mut original = db.load().unwrap();
+        let prompt = Message::Images {
+            text: "image caption ".repeat(100),
+            urls: vec!["data:image/png;base64,AA==".into()],
+        };
+        original.history = vec![
+            Message::User("first".into()),
+            answer("one"),
+            prompt.clone(),
+            answer("two"),
+        ];
+        db.save(&mut original).unwrap();
+        let entries = db.tree().unwrap();
+        db.navigate(entries[0].id).unwrap();
+        let mut sibling = db.load().unwrap();
+        sibling.history = vec![Message::User("other".into()), answer("other answer")];
+        db.save(&mut sibling).unwrap();
+        let current = db
+            .tree()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.current)
+            .unwrap()
+            .id;
+
+        assert!(db.fork_prompt(root, root, current).is_err());
+        assert_eq!(db.list(root).unwrap(), [db.id()]);
+        let (child, draft) = db.fork_prompt(root, root, entries[2].id).unwrap();
+        assert_eq!(draft, prompt);
+        let seed = child.load().unwrap();
+        assert_eq!(seed.history, &original.history[..2]);
+        assert_eq!(seed.parent, Some(db.id()));
+        assert_eq!(db.load().unwrap().revision, sibling.revision);
+        assert!(
+            db.tree()
+                .unwrap()
+                .iter()
+                .any(|e| e.id == current && e.current)
+        );
     }
 
     #[test]

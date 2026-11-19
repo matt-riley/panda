@@ -720,21 +720,27 @@ fn run(
                         screen.line(Tone::Dim, "This session has no prompts or answers yet.");
                         return Ok(());
                     }
-                    let Some((node, summarize)) = picker::tree(&entries)? else {
+                    let Some((node, action)) = picker::tree(&entries)? else {
                         return Ok(());
                     };
-                    let draft = if summarize {
-                        cancel.reset();
-                        db.navigate_summarized(node, &cancel, |messages| {
-                            eprintln!("Summarizing branch… Ctrl-C to cancel");
-                            summarize_branch(
-                                provider(&state, &p, &model)?.as_mut(),
-                                messages,
-                                &cancel,
-                            )
-                        })?
-                    } else {
-                        db.navigate(node)?
+                    let draft = match action {
+                        picker::TreeAction::Fork => {
+                            let (child, prompt) = db.fork_prompt(&state, &root, node)?;
+                            db = child;
+                            Some(prompt)
+                        }
+                        picker::TreeAction::Switch => db.navigate(node)?,
+                        picker::TreeAction::Summarize => {
+                            cancel.reset();
+                            db.navigate_summarized(node, &cancel, |messages| {
+                                eprintln!("Summarizing branch… Ctrl-C to cancel");
+                                summarize_branch(
+                                    provider(&state, &p, &model)?.as_mut(),
+                                    messages,
+                                    &cancel,
+                                )
+                            })?
+                        }
                     };
                     screen.clear();
                     mode = show(&db, &mut screen)?;

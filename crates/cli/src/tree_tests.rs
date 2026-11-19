@@ -19,6 +19,9 @@ fn fixture() {
                 writeln!(file, "{}", serde_json::to_string(history)?)?;
                 let answer = if history.len() == 1 {
                     "First answer"
+                } else if matches!(history.last(), Some(Message::User(text)) if text == "Follow up differently")
+                {
+                    "Revised answer"
                 } else {
                     "Second answer"
                 };
