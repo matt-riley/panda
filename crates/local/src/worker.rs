@@ -46,6 +46,38 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), "aa cc aa");
     }
     #[test]
+    fn ls_reports_links_without_following_them_and_includes_ignored_names() -> anyhow::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let root = parent.path().join("workspace");
+        fs::create_dir(&root)?;
+        fs::create_dir(parent.path().join("outside"))?;
+        fs::write(root.join(".gitignore"), "ignored\n")?;
+        fs::write(root.join("ignored"), "")?;
+        std::os::unix::fs::symlink(parent.path(), root.join("link"))?;
+        let page: Value = serde_json::from_str(&run(&root, "ls", &json!({"path":"."}))?)?;
+        assert_eq!(
+            page,
+            json!({"items":[
+            {"name":".gitignore","type":"file"},
+            {"name":"ignored","type":"file"},
+            {"name":"link","type":"symlink"}
+        ],"next_offset":null})
+        );
+        for args in [
+            json!({"path":"link"}),
+            json!({"path":"link/outside"}),
+            json!({"path":"../outside"}),
+            json!({"path":parent.path()}),
+            json!({"path":"ignored"}),
+            json!({"path":null}),
+            json!({"offset":-1}),
+        ] {
+            assert!(run(&root, "ls", &args).is_err(), "{args}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ignore_rules_stay_within_the_workspace_and_their_subtree() -> anyhow::Result<()> {
         let parent = tempfile::tempdir()?;
         let root = parent.path().join("workspace");

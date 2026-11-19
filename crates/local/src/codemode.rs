@@ -135,7 +135,7 @@ impl<'a> Codemode<'a> {
                             count += 1;
                             ensure!(count <= MAX_CALLS, "Codemode nested call limit exceeded");
                             ensure!(
-                                matches!(name.as_str(), "read" | "search" | "repo_map"),
+                                matches!(name.as_str(), "read" | "search" | "repo_map" | "ls"),
                                 "unavailable nested tool"
                             );
                             ensure!(
@@ -197,7 +197,7 @@ For per-file results, group the items by their path in the same loop and emit on
         let mut schemas = self.inner.schemas(mode);
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":"Run isolated JavaScript to compose read-only workspace tools. tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) and tools.repo_map({glob?,offset?}) return {items,next_offset}; search items have path,line,text. Search defaults to case-sensitive literal matching. Set ignoreCase:true to ignore case. A positive context adds before and after arrays of neighboring lines in file order. Only matches count toward offsets. Set regex:true for a Rust regex. Both tools respect .gitignore and accept a workspace-relative glob such as **/*.rs. tools.read({path,offset?,limit?}) returns a string. Calls are synchronous. Use text(value) to emit selected output; only that output is returned. Limits: 64 calls, 10 seconds, 16 KiB output.",
+            "description":"Run isolated JavaScript to compose read-only workspace tools. tools.ls({path?,offset?}) lists immediate entries (name,type) including dotfiles, defaults to the root, and returns {items,next_offset}. tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) and tools.repo_map({glob?,offset?}) return {items,next_offset}; search items have path,line,text. Search defaults to case-sensitive literal matching. Set ignoreCase:true to ignore case. A positive context adds before and after arrays of neighboring lines in file order. Only matches count toward offsets. Set regex:true for a Rust regex. Both tools respect .gitignore and accept a workspace-relative glob such as **/*.rs. tools.read({path,offset?,limit?}) returns a string. Calls are synchronous. Use text(value) to emit selected output; only that output is returned. Limits: 64 calls, 10 seconds, 16 KiB output.",
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas

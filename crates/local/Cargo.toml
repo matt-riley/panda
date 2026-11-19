@@ -16,4 +16,5 @@ globset = "0.4"
 ignore = "0.4"
 regex = "1"
 libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
 rquickjs = "0.14"

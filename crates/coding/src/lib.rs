@@ -68,6 +68,12 @@ fn catalog(mode: Mode) -> Vec<Value> {
             false,
         ),
         (
+            "ls",
+            "List immediate entries in a workspace directory, including dotfiles, in lexical order. Returns items with name and type. Pass next_offset as offset for the next page.",
+            &[],
+            false,
+        ),
+        (
             "repo_map",
             "List workspace files in lexical order, respecting .gitignore. Use glob to filter paths and next_offset to fetch the next page.",
             &[],
@@ -128,8 +134,13 @@ fn catalog(mode: Mode) -> Vec<Value> {
                     props.insert(field.into(), json!({"type":"integer","minimum":1}));
                 }
             }
-            if matches!(*name, "search" | "repo_map") {
+            if *name == "ls" {
+                props.insert("path".into(), json!({"type":"string","description":"Workspace-relative directory. Defaults to the workspace root."}));
+            }
+            if matches!(*name, "ls" | "search" | "repo_map") {
                 props.insert("offset".into(), json!({"type":"integer","minimum":0}));
+            }
+            if matches!(*name, "search" | "repo_map") {
                 props.insert("glob".into(), json!({"type":"string","description":"Match workspace-relative paths. Use *.rs at the root or **/*.rs at any depth."}));
             }
             if *name == "search" {
