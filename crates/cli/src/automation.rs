@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use panda_core::*;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     io::{self, BufRead, IsTerminal, Read},
     path::Path,
     sync::{Mutex, mpsc},
@@ -21,6 +22,7 @@ pub enum Interface {
 pub struct Options {
     pub interface: Interface,
     pub codemode: bool,
+    pub tools: Option<BTreeSet<String>>,
     pub resume: bool,
     pub no_session: bool,
     pub provider: Option<String>,
@@ -35,6 +37,21 @@ impl Options {
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "--codemode" => out.codemode = true,
+                "--tools" | "--no-tools" => {
+                    ensure!(out.tools.is_none(), "specify --tools or --no-tools once");
+                    let mut names = BTreeSet::new();
+                    if arg == "--tools" {
+                        let list = it
+                            .next()
+                            .filter(|s| !s.starts_with('-'))
+                            .context("expected comma-separated tool names after --tools")?;
+                        for name in list.split(',').map(str::trim) {
+                            ensure!(!name.is_empty(), "empty name in --tools");
+                            names.insert(name.to_owned());
+                        }
+                    }
+                    out.tools = Some(names);
+                }
                 "--no-session" => out.no_session = true,
                 "--provider" | "--model" | "--thinking" => {
                     let value = it
@@ -79,11 +96,15 @@ impl Options {
         if out.interface == Interface::Terminal && !out.prompt.is_empty() {
             out.interface = Interface::Print;
         }
-        if out.no_session || out.model.is_some() || out.thinking.is_some() || out.provider.is_some()
+        if out.no_session
+            || out.model.is_some()
+            || out.thinking.is_some()
+            || out.provider.is_some()
+            || out.tools.is_some()
         {
             ensure!(
                 matches!(out.interface, Interface::Print | Interface::Json),
-                "--provider, --model, --thinking and --no-session apply to print and JSON runs"
+                "one-shot options apply to print and JSON runs"
             );
         }
         ensure!(
@@ -94,6 +115,9 @@ impl Options {
             out.provider.is_none() || out.model.is_some(),
             "--provider requires --model"
         );
+        if let Some(names) = &mut out.tools {
+            out.codemode = names.remove("codemode");
+        }
         Ok(out)
     }
 }
@@ -331,6 +355,12 @@ mod tests {
             "--no-session --continue --mode json",
             "--mode rpc --model foo",
             "--no-session",
+            "--tools read",
+            "--mode rpc --no-tools",
+            "--print --tools",
+            "--mode json --tools read,",
+            "--print --tools read --no-tools",
+            "--print --no-tools --tools read",
         ] {
             let args = args
                 .split_whitespace()

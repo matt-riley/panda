@@ -99,6 +99,62 @@ impl Provider for RankingProvider {
 
 #[test]
 #[ignore = "requires native macOS Seatbelt"]
+fn selected_tools_restrict_direct_and_nested_dispatch() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join("note"), "original")?;
+    let base = coding(root.path())?;
+    let read_only = panda_coding::SelectedTools::new(&base, ["read".to_owned()].into())?;
+    let enabled = Codemode::new(&read_only, EXE.as_ref());
+    let run = |name, args| enabled.run(Mode::Code, &call(name, args), &Cancel::default());
+    let schema = enabled.schemas(Mode::Code);
+    assert_eq!(
+        schema
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["read", "codemode"]
+    );
+    assert!(
+        !schema[1]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("tools.search")
+    );
+    assert_eq!(run("read", json!({"path":"note"}))?, "original");
+    assert!(run("write", json!({"path":"note","text":"modified"})).is_err());
+    assert_eq!(fs::read_to_string(root.path().join("note"))?, "original");
+    assert_eq!(
+        run(
+            "codemode",
+            json!({"code":"text([Object.keys(tools), tools.read({path:'note'})])"})
+        )?,
+        r#"[["read"],"original"]"#
+    );
+    assert!(
+        run(
+            "codemode",
+            json!({"code":"tools.search({query:'original'})"})
+        )
+        .is_err()
+    );
+
+    let writes = panda_coding::SelectedTools::new(&base, ["write".to_owned()].into())?;
+    assert!(writes.schemas(Mode::Plan).is_empty());
+    assert!(
+        writes
+            .run(
+                Mode::Plan,
+                &call("write", json!({"path":"note","text":"modified"})),
+                &Cancel::default()
+            )
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(root.path().join("note"))?, "original");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
 fn paginated_todo_ranking() -> Result<()> {
     let root = tempfile::tempdir()?;
     for (file, count) in [

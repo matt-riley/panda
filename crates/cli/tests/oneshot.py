@@ -9,13 +9,21 @@ import tempfile
 import threading
 
 requests = []
+next_calls = []
 
 
 class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         requests.append((self.path, json.loads(body)))
-        response = b'data: {"choices":[{"delta":{"content":"reviewed"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        if next_calls:
+            name, args = next_calls.pop(0)
+            call = {"index": 0, "id": "fixture-call", "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)}}
+            choice = {"delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}
+        else:
+            choice = {"delta": {"content": "reviewed"}, "finish_reason": "stop"}
+        response = ("data: " + json.dumps({"choices": [choice]}) + "\n\ndata: [DONE]\n\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(response)))
@@ -70,7 +78,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
     original = snapshot()
     assert "sessions.sqlite3" in original
-    diff = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n"
+    diff = ("diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n"
+            "diff --git a/b b/b\n@@ -2,1 +2,0 @@\n-removed\n")
     prompt = "Review this change."
     for interface in (["--print"], ["--mode", "json"]):
         for codemode in (False, True):
@@ -92,6 +101,39 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
                 events = [json.loads(line) for line in output if line.startswith("{")]
                 assert events[-1] == {"type": "done", "session_id": None, "text": "reviewed"}
             assert snapshot() == original
+
+    target = repo / "review.txt"
+    target.write_text("original")
+    for interface in (["--print"], ["--mode", "json"]):
+        run(interface + ["--no-session", "--no-tools", prompt], diff)
+        assert len(requests) == 1
+        _, request = requests.pop()
+        assert "tools" not in request
+        assert [m["content"] for m in request["messages"] if m["role"] == "user"] == [diff + "\n" + prompt]
+        for selection, expected in [
+            (["--tools", "ls,read"], {"ls", "read"}),
+            (["--tools", "read", "--codemode"], {"read"}),
+            (["--tools", "codemode,read"], {"codemode", "read"}),
+            (["--codemode", "--no-tools"], set()),
+        ]:
+            denied = ("write", {"path": target.name, "text": "modified"}) if expected else ("codemode", {"code": "text(1)"})
+            next_calls.append(denied)
+            run(interface + ["--no-session"] + selection + [prompt], diff)
+            assert len(requests) == 2
+            for _, request in requests:
+                assert {t["function"]["name"] for t in request.get("tools", [])} == expected
+                if not expected:
+                    assert "tools" not in request
+                if "codemode" in expected:
+                    desc = next(t["function"]["description"] for t in request["tools"]
+                                if t["function"]["name"] == "codemode")
+                    assert "tools.read(" in desc and "tools.search(" not in desc
+                assert [m["content"] for m in request["messages"] if m["role"] == "user"] == [diff + "\n" + prompt]
+            result = requests[-1][1]["messages"][-1]
+            assert result["role"] == "tool" and denied[0] in result["content"] and "unavailable" in result["content"]
+            assert target.read_text() == "original"
+            assert snapshot() == original
+            requests.clear()
 
     # Persisted runs can override thinking too, without changing a later continuation.
     run(["--continue", "--print", "--thinking", "high", "follow up"], "")
