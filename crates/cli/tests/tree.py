@@ -90,6 +90,111 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    # Two identical prompts have different ancestors. Mark the second, then open
+    # the exported tree in a fresh store so local node IDs cannot be relied on.
+    source = Path(tmp) / "branches.jsonl"
+    edited = Path(tmp) / "bookmarks.jsonl"
+    marked = Path(tmp) / "marked"
+    imported = Path(tmp) / "imported"
+    stamp = "2026-01-02T00:00:00.000Z"
+    rows = [dict(type="session", version=3, id="branches", cwd=str(repo), timestamp=stamp)]
+    for prefix in ("left", "right"):
+        for suffix, parent, text in [("root", None, prefix), ("prompt", prefix+"root", "Duplicate prompt")]:
+            rows.append(dict(type="message", id=prefix+suffix, parentId=parent, timestamp=stamp,
+                             message=dict(role="user", content=text, timestamp=0)))
+    rows.append(dict(type="custom", id="lefttip", parentId="leftprompt", timestamp=stamp,
+                     customType="fixture", data={}))
+    source.write_text("".join(json.dumps(r)+"\n" for r in rows))
+
+    def transfer(store, args):
+        with panda(repo, store, args=args, one_shot=True):
+            pass
+
+    transfer(marked, ["--import-session", str(source)])
+    with panda(repo, marked, args=["--continue"]) as (send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("/Duplicate\x1b[BL")
+        expect("Edit label")
+        send("working\r")
+        expect("[working]")
+        send("L")
+        expect("Edit label")
+        send("\x15chosen\r")
+        expect("[chosen]")
+        send("\x0c")
+        expect("Labeled")
+        send("L")
+        expect("Edit label")
+        send("\x15discarded\x03")
+        expect("[chosen]")
+        send("\x1b")
+        expect("deepseek-flash")
+    assert not (marked / "requests.jsonl").exists()
+    transfer(marked, ["--export-session", "1", str(edited)])
+    records = [json.loads(line) for line in edited.read_text().splitlines()]
+    assert [(e["targetId"], e["label"]) for e in records if e["type"] == "label"] == [("rightprompt", "chosen")]
+    assert records[-1]["parentId"] == "lefttip"
+
+    def verify_in_pi(path, expected):
+        if not os.environ.get("PANDA_TEST_PI"):
+            return
+        cmd = [os.environ["PANDA_TEST_PI"], "--offline", "-ne", "-ns", "-np", "-nc", "--no-themes",
+               "--mode", "rpc", "--session", str(path)]
+        env = dict(PATH=os.environ["PATH"], HOME=tmp, PI_CODING_AGENT_DIR=str(Path(tmp) / "pi-agent"))
+        proc = subprocess.run(cmd, cwd=repo, env=env, input='{"type":"get_tree"}\n',
+                              capture_output=True, text=True, timeout=20, check=True)
+        reply = next(r for r in map(json.loads, proc.stdout.splitlines()) if r["type"] == "response")
+        assert reply["success"], reply
+        nodes = list(reply["data"]["tree"])
+        found = {}
+        while nodes:
+            node = nodes.pop()
+            if node.get("label"):
+                found[node["entry"]["id"]] = node["label"]
+            nodes.extend(node["children"])
+        assert found == expected, found
+
+    verify_in_pi(edited, {"rightprompt": "chosen"})
+    transfer(imported, ["--import-session", str(edited)])
+    with panda(repo, imported, args=["--continue"]) as (send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("\x0c")
+        expect("Labeled")
+        send("\x06")
+        expect("session 2 (Code)")
+        expect("Duplicate prompt")
+        assert not (imported / "requests.jsonl").exists()
+        send(" revised\r")
+        expect("Second answer")
+        expect("deepseek-flash")
+        send(":resume 1\r")
+        expect("session 1 (Code)")
+        expect("deepseek-flash")
+        send(":tree\r")
+        expect("Session tree")
+        send("\x0cL")
+        expect("Edit label")
+        send("\x15\r")
+        expect("matches")
+        send("\x1b")
+        expect("deepseek-flash")
+    with panda(repo, imported, args=["--continue"]) as (send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("\x0c")
+        expect("matches")
+        send("\x1b")
+        expect("deepseek-flash")
+    cleared = Path(tmp) / "cleared.jsonl"
+    transfer(imported, ["--export-session", "1", str(cleared)])
+    clears = [r for r in map(json.loads, cleared.read_text().splitlines()) if r["type"] == "label"]
+    assert clears[-1]["targetId"] == "rightprompt" and "label" not in clears[-1]
+    verify_in_pi(cleared, {})
+    assert [json.loads(line) for line in (imported / "requests.jsonl").read_text().splitlines()] == [
+        [{"User": "right"}, {"User": "Duplicate prompt revised"}]]
+
     initial_state = Path(tmp) / "initial"
     with panda(repo, initial_state, args=["/review startup"], startup="First answer") as (send, expect):
         assert [m.get("User") for m in active_history(initial_state) if "User" in m] == ["/review startup"]

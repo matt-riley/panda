@@ -18,17 +18,21 @@ pub struct Disk {
 
 fn open_database(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
-    if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 0 {
+    if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 2 {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Another process may have migrated the store while we waited for the lock.
-        if tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 0 {
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 0 {
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL,
                      revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL);
                  ALTER TABLE sessions ADD COLUMN modified_seq INTEGER NOT NULL DEFAULT 0;
-                 CREATE INDEX sessions_by_activity ON sessions(repo, modified_seq DESC, id DESC);
-                 PRAGMA user_version = 1;",
+                 CREATE INDEX sessions_by_activity ON sessions(repo, modified_seq DESC, id DESC);",
             )?;
+        }
+        if version < 2 {
+            pi::migrate_labels(&tx)?;
+            tx.pragma_update(None, "user_version", 2)?;
         }
         tx.commit()?;
     }

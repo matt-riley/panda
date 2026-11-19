@@ -59,6 +59,39 @@ fn switching_branches_restores_only_their_own_edits_and_compaction() -> Result<(
 }
 
 #[test]
+fn labels_from_existing_imports_are_migrated_by_session_and_original_target() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let import = |label: &str| {
+        let event = json!({"type":"label","id":"label","parentId":"a-answer","targetId":"sibling","label":label});
+        Disk::import_pi(root, root, format!("{FIXTURE}{event}\n").as_bytes())
+    };
+    let a = import("first")?.id();
+    let b = import("second")?.id();
+    let conn = Connection::open(root.join("sessions.sqlite3"))?;
+    conn.execute_batch("DROP TABLE tree_labels; PRAGMA user_version=1;")?;
+    for (id, label) in [(a, "first"), (b, "second")] {
+        let mut db = Disk::open(root, root, Some(id))?;
+        let labeled: Vec<_> = db
+            .tree()?
+            .into_iter()
+            .filter(|e| e.label.is_some())
+            .collect();
+        assert_eq!(labeled.len(), 1);
+        assert_eq!(labeled[0].label.as_deref(), Some(label));
+        assert_eq!(labeled[0].text, "sibling only");
+        assert_eq!(
+            export(&mut db)?
+                .iter()
+                .filter(|e| e["type"] == "label")
+                .count(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut db = Disk::open(dir.path(), dir.path(), None)?;
@@ -106,6 +139,12 @@ fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
     let copy = Disk::import_pi(dir.path(), dir.path(), input.as_bytes())?.load()?;
     assert_eq!(copy.name, s.name);
     assert_eq!(copy.projected(), s.projected());
+    let prompt = db.tree()?.into_iter().find(|e| e.is_prompt).unwrap();
+    db.set_tree_label(prompt.id, "native")?;
+    let labeled = export(&mut db)?;
+    let edit = labeled.iter().find(|e| e["type"] == "label").unwrap();
+    assert_eq!(edit["targetId"], labeled[1]["id"]);
+    assert_eq!(edit["label"], "native");
     Ok(())
 }
 
