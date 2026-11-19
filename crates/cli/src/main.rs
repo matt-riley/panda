@@ -64,6 +64,25 @@ fn canonical_model<'a>(id: &'a str, model: &'a str) -> (&'a str, &'a str) {
     }
 }
 
+fn initial_model(settings: &Path, options: &automation::Options) -> Result<(String, String)> {
+    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+        return Ok((provider.clone(), model.clone()));
+    }
+    let (saved_provider, saved_model): (String, String) = if settings.try_exists()? {
+        serde_json::from_slice(&fs::read(settings)?)?
+    } else {
+        ("deepseek".into(), "deepseek-flash".into())
+    };
+    if let Some(model) = &options.model {
+        return Ok((provider_id(&saved_provider)?.into(), model.clone()));
+    }
+    if let Ok(id) = provider_id(&saved_provider) {
+        let (id, model) = canonical_model(id, &saved_model);
+        return Ok((id.into(), model.into()));
+    }
+    Ok((saved_provider, saved_model))
+}
+
 #[derive(Clone, Copy)]
 enum Picker {
     Login,
@@ -113,7 +132,12 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
     }
     Ok(rows)
 }
-fn effort_levels(state: &Path, provider: &str, model: &str) -> Result<Vec<String>> {
+fn effort_levels(
+    state: &Path,
+    provider: &str,
+    model: &str,
+    update_cache: bool,
+) -> Result<Vec<String>> {
     let mut options = vec![String::from("default")];
     if subscription(provider) {
         let path = state.join("codex-efforts.json");
@@ -124,9 +148,14 @@ fn effort_levels(state: &Path, provider: &str, model: &str) -> Result<Vec<String
         };
         let levels = if let Some(levels) = cached() {
             levels
-        } else {
+        } else if update_cache {
             model_entries(state, provider, false)?;
             cached().unwrap_or_default()
+        } else {
+            panda_providers::models::catalogue(provider, state, None)?
+                .efforts
+                .remove(model)
+                .unwrap_or_default()
         };
         options.extend(levels);
     } else {
@@ -253,7 +282,7 @@ fn usage(s: &Session) -> String {
     }
     text
 }
-fn model_window(db: &mut Disk, state: &Path, id: &str, model: &str) -> Result<()> {
+fn model_window(db: &mut dyn Store, state: &Path, id: &str, model: &str) -> Result<()> {
     let path = state.join(format!("catalog-{id}.json"));
     let window = if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
         let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
@@ -337,7 +366,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
@@ -395,22 +424,8 @@ fn run(
     let executable = std::env::current_exe()?;
     let codemode = panda_local::codemode::Codemode::new(&coding, &executable);
     let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { &coding };
-    let initial = if options.resume {
-        Disk::latest(&state, &root)?
-    } else {
-        None
-    };
-    let mut db = Disk::open(&state, &root, initial)?;
     let selected = state.join("model.json");
-    let (mut p, mut model): (String, String) = if selected.try_exists()? {
-        serde_json::from_slice(&fs::read(&selected)?)?
-    } else {
-        ("deepseek".into(), "deepseek-flash".into())
-    };
-    if let Ok(id) = provider_id(&p) {
-        let (id, name) = canonical_model(id, &model);
-        (p, model) = (id.into(), name.into());
-    }
+    let (mut p, mut model) = initial_model(&selected, &options)?;
     if !subscription(&p) && key_env(&p).is_err() {
         let warning = "Saved provider is unavailable; choose a supported provider with :model PROVIDER MODEL.";
         if interactive {
@@ -419,13 +434,40 @@ fn run(
             eprintln!("{warning}");
         }
     }
-    model_window(&mut db, &state, &p, &model)?;
+    if let Some(level) = options.thinking.as_deref()
+        && level != "default"
+    {
+        let levels = effort_levels(&state, &p, &model, false)?;
+        ensure!(
+            levels.iter().any(|s| s == level),
+            "available efforts for {model}: {}",
+            levels.join(", ")
+        );
+    }
+    let mut disk = if options.no_session {
+        None
+    } else {
+        let initial = if options.resume {
+            Disk::latest(&state, &root)?
+        } else {
+            None
+        };
+        Some(Disk::open(&state, &root, initial)?)
+    };
+    let session_id = disk.as_ref().map(Disk::id);
+    let mut memory = panda_memory::MemoryStore::default();
+    let store: &mut (dyn Store + Send) = match &mut disk {
+        Some(disk) => disk,
+        None => &mut memory,
+    };
+    model_window(store, &state, &p, &model)?;
     let cancel = Cancel::default();
     let signal = cancel.clone();
     ctrlc::set_handler(move || signal.stop())?;
     if !terminal_mode {
         return automation::Host {
-            db: &mut db,
+            db: store,
+            session_id,
             tools,
             connect: &|| provider(&state, &p, &model),
             root: &root,
@@ -433,6 +475,7 @@ fn run(
         }
         .run(options);
     }
+    let mut db = disk.context("terminal mode requires a saved session")?;
     let mut mode = show(&db, &mut screen)?;
     screen.line(
         Tone::Dim,
@@ -770,7 +813,7 @@ fn run(
                     let levels = if interactive
                         || words.clone().next().is_some_and(|level| level != "default")
                     {
-                        effort_levels(&state, &p, &model)?
+                        effort_levels(&state, &p, &model, true)?
                     } else {
                         vec!["default".into()]
                     };
