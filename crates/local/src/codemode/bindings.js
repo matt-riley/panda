@@ -2,6 +2,7 @@
     const stringify = JSON.stringify, parse = JSON.parse;
     const call = (name, args) => invoke(name, stringify(args));
     globalThis.tools = Object.freeze({
+        ls: (args = {}) => parse(call("ls", args)),
         search: args => parse(call("search", args)),
         repo_map: (args = {}) => parse(call("repo_map", args)),
         read: args => call("read", args)

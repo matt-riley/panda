@@ -18,8 +18,17 @@ use std::{
 use walkdir::WalkDir;
 
 pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
-    if name == "repo_map" || name == "search" {
-        return page(root, name, args);
+    if matches!(name, "ls" | "repo_map" | "search") {
+        let offset = args
+            .get("offset")
+            .map(|v| v.as_u64().context("invalid offset"))
+            .transpose()?
+            .unwrap_or(0);
+        return if name == "ls" {
+            list_directory(root, args, offset)
+        } else {
+            page(root, name, args, offset)
+        };
     }
     let path = field(args, "path")?;
     ensure!(
@@ -297,12 +306,58 @@ impl Page {
     }
 }
 
-fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
-    let offset = args
-        .get("offset")
-        .map(|v| v.as_u64().ok_or_else(|| anyhow::anyhow!("invalid offset")))
+fn list_directory(root: &Path, args: &Value, offset: u64) -> Result<String> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
+    let path = args
+        .get("path")
+        .map(|v| v.as_str().context("path must be a string"))
         .transpose()?
-        .unwrap_or(0);
+        .unwrap_or(".");
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // Open each component relative to the preceding directory descriptor so a
+    // symlink or rename cannot redirect a later lookup outside the workspace.
+    let mut directory = fs::File::open(root)?.into();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(name) => {
+                directory = openat(&directory, name, flags, Mode::empty())
+                    .with_context(|| format!("cannot list directory {path:?}"))?;
+            }
+            Component::CurDir => {}
+            _ => bail!("expected relative workspace path"),
+        }
+    }
+    let mut entries = Dir::read_from(&directory)?.collect::<rustix::io::Result<Vec<_>>>()?;
+    entries.sort_unstable_by(|a, b| a.file_name().cmp(b.file_name()));
+    let mut page = Page::default();
+    for entry in entries {
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            FileType::Unknown => FileType::from_raw_mode(
+                statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?.st_mode,
+            ),
+            known => known,
+        };
+        let kind = match file_type {
+            FileType::Directory => "directory",
+            FileType::RegularFile => "file",
+            FileType::Symlink => "symlink",
+            _ => "other",
+        };
+        if !page.add(
+            offset,
+            || serde_json::json!({"name":name.to_string_lossy(),"type":kind}),
+        )? {
+            break;
+        }
+    }
+    Ok(serde_json::to_string(&page)?)
+}
+
+fn page(root: &Path, name: &str, args: &Value, offset: u64) -> Result<String> {
     let query = (name == "search")
         .then(|| LineQuery::parse(args))
         .transpose()?;

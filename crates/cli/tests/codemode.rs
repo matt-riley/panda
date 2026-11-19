@@ -344,6 +344,71 @@ fn search_context_pages_count_only_hits_in_plan_and_codemode() -> Result<()> {
 
 #[test]
 #[ignore = "requires native macOS Seatbelt"]
+fn ls_pages_match_in_plan_and_codemode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let dir = root.path();
+    fs::write(dir.join(".hidden"), "")?;
+    fs::create_dir(dir.join("empty"))?;
+    fs::create_dir(dir.join("sub"))?;
+    fs::write(dir.join("sub/child"), "")?;
+    let mut entries = vec![
+        json!({"name":".hidden","type":"file"}),
+        json!({"name":"empty","type":"directory"}),
+    ];
+    for i in 0..48 {
+        let name = format!("file-{i:02}");
+        fs::write(dir.join(&name), "")?;
+        entries.push(json!({"name":name,"type":"file"}));
+    }
+    entries.push(json!({"name":"sub","type":"directory"}));
+
+    let base = coding(dir)?;
+    let enabled = Codemode::new(&base, EXE.as_ref());
+    let direct = |args| base.run(Mode::Plan, &call("ls", args), &Cancel::default());
+    let nested = |code: &str| {
+        enabled.run(
+            Mode::Plan,
+            &call("codemode", json!({"code":code})),
+            &Cancel::default(),
+        )
+    };
+    let first: Value = serde_json::from_str(&direct(json!({}))?)?;
+    let second: Value = serde_json::from_str(&direct(json!({"offset":first["next_offset"]}))?)?;
+    let pages = json!([first, second]);
+    assert_eq!(
+        pages,
+        json!([
+            {"items":entries[..50],"next_offset":50},
+            {"items":entries[50..],"next_offset":null}
+        ])
+    );
+    let js = "const first = tools.ls(); text([first, tools.ls({offset:first.next_offset})]);";
+    assert_eq!(serde_json::from_str::<Value>(&nested(js)?)?, pages);
+
+    for (path, items) in [
+        ("empty", json!([])),
+        ("sub", json!([{"name":"child","type":"file"}])),
+    ] {
+        let args = json!({"path":path});
+        let js = format!("text(tools.ls({args}))");
+        for result in [direct(args)?, nested(&js)?] {
+            assert_eq!(
+                serde_json::from_str::<Value>(&result)?,
+                json!({"items":items,"next_offset":null})
+            );
+        }
+    }
+    for result in [
+        direct(json!({"path":"missing"})),
+        nested("tools.ls({path:'missing'})"),
+    ] {
+        assert!(result.unwrap_err().to_string().contains("missing"));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
 fn reads_limits_and_cancellation() -> Result<()> {
     let root = tempfile::tempdir()?;
     fs::write(root.path().join("note"), "hello")?;
@@ -370,7 +435,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
     );
     assert_eq!(
         run("text([typeof process,typeof fetch,typeof require,Object.keys(tools).sort()])")?,
-        r#"["undefined","undefined","undefined",["read","repo_map","search"]]"#
+        r#"["undefined","undefined","undefined",["ls","read","repo_map","search"]]"#
     );
     assert!(run("tools.write({path:'note', text:'bad'})").is_err());
     assert_eq!(fs::read_to_string(root.path().join("note"))?, "hello");
