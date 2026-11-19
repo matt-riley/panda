@@ -202,13 +202,9 @@ impl<'a> Codemode<'a> {
             result
         })
     }
-}
-
-impl Toolset for Codemode<'_> {
-    fn system(&self) -> Result<String> {
-        let mut prompt = self.inner.system()?;
+    pub fn append_guidance(&self, prompt: &mut String) {
         if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|(name, _)| *name == "search") {
-            return Ok(prompt);
+            return;
         }
         prompt.push_str(
             r#"
@@ -223,6 +219,13 @@ do {
 text(count);
 For per-file results, group the items by their path in the same loop and emit only the requested aggregate."#,
         );
+    }
+}
+
+impl Toolset for Codemode<'_> {
+    fn system(&self) -> Result<String> {
+        let mut prompt = self.inner.system()?;
+        self.append_guidance(&mut prompt);
         Ok(prompt)
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {

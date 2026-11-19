@@ -28,6 +28,8 @@ pub struct Options {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub system_prompt: Option<String>,
+    pub append_system_prompt: Vec<String>,
     pub prompt: String,
 }
 impl Options {
@@ -53,6 +55,18 @@ impl Options {
                     out.tools = Some(names);
                 }
                 "--no-session" => out.no_session = true,
+                "--system-prompt" | "--append-system-prompt" => {
+                    let value = it
+                        .next()
+                        .filter(|s| !s.starts_with("--") && !matches!(s.as_str(), "-p" | "-c"))
+                        .with_context(|| format!("expected text or a file path after {arg}"))?;
+                    if arg == "--system-prompt" {
+                        ensure!(out.system_prompt.is_none(), "specify --system-prompt once");
+                        out.system_prompt = Some(value.clone());
+                    } else {
+                        out.append_system_prompt.push(value.clone());
+                    }
+                }
                 "--provider" | "--model" | "--thinking" => {
                     let value = it
                         .next()
@@ -101,6 +115,8 @@ impl Options {
             || out.thinking.is_some()
             || out.provider.is_some()
             || out.tools.is_some()
+            || out.system_prompt.is_some()
+            || !out.append_system_prompt.is_empty()
         {
             ensure!(
                 matches!(out.interface, Interface::Print | Interface::Json),
@@ -119,6 +135,51 @@ impl Options {
             out.codemode = names.remove("codemode");
         }
         Ok(out)
+    }
+}
+
+/// An explicit CLI argument names a regular UTF-8 file or supplies the text itself.
+pub fn prompt_text(value: &str) -> Result<String> {
+    match std::fs::metadata(value) {
+        Ok(info) => {
+            ensure!(info.is_file(), "expected a regular prompt file: {value}");
+            std::fs::read_to_string(value).with_context(|| format!("reading prompt file {value}"))
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) || e.raw_os_error() == Some(libc::ENAMETOOLONG) =>
+        {
+            Ok(value.to_owned())
+        }
+        Err(e) => Err(e).with_context(|| format!("checking prompt file {value}")),
+    }
+}
+
+/// Keep the turn's token budgeting, retries and tool rounds on the same prompt.
+pub struct PromptedTools<'a> {
+    pub tools: &'a (dyn Toolset + Sync),
+    pub prompt: String,
+}
+impl Toolset for PromptedTools<'_> {
+    fn system(&self) -> Result<String> {
+        Ok(self.prompt.clone())
+    }
+    fn schemas(&self, mode: Mode) -> Vec<Value> {
+        self.tools.schemas(mode)
+    }
+    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
+        self.tools.run(mode, call, cancel)
+    }
+    fn run_stream(
+        &self,
+        mode: Mode,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<String> {
+        self.tools.run_stream(mode, call, cancel, emit)
     }
 }
 
@@ -361,12 +422,35 @@ mod tests {
             "--mode json --tools read,",
             "--print --tools read --no-tools",
             "--print --no-tools --tools read",
+            "--print --system-prompt",
+            "--print --append-system-prompt --no-tools",
+            "--print --system-prompt first --system-prompt second",
+            "--system-prompt interactive",
+            "--mode rpc --append-system-prompt extra",
         ] {
             let args = args
                 .split_whitespace()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             assert!(Options::parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_files_must_be_regular_and_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(prompt_text(dir.path().to_str().unwrap()).is_err());
+        let file = dir.path().join("invalid.md");
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(prompt_text(file.to_str().unwrap()).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn inline_prompts_preserve_text(text in r"[^\x00]{0,650}") {
+            // A single path component longer than NAME_MAX is still a valid inline prompt.
+            let literal = format!("{}{}", "x".repeat(256), text);
+            proptest::prop_assert_eq!(prompt_text(&literal).unwrap(), literal);
         }
     }
 

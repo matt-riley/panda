@@ -102,6 +102,50 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
                 assert events[-1] == {"type": "done", "session_id": None, "text": "reviewed"}
             assert snapshot() == original
 
+    (state / "AGENTS.md").write_text("Preserve fixture conventions.")
+    base_file = root / "review base.md"
+    base_file.write_text("Review as a maintainer.\nExplain risks.")
+    rubric = repo / "review rubric.md"
+    rubric.write_text("Check boundary cases.\nCheck retries.\n")
+    for interface in (["--print"], ["--mode", "json"]):
+        for codemode in (False, True):
+            common = interface + (["--codemode"] if codemode else []) + ["--no-session"]
+
+            def capture(flags):
+                run(common + flags + [prompt], diff)
+                assert len(requests) == 1
+                _, body = requests.pop()
+                system, user = body["messages"]
+                assert system["role"] == "system"
+                assert user == {"role": "user", "content": diff + "\n" + prompt}
+                names = {tool["function"]["name"] for tool in body.get("tools", [])}
+                if "--no-tools" in flags:
+                    assert "tools" not in body
+                else:
+                    assert ("codemode" in names) == codemode
+                return system["content"]
+
+            default = capture([])
+            assert default.startswith("You are Panda, a coding assistant.")
+            assert default.count("Preserve fixture conventions.") == 1
+            assert ("start with one codemode call" in default) == codemode
+            context = default[default.index("\nInstructions from "):]
+            appended = ["--append-system-prompt", rubric.name,
+                        "--append-system-prompt", "Report findings first."]
+            suffix = "\n\n" + rubric.read_text() + "\n\nReport findings first."
+            assert capture(appended) == default + suffix
+            assert capture(appended + ["--system-prompt", "Review independently."]) == (
+                "Review independently." + context + suffix)
+            assert capture(["--system-prompt", str(base_file)] + appended) == (
+                base_file.read_text() + context + suffix)
+            plain = capture(["--no-tools"])
+            plain_context = plain[plain.index("\nInstructions from "):]
+            assert "start with one codemode call" not in plain
+            assert capture(["--no-tools", "--system-prompt", str(base_file)] + appended) == (
+                base_file.read_text() + plain_context + suffix)
+    (state / "AGENTS.md").unlink()
+    assert snapshot() == original
+
     target = repo / "review.txt"
     target.write_text("original")
     for interface in (["--print"], ["--mode", "json"]):
@@ -135,12 +179,16 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
             assert snapshot() == original
             requests.clear()
 
-    # Persisted runs can override thinking too, without changing a later continuation.
-    run(["--continue", "--print", "--thinking", "high", "follow up"], "")
+    # Prompt and thinking overrides apply only to this invocation of a saved session.
+    run(["--continue", "--print", "--thinking", "high", "--system-prompt", "Temporary base.",
+         "--append-system-prompt", "Temporary rubric.", "follow up"], "")
     _, body = requests.pop()
     assert body["reasoning"]["effort"] == "high"
+    assert body["messages"][0]["content"] == "Temporary base.\n\nTemporary rubric."
     run(["--continue", "--print", "last turn"], "")
     _, body = requests.pop()
     assert body["model"] == "saved-model" and "reasoning" not in body
+    assert body["messages"][0]["content"].startswith("You are Panda, a coding assistant.")
+    assert "Temporary" not in body["messages"][0]["content"]
     assert [m["content"] for m in body["messages"] if m["role"] == "user"] == [
         "seed conversation", "follow up", "last turn"]
