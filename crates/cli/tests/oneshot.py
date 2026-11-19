@@ -3,6 +3,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -43,17 +44,22 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     state.mkdir(mode=0o700)
     (state / "model.json").write_text('["deepseek","saved-model"]')
 
-    def run(args, stdin):
+    def run(args, stdin, *, cwd=repo, error=None):
         env = dict(os.environ, PANDA_HOME=str(state), HOME=str(root),
                    PANDA_ONESHOT_ARGS=json.dumps(args),
                    PANDA_ONESHOT_SERVER=f"http://127.0.0.1:{server.server_port}")
         result = subprocess.run([sys.argv[1], "--exact", "automation::tests::oneshot_fixture", "--nocapture"],
-                                cwd=repo, env=env, input=stdin, text=True,
+                                cwd=cwd, env=env, input=stdin, text=True,
                                 capture_output=True, timeout=20)
+        if error is not None:
+            assert result.returncode != 0 and error in result.stderr, (result.stdout, result.stderr)
+            assert not requests, requests
+            return
         assert result.returncode == 0, (result.stdout, result.stderr)
         return result.stdout.splitlines()
 
     # A fresh state directory should never acquire a database or lock for an ephemeral run.
+    run(["--print", "--session", "1", "probe"], "", error="unknown session")
     run(["--mode", "json", "--model", "one-off", "--no-session"], "stdin-only prompt")
     path, body = requests.pop()
     assert path == "/deepseek" and body["model"] == "one-off"
@@ -192,3 +198,48 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert "Temporary" not in body["messages"][0]["content"]
     assert [m["content"] for m in body["messages"] if m["role"] == "user"] == [
         "seed conversation", "follow up", "last turn"]
+
+    def done(output):
+        events = [json.loads(line) for line in output if line.startswith("{")]
+        assert events[-1]["type"] == "done"
+        return events[-1]
+
+    def new_session(prompt):
+        result = done(run(["--mode", "json", prompt], ""))
+        assert len(requests) == 1
+        requests.pop()
+        return result["session_id"]
+
+    a = new_session("Review A")
+    b = new_session("Review B")
+    assert a < b
+    with sqlite3.connect(state / "sessions.sqlite3") as db:
+        def saved_others():
+            return db.execute("SELECT id, revision, data FROM sessions WHERE id != ? ORDER BY id", (a,)).fetchall()
+
+        others = saved_others()
+        history = [{"role": "user", "content": "Review A"},
+                   {"role": "assistant", "content": "reviewed"}]
+        for interface, follow_up in [(["--print"], "First follow-up"), (["--mode", "json"], "Second follow-up")]:
+            output = run(interface + ["--session", str(a), follow_up], "")
+            assert len(requests) == 1
+            _, body = requests.pop()
+            history.append({"role": "user", "content": follow_up})
+            assert body["messages"][0]["role"] == "system"
+            assert body["messages"][1:] == history, body["messages"]
+            if interface == ["--print"]:
+                assert "reviewed" in output
+            else:
+                assert done(output) == {"type": "done", "session_id": a, "text": "reviewed"}
+            history.append({"role": "assistant", "content": "reviewed"})
+            assert saved_others() == others
+
+    foreign = root / "other-repo"
+    foreign.mkdir()
+    before = snapshot()
+    for interface in (["--print"], ["--mode", "json"]):
+        run(interface + ["--session", str(b + 1), "probe"], "", error="unknown session")
+        run(interface + ["--session", str(a), "probe"], "", cwd=foreign, error="another workspace")
+        for conflict in ("--continue", "--no-session"):
+            run(interface + [conflict, "--session", str(a), "probe"], "", error="conflicts")
+    assert snapshot() == before

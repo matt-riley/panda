@@ -72,6 +72,8 @@ panda --continue --mode rpc
 
 Print mode writes the final answer. JSON mode emits one object per line, ending with a `done` object containing the answer and session ID. Both accept a prompt from standard input. If you also supply a prompt argument, Panda prepends the piped text verbatim, separates it from the prompt with a blank line, and resolves attachments from the argument.
 
+To follow up on a specific conversation, pass its numeric `session_id` from the JSON `done` object to either output mode, for example `panda --print --session 42 "Explain the first finding"`. The ID must identify an existing session in the current workspace. A JSON follow-up returns the same ID. The `--session` flag conflicts with `--continue` and `--no-session`.
+
 For print and JSON runs, put options before the prompt. Use `--model MODEL` for an exact model ID on the configured provider, or add `--provider PROVIDER` to select a different provider. `--thinking LEVEL` accepts the same levels as `:thinking`, including `default`. These choices apply to this invocation. Add `--no-session` to keep the conversation in memory. In this mode the JSON session ID is `null`, and `--continue` is incompatible. Add `--codemode` to the same command to enable Codemode.
 
 Select tools for a print or JSON run with `--tools read,search,repo_map,ls`. The list takes exact tool names and replaces the default selection. Use `--tools codemode,read` to enable Codemode with only `tools.read()` available inside scripts. Use `--no-tools` for a prompt-only run, such as `git diff HEAD | panda --print --no-tools "Review this diff"`. An explicit selection takes precedence over `--codemode`. The session’s plan or code mode still controls which selected tools can run.

@@ -366,7 +366,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
@@ -454,6 +454,10 @@ fn run(
         tools
     };
     let selected = state.join("model.json");
+    let mut disk = options
+        .session_id
+        .map(|id| Disk::open(&state, &root, Some(id)))
+        .transpose()?;
     let (mut p, mut model) = initial_model(&selected, &options)?;
     if !subscription(&p) && key_env(&p).is_err() {
         let warning = "Saved provider is unavailable; choose a supported provider with :model PROVIDER MODEL.";
@@ -473,16 +477,14 @@ fn run(
             levels.join(", ")
         );
     }
-    let mut disk = if options.no_session {
-        None
-    } else {
+    if disk.is_none() && !options.no_session {
         let initial = if options.resume {
             Disk::latest(&state, &root)?
         } else {
             None
         };
-        Some(Disk::open(&state, &root, initial)?)
-    };
+        disk = Some(Disk::open(&state, &root, initial)?);
+    }
     let session_id = disk.as_ref().map(Disk::id);
     let mut memory = panda_memory::MemoryStore::default();
     let store: &mut (dyn Store + Send) = match &mut disk {

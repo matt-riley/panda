@@ -1,7 +1,7 @@
 mod tree;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, path::Path};
 pub use tree::TreeEntry;
 pub struct SessionPreview {
@@ -91,17 +91,20 @@ impl Disk {
         Ok(sessions)
     }
     fn open_seed(dir: &Path, repo: &Path, id: Option<i64>, seed: &Session) -> Result<Self> {
-        let conn = Connection::open(dir.join("sessions.sqlite3"))?;
+        let path = dir.join("sessions.sqlite3");
+        if let Some(id) = id {
+            ensure!(path.try_exists()?, "unknown session {id}");
+        }
+        let conn = Connection::open(path)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)")?;
         let root = repo.to_str().context("non UTF-8 workspace")?;
         let id = match id {
             Some(id) => {
-                ensure!(
-                    conn.query_row("SELECT repo FROM sessions WHERE id=?", [id], |r| r
-                        .get::<_, String>(0))?
-                        == root,
-                    "session belongs to another workspace"
-                );
+                let owner: String = conn
+                    .query_row("SELECT repo FROM sessions WHERE id=?", [id], |r| r.get(0))
+                    .optional()?
+                    .with_context(|| format!("unknown session {id}"))?;
+                ensure!(owner == root, "session belongs to another workspace");
                 id
             }
             None => {
