@@ -324,9 +324,9 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
                     }
                 }
             }
-            Message::Result { id, text, is_error } if screen.active => {
-                screen.tool_result(calls_by_id.remove(id), text, *is_error)
-            }
+            Message::Result {
+                id, text, is_error, ..
+            } if screen.active => screen.tool_result(calls_by_id.remove(id), text, *is_error),
             Message::Result { id, text, .. } => println!("[{}] {}", safe(id), safe(text)),
         }
     }
@@ -355,10 +355,15 @@ fn run(
     if args.first().map(String::as_str) == Some("--file-worker") {
         let arg = serde_json::from_reader(io::stdin())?;
         let name = args.get(1).context("missing tool name")?;
-        print!(
-            "{}",
-            panda_local::worker::run(&std::env::current_dir()?, name, &arg)?
-        );
+        let root = std::env::current_dir()?;
+        if name == "read" {
+            serde_json::to_writer(
+                io::stdout().lock(),
+                &panda_local::worker::read_output(&root, &arg)?,
+            )?;
+        } else {
+            print!("{}", panda_local::worker::run(&root, name, &arg)?);
+        }
         return Ok(());
     }
     if args == ["--codemode-worker"] {

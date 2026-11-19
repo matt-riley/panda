@@ -123,8 +123,24 @@ pub(crate) fn responses_body(
                     input.push(json!({"type":"function_call","call_id":call_id(&c.id),"name":c.name,"arguments":c.args.to_string()}))
                 }
             }
-            Message::Result { id, text, .. } => input
-                .push(json!({"type":"function_call_output","call_id":call_id(id),"output":text})),
+            Message::Result {
+                id, text, images, ..
+            } => {
+                let output = if images.is_empty() {
+                    json!(text)
+                } else {
+                    let mut parts = vec![json!({"type":"input_text","text":text})];
+                    parts.extend(
+                        images
+                            .iter()
+                            .map(|url| json!({"type":"input_image","image_url":url})),
+                    );
+                    Value::Array(parts)
+                };
+                input.push(
+                    json!({"type":"function_call_output","call_id":call_id(id),"output":output}),
+                );
+            }
         }
     }
     let tools: Vec<_> = tools
@@ -143,6 +159,53 @@ pub(crate) fn responses_body(
 mod tests {
     use super::*;
     #[test]
+    fn image_tool_history_keeps_each_response_associated_with_its_call() -> Result<()> {
+        let url = "data:image/png;base64,iVBORw0KGgo=";
+        let history = [
+            Message::Assistant {
+                text: String::new(),
+                calls: ["a", "b"]
+                    .into_iter()
+                    .map(|id| Call {
+                        id: id.into(),
+                        name: "read".into(),
+                        args: json!({"path":id}),
+                    })
+                    .collect(),
+            },
+            Message::Result {
+                id: "a".into(),
+                text: "picture".into(),
+                images: vec![url.into()],
+                is_error: false,
+            },
+            // Transcripts saved before image reads have no images field.
+            serde_json::from_value(json!({"Result":{"id":"b","text":"plain","isError":false}}))?,
+            Message::User("continue".into()),
+        ];
+        let saved = serde_json::to_vec(&history)?;
+        let resumed: Vec<Message> = serde_json::from_slice(&saved)?;
+        let input = responses_body("m", "s", &resumed, &[])["input"].clone();
+        assert_eq!(
+            input[2],
+            json!({"type":"function_call_output","call_id":"a","output":[
+                {"type":"input_text","text":"picture"},{"type":"input_image","image_url":url}
+            ]})
+        );
+        assert_eq!(input[3]["output"], "plain");
+        assert_eq!(input.to_string().matches(url).count(), 1);
+        let chat = crate::messages("s", &resumed);
+        assert_eq!(chat[2]["tool_call_id"], "a");
+        assert_eq!(chat[3]["tool_call_id"], "b");
+        assert_eq!(
+            chat[4],
+            json!({"role":"user","content":[{"type":"image_url","image_url":{"url":url}}]})
+        );
+        assert_eq!(chat[5]["content"], "continue");
+        Ok(())
+    }
+
+    #[test]
     fn resumed_tool_history_uses_matching_ids() {
         let history = [
             Message::Assistant {
@@ -156,6 +219,7 @@ mod tests {
             Message::Result {
                 id: "call1|fc1".into(),
                 text: "missing".into(),
+                images: vec![],
                 is_error: true,
             },
         ];

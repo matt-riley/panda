@@ -1,4 +1,4 @@
-pub use crate::files::run;
+pub use crate::files::{read_output, run};
 #[cfg(test)]
 use {
     serde_json::{Value, json},
@@ -370,4 +370,40 @@ fn scoped_instructions_apply_only_to_ancestors_of_the_requested_file() {
         )
         .is_err()
     );
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn png_bytes_survive_worker_serialization(payload in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let dir = tempfile::tempdir()?;
+            let bytes = [b"\x89PNG\r\n\x1a\n".as_slice(), &payload].concat();
+            fs::write(dir.path().join("input"), &bytes)?;
+            let result = read_output(dir.path(), &json!({"path":"input"})).unwrap();
+            let wire = serde_json::to_vec(&result)?;
+            let decoded: panda_core::ToolOutput = serde_json::from_slice(&wire)?;
+            prop_assert_eq!(decoded.images, vec![format!("data:image/png;base64,{}", STANDARD.encode(bytes))]);
+        }
+    }
+
+    #[test]
+    fn rejects_image_ranges_and_oversized_images() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("image");
+        fs::write(&file, b"\xff\xd8\xff")?;
+        let error = read_output(dir.path(), &json!({"path":"image","offset":1})).unwrap_err();
+        assert!(error.to_string().contains("only to text"));
+        fs::File::options()
+            .write(true)
+            .open(file)?
+            .set_len(crate::files::MAX_IMAGE_BYTES as u64 + 1)?;
+        let error = read_output(dir.path(), &json!({"path":"image"})).unwrap_err();
+        assert!(error.to_string().contains("exceeds 8 MiB"));
+        Ok(())
+    }
 }

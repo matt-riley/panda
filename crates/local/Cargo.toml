@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 panda-coding = { path = "../coding" }

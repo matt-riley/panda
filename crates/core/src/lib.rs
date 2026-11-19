@@ -31,6 +31,23 @@ pub struct Call {
     pub name: String,
     pub args: Value,
 }
+/// The text is suitable for terminal output. Image data URLs travel separately.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ToolOutput {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     BranchSummary(String),
@@ -47,6 +64,8 @@ pub enum Message {
     Result {
         id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
         #[serde(default, rename = "isError")]
         is_error: bool,
     },
@@ -264,6 +283,11 @@ impl Message {
     pub fn summary_text(&self) -> String {
         match self {
             Self::Images { text, urls } => format!("{text} [{} attached images]", urls.len()),
+            Self::Result {
+                id, text, images, ..
+            } if !images.is_empty() => {
+                format!("Tool {id}: {text} [{} images]", images.len())
+            }
             other => serde_json::to_string(other).unwrap_or_default(),
         }
     }
@@ -324,8 +348,8 @@ pub trait Toolset {
         call: &Call,
         cancel: &Cancel,
         _emit: &mut Emit,
-    ) -> Result<String> {
-        self.run(mode, call, cancel)
+    ) -> Result<ToolOutput> {
+        self.run(mode, call, cancel).map(Into::into)
     }
 
     fn system(&self) -> Result<String>;
@@ -374,13 +398,18 @@ pub fn turn_message(
     s.active = true;
     s.history.push(input);
     store.save(&mut s)?;
+    let mut pending_image_exchange = None;
     for _ in 0..64 {
         cancel.check()?;
-        let keep = if s.history.last().is_some_and(Message::user) {
-            s.history.len() - 1
-        } else {
-            s.history.len()
-        };
+        // A summary cannot carry image bytes. Keep an unread image and its
+        // tool call together, including when a steering message arrived.
+        let keep = pending_image_exchange.take().unwrap_or_else(|| {
+            if s.history.last().is_some_and(Message::user) {
+                s.history.len() - 1
+            } else {
+                s.history.len()
+            }
+        });
         let mut compacted = false;
         let schemas = tools.schemas(s.mode);
         if s.needs_compaction(&system, &schemas)
@@ -455,15 +484,19 @@ pub fn turn_message(
             emit(Event::Calling(call.clone()));
             let result = tools.run_stream(s.mode, &call, cancel, emit);
             let is_error = result.is_err();
-            let output = result.unwrap_or_else(|e| format!("tool error: {e}"));
+            let output = result.unwrap_or_else(|e| format!("tool error: {e}").into());
             cancel.check()?;
+            if !output.images.is_empty() && pending_image_exchange.is_none() {
+                pending_image_exchange = s.history.iter().rposition(Message::user);
+            }
             s.history.push(Message::Result {
                 id: call.id,
                 is_error,
-                text: output.clone(),
+                text: output.text.clone(),
+                images: output.images,
             });
             store.save(&mut s)?;
-            emit(Event::Result(output));
+            emit(Event::Result(output.text));
         }
         let queued = pending(idle);
         if idle && queued.is_empty() {
@@ -497,6 +530,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                     s.history.push(Message::Result {
                         id,
                         is_error: true,
+                        images: vec![],
                         text: "Interrupted: outcome unknown; inspect workspace before retrying."
                             .into(),
                     })

@@ -129,7 +129,7 @@ fn retry_after_shell_runs_command_once_and_reopens() -> anyhow::Result<()> {
                 ));
             }
             assert!(
-                matches!(history.last(),Some(Message::Result{id,text,is_error:false}) if id=="run-tests" && text.contains("passed"))
+                matches!(history.last(),Some(Message::Result{id,text,is_error:false,..}) if id=="run-tests" && text.contains("passed"))
             );
             if self.0 == 2 {
                 return Err(TransientFailure {
