@@ -16,7 +16,7 @@ fn invoke(name: String, arguments: String) -> Result<String> {
     result.map_err(anyhow::Error::msg)
 }
 
-fn evaluate(code: String) -> Result<String> {
+fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
     let runtime = Runtime::new()?;
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
@@ -24,6 +24,7 @@ fn evaluate(code: String) -> Result<String> {
     let output = Rc::new(RefCell::new(String::new()));
     let buffer = output.clone();
     context.with(|ctx| -> Result<()> {
+        ctx.globals().set("__allowed", allowed)?;
         ctx.globals().set(
             "__invoke",
             Function::new(ctx.clone(), |ctx: Ctx<'_>, name: String, args: String| {
@@ -60,8 +61,8 @@ fn evaluate(code: String) -> Result<String> {
 }
 
 pub fn worker() -> Result<()> {
-    let script: String = receive(&mut io::stdin().lock(), REQUEST_FRAME)?;
+    let (script, allowed): (String, Vec<String>) = receive(&mut io::stdin().lock(), REQUEST_FRAME)?;
     ensure!(script.len() <= SCRIPT_BYTES, "script exceeds 64 KiB");
-    let result = evaluate(script).map_err(|err| err.to_string());
+    let result = evaluate(script, allowed).map_err(|err| err.to_string());
     send(&mut io::stdout().lock(), &WorkerMessage::Finished(result))
 }

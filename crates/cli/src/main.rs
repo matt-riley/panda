@@ -366,11 +366,11 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session, --tools NAME[,NAME...] or --no-tools. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
-    let options = automation::Options::parse(&args)?;
+    let mut options = automation::Options::parse(&args)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
     let native = Native::new(&root, &std::env::current_exe()?)?;
@@ -422,8 +422,17 @@ fn run(
         skills: Library::new(roots),
     };
     let executable = std::env::current_exe()?;
-    let codemode = panda_local::codemode::Codemode::new(&coding, &executable);
-    let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { &coding };
+    let selected_tools = options
+        .tools
+        .take()
+        .map(|names| panda_coding::SelectedTools::new(&coding, names))
+        .transpose()?;
+    let base: &(dyn Toolset + Sync) = match &selected_tools {
+        Some(selected) => selected,
+        None => &coding,
+    };
+    let codemode = panda_local::codemode::Codemode::new(base, &executable);
+    let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { base };
     let selected = state.join("model.json");
     let (mut p, mut model) = initial_model(&selected, &options)?;
     if !subscription(&p) && key_env(&p).is_err() {

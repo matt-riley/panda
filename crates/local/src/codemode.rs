@@ -20,6 +20,24 @@ const SCRIPT_BYTES: usize = 64 * 1024;
 const OUTPUT_BYTES: usize = 16 * 1024;
 const ARG_BYTES: usize = 16 * 1024;
 const MAX_CALLS: usize = 64;
+const HELPERS: &[(&str, &str)] = &[
+    (
+        "ls",
+        "tools.ls({path?,offset?}) lists immediate entries (name,type), includes dotfiles, defaults to the root, and returns {items,next_offset}.",
+    ),
+    (
+        "search",
+        "tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) returns {items,next_offset} with path,line,text per hit. Search defaults to case-sensitive literal matching. Set regex:true for a Rust regex and ignoreCase:true to ignore case. Positive context adds before and after arrays in file order. Only matches count toward offsets. Search respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
+    ),
+    (
+        "repo_map",
+        "tools.repo_map({glob?,offset?}) returns {items,next_offset} with workspace paths. It respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
+    ),
+    (
+        "read",
+        "tools.read({path,offset?,limit?}) returns a string.",
+    ),
+];
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 1024;
 const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
@@ -83,9 +101,20 @@ impl<'a> Codemode<'a> {
         Self { inner, executable }
     }
 
+    fn helpers(
+        schemas: &[Value],
+    ) -> impl Iterator<Item = &'static (&'static str, &'static str)> + '_ {
+        HELPERS
+            .iter()
+            .filter(|(name, _)| schemas.iter().any(|s| s["function"]["name"] == *name))
+    }
+
     fn execute(&self, mode: Mode, call: &Call, cancel: &Cancel, emit: &mut Emit) -> Result<String> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
+        let allowed: Vec<_> = Self::helpers(&self.inner.schemas(mode))
+            .map(|(name, _)| *name)
+            .collect();
         ensure!(
             script.len() <= SCRIPT_BYTES,
             "Codemode script exceeds 64 KiB"
@@ -120,7 +149,7 @@ impl<'a> Codemode<'a> {
             let nested_cancel = nested.clone();
             let watchdog = scope.spawn(move || watch(child, done, cancel, &nested_cancel));
             let result = (|| {
-                send(&mut output, &script)?;
+                send(&mut output, &(script, &allowed))?;
                 let mut count = 0;
                 loop {
                     match receive(&mut input, REQUEST_FRAME)? {
@@ -135,8 +164,8 @@ impl<'a> Codemode<'a> {
                             count += 1;
                             ensure!(count <= MAX_CALLS, "Codemode nested call limit exceeded");
                             ensure!(
-                                matches!(name.as_str(), "read" | "search" | "repo_map" | "ls"),
-                                "unavailable nested tool"
+                                allowed.contains(&name.as_str()),
+                                "unavailable nested tool {name}"
                             );
                             ensure!(
                                 args.is_object() && args.to_string().len() <= ARG_BYTES,
@@ -178,6 +207,9 @@ impl<'a> Codemode<'a> {
 impl Toolset for Codemode<'_> {
     fn system(&self) -> Result<String> {
         let mut prompt = self.inner.system()?;
+        if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|(name, _)| *name == "search") {
+            return Ok(prompt);
+        }
         prompt.push_str(
             r#"
 For repository-wide match counts or rankings, start with one codemode call. search already covers the workspace. Aggregate each page inside the script and stop when next_offset is null.
@@ -195,9 +227,13 @@ For per-file results, group the items by their path in the same loop and emit on
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         let mut schemas = self.inner.schemas(mode);
+        let helpers = Self::helpers(&schemas)
+            .map(|(_, description)| *description)
+            .collect::<Vec<_>>()
+            .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":"Run isolated JavaScript to compose read-only workspace tools. tools.ls({path?,offset?}) lists immediate entries (name,type) including dotfiles, defaults to the root, and returns {items,next_offset}. tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) and tools.repo_map({glob?,offset?}) return {items,next_offset}; search items have path,line,text. Search defaults to case-sensitive literal matching. Set ignoreCase:true to ignore case. A positive context adds before and after arrays of neighboring lines in file order. Only matches count toward offsets. Set regex:true for a Rust regex. Both tools respect .gitignore and accept a workspace-relative glob such as **/*.rs. tools.read({path,offset?,limit?}) returns a string. Calls are synchronous. Use text(value) to emit selected output; only that output is returned. Limits: 64 calls, 10 seconds, 16 KiB output.",
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Limits: 64 calls, 10 seconds, 16 KiB output."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
