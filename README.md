@@ -35,6 +35,8 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 
 ## Prompt, tools and sessions
 
+In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new":"after"}` replacement or a batch such as `{"path":"src/app.rs","edits":[{"old":"fn check()","new":"fn verify()"},{"old":"    check();","new":"    verify();"}]}`. Each target must occur exactly once in the original file. Edits may be listed in any order. A valid batch writes the file once and returns one numbered diff. A missing, ambiguous, or overlapping target rejects the entire batch.
+
 | To do this | In Panda |
 |---|---|
 | Attach a workspace file | Type `@src/main.rs`, or `@"path with spaces"`. Press Tab in Insert mode for completions. For large files, ask Panda to read a range of lines. |

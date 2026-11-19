@@ -24,6 +24,99 @@ mod tests {
     }
 
     #[test]
+    fn batch_edit_returns_one_diff_in_file_order() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("source");
+        let gap = "unchanged\r\n".repeat(12);
+        fs::write(&file, format!("first α\r\n{gap}last β"))?;
+        let report = run(
+            dir.path(),
+            "edit",
+            &json!({"path":"source","edits":[
+                {"old":"last β","new":"end"},
+                {"old":"first α","new":"start\r\nnext"}
+            ]}),
+        )?;
+        assert_eq!(
+            fs::read(&file)?,
+            format!("start\r\nnext\r\n{gap}end").as_bytes()
+        );
+        let changes: Vec<_> = report
+            .lines()
+            .filter(|line| !line.starts_with(' '))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                "saved",
+                "− 1  first α",
+                "+ 1  start",
+                "+ 2  next",
+                "− 14  last β",
+                "+ 15  end"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_batches_preserve_both_updates() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let file = root.join("source");
+        fs::write(&file, "abcd")?;
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (left, right) in [("a", "b"), ("c", "d")] {
+                let start = &start;
+                scope.spawn(move || {
+                    let args = json!({"path":"source","edits":[
+                        {"old":left,"new":left.to_uppercase()}, {"old":right,"new":right.to_uppercase()}
+                    ]});
+                    start.wait();
+                    run(root, "edit", &args).unwrap();
+                });
+            }
+        });
+        assert_eq!(fs::read(file)?, b"ABCD");
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_batch_preserves_original_bytes() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("source");
+        let original = "start α\r\nrepeat repeat\r\naaa\r\nfinish";
+        fs::write(&file, original)?;
+        for target in [
+            "missing",
+            "repeat",
+            "aa",
+            "α\r\nrepeat",
+            "start α",
+            "introduced",
+            "",
+        ] {
+            let args = json!({"path":"source","edits":[
+                {"old":"start α","new":"introduced"}, {"old":target,"new":"X"}
+            ]});
+            assert!(run(dir.path(), "edit", &args).is_err(), "{args}");
+            assert_eq!(fs::read(&file)?, original.as_bytes());
+        }
+        for args in [
+            json!({"path":"source","edits":[]}),
+            json!({"path":"source","edits":null}),
+            json!({"path":"source","edits":[{"old":"start α","new":"X"},{"old":"finish"}]}),
+            json!({"path":"source","edits":[{"path":"other","old":"finish","new":"X"}]}),
+            json!({"path":"source","old":"finish","new":"X","edits":[{"old":"start α","new":"Y"}]}),
+        ] {
+            assert!(run(dir.path(), "edit", &args).is_err(), "{args}");
+            assert_eq!(fs::read(&file)?, original.as_bytes());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn edits_unique_match_and_preserves_ambiguous_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("source");

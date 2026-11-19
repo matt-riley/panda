@@ -1166,6 +1166,7 @@ dependencies = [
  "libc",
  "panda-coding",
  "panda-core",
+ "proptest",
  "regex",
  "rquickjs",
  "rusqlite",
