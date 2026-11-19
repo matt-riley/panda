@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.14](https://github.com/matt-riley/panda/compare/v0.1.13...v0.1.14) (2026-11-19)
+
+
+### Features
+
+* add context and case-insensitive matching to search ([#33](https://github.com/matt-riley/panda/issues/33)) ([83299c6](https://github.com/matt-riley/panda/commit/83299c600991882169e2a1c8b361406f9b20dfdf))
+* add paginated ls to plan mode and Codemode ([#34](https://github.com/matt-riley/panda/issues/34)) ([8b95253](https://github.com/matt-riley/panda/commit/8b9525388f87921d6bcb1c555255e837842ab725))
+* honor .gitignore in search and repo_map ([#32](https://github.com/matt-riley/panda/issues/32)) ([3f22dbf](https://github.com/matt-riley/panda/commit/3f22dbfcfb79141c4b5205074ad0907be7154eb5))
+* support regex and glob search in plan mode and Codemode ([#31](https://github.com/matt-riley/panda/issues/31)) ([c3eec36](https://github.com/matt-riley/panda/commit/c3eec36537e278dfc13fc6c3e883b915aad92535))
+* support reproducible one-shot CLI runs ([#35](https://github.com/matt-riley/panda/issues/35)) ([c4fed94](https://github.com/matt-riley/panda/commit/c4fed944ea45b7fe2ca8dfb5e058af714398c485))
+
+
+### Bug Fixes
+
+* guide tool selection for named files and paginated searches ([#29](https://github.com/matt-riley/panda/issues/29)) ([c2b2877](https://github.com/matt-riley/panda/commit/c2b2877fbf47b517816a1b5b8cd14e56e523043b))
+
 ## [0.1.13](https://github.com/matt-riley/panda/compare/v0.1.12...v0.1.13) (2026-11-19)
 
 
