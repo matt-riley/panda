@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/matt-riley/panda/compare/v0.1.16...v0.1.17) (2026-11-19)
+
+
+### Features
+
+* read workspace images in plan mode and Codemode ([#44](https://github.com/matt-riley/panda/issues/44)) ([b044fdb](https://github.com/matt-riley/panda/commit/b044fdbf0da212ebbbbfb17bfe07ae2b1b6aba20))
+
 ## [0.1.16](https://github.com/matt-riley/panda/compare/v0.1.15...v0.1.16) (2026-11-19)
 
 
