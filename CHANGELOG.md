@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.16](https://github.com/matt-riley/panda/compare/v0.1.15...v0.1.16) (2026-11-19)
+
+
+### Features
+
+* resume print and JSON runs by session ID ([#40](https://github.com/matt-riley/panda/issues/40)) ([97f1156](https://github.com/matt-riley/panda/commit/97f115621054c8083783bf531a8d97ee0b807361))
+* select the session directory for print and JSON runs ([#41](https://github.com/matt-riley/panda/issues/41)) ([8604485](https://github.com/matt-riley/panda/commit/8604485dd40538e37354d437144bf7bcc26f6b5f))
+* start interactive sessions with a positional prompt ([#42](https://github.com/matt-riley/panda/issues/42)) ([d08f177](https://github.com/matt-riley/panda/commit/d08f1771ce7a3b4f72f20d6f52c8f0e0b92b0c9b))
+* support atomic single-file batch edits ([#43](https://github.com/matt-riley/panda/issues/43)) ([2109cde](https://github.com/matt-riley/panda/commit/2109cde66cc2cfe5a01847bdce39389947abb71c))
+* support system prompt overrides for print and JSON runs ([#38](https://github.com/matt-riley/panda/issues/38)) ([ff66638](https://github.com/matt-riley/panda/commit/ff66638b3d7814a756408c045e25e320e2c1b09e))
+
 ## [0.1.15](https://github.com/matt-riley/panda/compare/v0.1.14...v0.1.15) (2026-11-19)
 
 
