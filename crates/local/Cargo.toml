@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 panda-coding = { path = "../coding" }
 panda-core = { path = "../core" }
@@ -12,3 +13,4 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
 walkdir = "2"
 libc = "0.2"
+rquickjs = "0.14"

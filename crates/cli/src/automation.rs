@@ -21,6 +21,7 @@ pub enum Interface {
 #[derive(Default)]
 pub struct Options {
     pub interface: Interface,
+    pub codemode: bool,
     pub resume: bool,
     pub prompt: String,
 }
@@ -30,6 +31,7 @@ impl Options {
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "--codemode" => out.codemode = true,
                 "--continue" | "-c" => out.resume = true,
                 "--print" | "-p" => out.interface = Interface::Print,
                 "--mode" => {

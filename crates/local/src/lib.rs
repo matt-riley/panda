@@ -1,3 +1,4 @@
+pub mod codemode;
 mod files;
 pub mod sandbox;
 pub mod skills;

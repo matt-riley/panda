@@ -288,6 +288,7 @@ pub enum Event {
     AssistantComplete(String),
     Usage(Value),
     Calling(Call),
+    NestedCall { parent: String, call: Call },
     Result(String),
 }
 pub type Emit<'a> = dyn FnMut(Event) + 'a;
