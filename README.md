@@ -76,6 +76,12 @@ For print and JSON runs, put options before the prompt. Use `--model MODEL` for 
 
 Select tools for a print or JSON run with `--tools read,search,repo_map,ls`. The list takes exact tool names and replaces the default selection. Use `--tools codemode,read` to enable Codemode with only `tools.read()` available inside scripts. Use `--no-tools` for a prompt-only run, such as `git diff HEAD | panda --print --no-tools "Review this diff"`. An explicit selection takes precedence over `--codemode`. The session’s plan or code mode still controls which selected tools can run.
 
+Use `--system-prompt TEXT|PATH` to replace Panda’s built-in base prompt for a print or JSON run. Workspace instructions and guidance for enabled tools still follow the base. Each `--append-system-prompt TEXT|PATH` adds a final instruction in command-line order. Both flags accept literal text or the contents of an existing UTF-8 file. Relative paths resolve from the current directory.
+
+```sh
+git diff HEAD | panda --print --no-tools --system-prompt "You are a code reviewer." --append-system-prompt ./review-rubric.md --append-system-prompt "List findings by severity." "Review this diff."
+```
+
 RPC accepts one JSON object per input line and echoes its `id` on replies and turn events.
 
 ```json

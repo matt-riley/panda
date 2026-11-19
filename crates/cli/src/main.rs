@@ -366,7 +366,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session, --tools NAME[,NAME...] or --no-tools. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--continue resumes the latest session. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }
@@ -433,6 +433,26 @@ fn run(
     };
     let codemode = panda_local::codemode::Codemode::new(base, &executable);
     let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { base };
+    let prompted;
+    let tools = if options.system_prompt.is_some() || !options.append_system_prompt.is_empty() {
+        let mut prompt = if let Some(value) = &options.system_prompt {
+            let mut prompt = coding.system_with_base(&automation::prompt_text(value)?)?;
+            if options.codemode {
+                codemode.append_guidance(&mut prompt);
+            }
+            prompt
+        } else {
+            tools.system()?
+        };
+        for value in &options.append_system_prompt {
+            prompt.push_str("\n\n");
+            prompt.push_str(&automation::prompt_text(value)?);
+        }
+        prompted = automation::PromptedTools { tools, prompt };
+        &prompted as &(dyn Toolset + Sync)
+    } else {
+        tools
+    };
     let selected = state.join("model.json");
     let (mut p, mut model) = initial_model(&selected, &options)?;
     if !subscription(&p) && key_env(&p).is_err() {
