@@ -17,6 +17,10 @@ pub struct Native {
     scratch: tempfile::TempDir,
     toolchains: Vec<PathBuf>,
 }
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
 impl Native {
     pub fn new(root: &Path, worker: &Path) -> Result<Self> {
         ensure!(cfg!(target_os = "macos"), "native sandbox requires macOS");
@@ -30,7 +34,7 @@ impl Native {
         );
         let state = state_dir()?;
         ensure!(
-            !state.starts_with(&root) && !root.starts_with(&state),
+            !overlaps(&state, &root),
             "workspace overlaps Panda credentials or sessions"
         );
         let mut toolchains = Vec::new();
@@ -41,8 +45,7 @@ impl Native {
                     dir.is_dir()
                         && !home.starts_with(&dir)
                         && !dir.starts_with(&root)
-                        && !state.starts_with(&dir)
-                        && !dir.starts_with(&state),
+                        && !overlaps(&state, &dir),
                     "choose a separate installed toolchain directory"
                 );
                 toolchains.push(dir);
@@ -54,6 +57,18 @@ impl Native {
             scratch: tempfile::tempdir()?,
             toolchains,
         })
+    }
+    pub fn session_dir(&self, path: &Path) -> Result<PathBuf> {
+        let dir = private_dir(path, "--session-dir")?;
+        ensure!(
+            !overlaps(&dir, &self.root),
+            "workspace overlaps session directory"
+        );
+        ensure!(
+            self.toolchains.iter().all(|tools| !overlaps(&dir, tools)),
+            "toolchain overlaps session directory"
+        );
+        Ok(dir)
     }
     fn profile(&self, write: bool) -> Result<String> {
         let quoted = |p: &Path| -> Result<String> {
@@ -263,18 +278,22 @@ impl Workspace for Native {
     }
 }
 pub fn state_dir() -> Result<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let p = std::env::var_os("PANDA_HOME")
         .map(PathBuf::from)
         .unwrap_or(PathBuf::from(std::env::var_os("HOME").context("missing HOME")?).join(".panda"));
+    private_dir(&p, "PANDA_HOME")
+}
+fn private_dir(p: &Path, label: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&p)?;
-    let metadata = fs::metadata(&p)?;
+        .create(p)
+        .with_context(|| format!("opening {label} at {}", p.display()))?;
+    let metadata = fs::metadata(p)?;
     ensure!(
         metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
-        "PANDA_HOME must be a private directory owned by the current user (0700)"
+        "{label} must be a private directory owned by the current user (0700)"
     );
     Ok(p.canonicalize()?)
 }
