@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18](https://github.com/matt-riley/panda/compare/v0.1.17...v0.1.18) (2026-11-19)
+
+
+### Features
+
+* bound shell timeouts and preserve full command output ([#46](https://github.com/matt-riley/panda/issues/46)) ([dd961b9](https://github.com/matt-riley/panda/commit/dd961b92e586e1c680f21d9dca2e0eccd39891c3))
+
 ## [0.1.17](https://github.com/matt-riley/panda/compare/v0.1.16...v0.1.17) (2026-11-19)
 
 
