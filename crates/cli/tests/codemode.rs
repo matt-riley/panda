@@ -168,6 +168,49 @@ fn paginated_todo_ranking() -> Result<()> {
 
 #[test]
 #[ignore = "requires native macOS Seatbelt"]
+fn plan_search_patterns_work_directly_and_in_codemode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::create_dir(root.path().join("src"))?;
+    fs::write(root.path().join("src/lib.rs"), "fn one() {}\nfn two() {}")?;
+    fs::write(root.path().join("notes.txt"), "fn three() {}")?;
+    let base = coding(root.path())?;
+    let enabled = Codemode::new(&base, EXE.as_ref());
+    let schemas = enabled.schemas(Mode::Plan);
+    for (name, args, expected) in [
+        ("repo_map", json!({"glob":"**/*.rs"}), json!(["src/lib.rs"])),
+        (
+            "search",
+            json!({"query":"^fn (one|two)", "regex":true, "glob":"**/*.rs", "offset":1}),
+            json!([{"path":"src/lib.rs","line":2,"text":"fn two() {}"}]),
+        ),
+    ] {
+        let schema = schemas
+            .iter()
+            .find(|s| s["function"]["name"] == name)
+            .unwrap();
+        let properties = &schema["function"]["parameters"]["properties"];
+        for key in args.as_object().unwrap().keys() {
+            assert!(properties.get(key).is_some(), "{name} lacks {key}");
+        }
+        let direct = base.run(Mode::Plan, &call(name, args.clone()), &Cancel::default())?;
+        let code = format!("text(tools.{name}({args}))");
+        let nested = enabled.run(
+            Mode::Plan,
+            &call("codemode", json!({ "code": code })),
+            &Cancel::default(),
+        )?;
+        for result in [direct, nested] {
+            assert_eq!(
+                serde_json::from_str::<Value>(&result)?,
+                json!({"items":expected,"next_offset":null})
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
 fn reads_limits_and_cancellation() -> Result<()> {
     let root = tempfile::tempdir()?;
     fs::write(root.path().join("note"), "hello")?;

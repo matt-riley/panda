@@ -69,13 +69,13 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "repo_map",
-            "List workspace files in lexical order; optional numeric offset.",
+            "List workspace files in lexical order. Use glob to filter paths and next_offset to fetch the next page.",
             &[],
             false,
         ),
         (
             "search",
-            "Find literal text by file and line; optional numeric offset.",
+            "Find matching lines in workspace files. The query is literal by default. Set regex to true for a Rust regular expression. Use glob to filter paths and next_offset to fetch the next page.",
             &["query"],
             false,
         ),
@@ -116,13 +116,28 @@ fn catalog(mode: Mode) -> Vec<Value> {
             true,
         ),
     ];
-    specs.iter().filter(|(_,_,_,mutates)|mode==Mode::Code || !mutates).map(|(name,desc,fields,_)|{
- let mut props=serde_json::Map::new();
- for key in *fields{props.insert(key.to_string(),json!({"type":"string"}));}
- if *name=="read" {for field in ["offset","limit"] {props.insert(field.into(),json!({"type":"integer","minimum":1}));}}
- if matches!(*name,"search"|"repo_map"){props.insert("offset".into(),json!({"type":"integer","minimum":0}));}
- json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}})
- }).collect()
+    specs.iter()
+        .filter(|(_, _, _, mutates)| mode == Mode::Code || !mutates)
+        .map(|(name, desc, fields, _)| {
+            let mut props = serde_json::Map::new();
+            for key in *fields {
+                props.insert(key.to_string(), json!({"type":"string"}));
+            }
+            if *name == "read" {
+                for field in ["offset", "limit"] {
+                    props.insert(field.into(), json!({"type":"integer","minimum":1}));
+                }
+            }
+            if matches!(*name, "search" | "repo_map") {
+                props.insert("offset".into(), json!({"type":"integer","minimum":0}));
+                props.insert("glob".into(), json!({"type":"string","description":"Match workspace-relative paths. Use *.rs at the root or **/*.rs at any depth."}));
+            }
+            if *name == "search" {
+                props.insert("regex".into(), json!({"type":"boolean"}));
+            }
+            json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}})
+        })
+        .collect()
 }
 
 /// Select one-based lines without allocating skipped lines. Preserve original newlines.
