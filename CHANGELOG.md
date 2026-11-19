@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.19](https://github.com/matt-riley/panda/compare/v0.1.18...v0.1.19) (2026-11-19)
+
+
+### Features
+
+* accept instructions for manual compaction ([#53](https://github.com/matt-riley/panda/issues/53)) ([e028d78](https://github.com/matt-riley/panda/commit/e028d78e32e21164c268dd404c4034df74cd812e))
+* edit and filter labels in the session tree ([#52](https://github.com/matt-riley/panda/issues/52)) ([294d958](https://github.com/matt-riley/panda/commit/294d958f1d17f5f7578eb9687dc126a5675c027b))
+* fork a session from a user prompt in the tree picker ([#51](https://github.com/matt-riley/panda/issues/51)) ([ec4b84b](https://github.com/matt-riley/panda/commit/ec4b84b877f1dc56ecc7ea4d4927f6b9783fd323))
+* import and export Pi v3 JSONL sessions ([#48](https://github.com/matt-riley/panda/issues/48)) ([388be1c](https://github.com/matt-riley/panda/commit/388be1cb9ae7cbeeba07d8cb996bb6828caff785))
+
+
+### Bug Fixes
+
+* continue the most recently modified workspace session ([#50](https://github.com/matt-riley/panda/issues/50)) ([b6ec819](https://github.com/matt-riley/panda/commit/b6ec81963524a0ad8f85f359e6589542bc61b508))
+
 ## [0.1.18](https://github.com/matt-riley/panda/compare/v0.1.17...v0.1.18) (2026-11-19)
 
 
