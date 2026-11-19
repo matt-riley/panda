@@ -3,6 +3,55 @@ use panda_core::Cancel;
 use panda_local::sandbox::Native;
 use serde_json::json;
 #[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn batch_edit_is_available_only_in_code_mode() -> anyhow::Result<()> {
+    use panda_coding::Coding;
+    use panda_core::{Call, Mode, Toolset};
+
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("source");
+    std::fs::write(&file, "ab")?;
+    let coding = Coding {
+        workspace: Native::new(dir.path(), env!("CARGO_BIN_EXE_panda").as_ref())?,
+        skills: panda_memory::EmptySkills,
+    };
+    let batch = Call {
+        id: "batch".into(),
+        name: "edit".into(),
+        args: json!({"path":"source","edits":[{"old":"b","new":"a"},{"old":"a","new":"b"}]}),
+    };
+    assert!(
+        coding
+            .schemas(Mode::Plan)
+            .iter()
+            .all(|s| s["function"]["name"] != "edit")
+    );
+    let error = coding
+        .run(Mode::Plan, &batch, &Cancel::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("unavailable in Plan"));
+    assert_eq!(std::fs::read(&file)?, b"ab");
+
+    let tools = coding.schemas(Mode::Code);
+    let edit = tools
+        .iter()
+        .find(|s| s["function"]["name"] == "edit")
+        .unwrap();
+    let schema = &edit["function"]["parameters"];
+    assert_eq!(schema["required"], json!(["path"]));
+    assert_eq!(
+        schema["properties"]["edits"]["items"]["required"],
+        json!(["old", "new"])
+    );
+    assert_eq!(
+        coding.run(Mode::Code, &batch, &Cancel::default())?,
+        "saved\n− 1  ab\n+ 1  ba"
+    );
+    assert_eq!(std::fs::read(file)?, b"ba");
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires native macOS Seatbelt outside an enclosing sandbox"]
 fn native_workspace_enforces_policy() {
     let fixture = tempfile::tempdir().unwrap();

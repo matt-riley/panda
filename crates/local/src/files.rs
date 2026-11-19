@@ -1,3 +1,5 @@
+mod edit;
+
 use anyhow::{Context, Result, bail, ensure};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -65,23 +67,24 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
         }
         "read" => read(&path),
         "write" | "edit" => {
-            let (text, report) = if name == "edit" {
-                let old = field(args, "old")?;
-                let current = read(&path)?;
-                ensure!(
-                    !old.is_empty() && current.matches(old).count() == 1,
-                    "expected one exact match"
-                );
-                let updated = current.replacen(old, field(args, "new")?, 1);
-                let report = edit_report(&current, &updated);
-                (updated, report)
-            } else {
-                (field(args, "text")?.into(), "saved".into())
-            };
             let parent = path
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-            fs::create_dir_all(parent)?;
+            let write_text = if name == "write" {
+                let text = field(args, "text")?;
+                fs::create_dir_all(parent)?;
+                Some(text)
+            } else {
+                None
+            };
+            // A rename changes the file inode. Lock the stable parent while Panda
+            // reads, validates and persists so concurrent workers cannot lose edits.
+            let directory = fs::File::open(parent)?;
+            directory.lock()?;
+            let (text, report) = match write_text {
+                Some(text) => (text.into(), "saved".into()),
+                None => edit::apply(&read(&path)?, args)?,
+            };
             let mut temp = tempfile::NamedTempFile::new_in(parent)?;
             if let Ok(meta) = path.metadata() {
                 temp.as_file().set_permissions(meta.permissions())?
@@ -92,43 +95,6 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
         }
         _ => bail!("unknown file tool"),
     }
-}
-// Keep the small diff from the same snapshots used for the atomic write so replay
-// can show the original edit after the workspace has changed.
-fn edit_report(before: &str, after: &str) -> String {
-    let old: Vec<_> = before.split_inclusive('\n').collect();
-    let new: Vec<_> = after.split_inclusive('\n').collect();
-    let start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let common_end = old[start..]
-        .iter()
-        .rev()
-        .zip(new[start..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut report = String::from("saved");
-    let mut append = |mark: &str, first: usize, lines: &[&str]| {
-        use std::fmt::Write;
-        for (offset, line) in lines.iter().take(8).enumerate() {
-            let mut chars = line.trim_end_matches(['\r', '\n']).chars();
-            let excerpt: String = chars.by_ref().take(256).collect();
-            let ellipsis = if chars.next().is_some() { "…" } else { "" };
-            let _ = write!(
-                report,
-                "\n{mark} {}  {excerpt}{ellipsis}",
-                first + offset + 1
-            );
-        }
-        if lines.len() > 8 {
-            report.push_str("\n  …");
-        }
-    };
-    let context = start.saturating_sub(2);
-    append(" ", context, &old[context..start]);
-    append("−", start, &old[start..old.len() - common_end]);
-    append("+", start, &new[start..new.len() - common_end]);
-    let tail = new.len() - common_end;
-    append(" ", tail, &new[tail..tail + common_end.min(2)]);
-    report
 }
 pub(super) fn read(path: &Path) -> Result<String> {
     read_file(fs::File::open(path)?)

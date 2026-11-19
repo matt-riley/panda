@@ -170,8 +170,8 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "edit",
-            "Replace exactly one occurrence in a workspace file.",
-            &["path", "old", "new"],
+            "Apply exact replacements to one file and return one diff. Supply either old and new, or a nonempty edits array of {old, new} pairs. Each old must be nonempty, unique in the original file, and disjoint from every other target. The entire batch is applied or rejected together.",
+            &["path"],
             true,
         ),
         (
@@ -187,6 +187,14 @@ fn catalog(mode: Mode) -> Vec<Value> {
             let mut props = serde_json::Map::new();
             for key in *fields {
                 props.insert(key.to_string(), json!({"type":"string"}));
+            }
+            if *name == "edit" {
+                let pair = json!({"old":{"type":"string","minLength":1},"new":{"type":"string"}});
+                props.insert("old".into(), pair["old"].clone());
+                props.insert("new".into(), pair["new"].clone());
+                props.insert("edits".into(), json!({"type":"array","minItems":1,"items":{
+                    "type":"object","properties":pair,"required":["old","new"],"additionalProperties":false
+                }}));
             }
             if *name == "read" {
                 for field in ["offset", "limit"] {
