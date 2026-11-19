@@ -306,3 +306,53 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert "reviewed" in output and len(requests) == 1
     _, body = requests.pop()
     assert body["messages"][1:] == [{"role": "user", "content": diff + "\nReview this diff"}]
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "pi-v3.jsonl"
+    imported = run(["--import-session", str(fixture)], "")
+    sid = next(json.loads(line)["session_id"] for line in imported if line.startswith("{"))
+    assert not requests
+    run(["--print", "--session", str(sid), "continue selected branch"], "")
+    assert len(requests) == 1
+    messages = requests.pop()[1]["messages"][1:]
+    assert [m["content"] for m in messages] == [
+        "Earlier conversation summary:\nunique summary", "kept prompt", "",
+        "unique tool output", "active answer", "continue selected branch",
+    ], messages
+    assert messages[2]["tool_calls"][0]["id"] == messages[3]["tool_call_id"] == "tool-id"
+    exported = root / "roundtrip.jsonl"
+    run(["--export-session", str(sid), str(exported)], "")
+    assert not requests
+    original = [json.loads(line) for line in fixture.read_text().splitlines()]
+    records = [json.loads(line) for line in exported.read_text().splitlines()]
+    assert records[0] == dict(original[0], cwd=str(repo.resolve()))
+    assert records[1:-2] == original[1:]
+    assert records[-2]["parentId"] == "a-answer" and records[-1]["parentId"] == records[-2]["id"]
+    assert records[-1]["message"]["content"][0]["text"] == "reviewed"
+    saved = exported.read_bytes()
+    run(["--export-session", str(sid), str(exported)], "", error="creating export")
+    assert exported.read_bytes() == saved
+
+    if os.environ.get("PANDA_TEST_PI"):
+        env = dict(PATH=os.environ["PATH"], HOME=str(root), PI_CODING_AGENT_DIR=str(root / "pi-agent"))
+        cmd = [os.environ["PANDA_TEST_PI"], "--offline", "-ne", "-ns", "-np", "-nc", "--no-themes",
+               "--mode", "rpc", "--session", str(exported)]
+        commands = ["get_entries", "get_tree", "get_messages"]
+        pi = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True, timeout=20,
+                            input="".join(json.dumps({"type": c}) + "\n" for c in commands))
+        assert pi.returncode == 0, pi.stderr
+        replies = {e["command"]: e for e in map(json.loads, pi.stdout.splitlines()) if e["type"] == "response"}
+        assert all(replies[c]["success"] for c in commands), replies
+        loaded = replies["get_entries"]["data"]["entries"]
+        assert loaded[:len(records)-1] == records[1:]
+        # Pi can record its local thinking/model setting when opening the file.
+        leaf = records[-1]["id"]
+        for added in loaded[len(records)-1:]:
+            assert added["parentId"] == leaf and added["type"] in {"thinking_level_change", "model_change"}
+            leaf = added["id"]
+        tree = replies["get_tree"]["data"]
+        assert tree["leafId"] == leaf
+        assert {c["entry"]["id"] for c in tree["tree"][0]["children"]} == {"sibling", "keep"}
+        active = json.dumps(replies["get_messages"]["data"]["messages"])
+        for term in ["unique summary", "kept prompt", "unique tool output", "continue selected branch"]:
+            assert active.count(term) == 1, active
+        assert "sibling only" not in active

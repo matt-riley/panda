@@ -92,6 +92,10 @@ pub struct Session {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub context_budget: Option<usize>,
+    // Imported context edits replace contributions to the model while keeping
+    // history positions stable for checkpoints and branch navigation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub context_edits: std::collections::BTreeMap<usize, Vec<Message>>,
     pub history: Vec<Message>,
     pub active: bool,
     pub mode: Mode,
@@ -126,6 +130,19 @@ impl UsageRecord {
     }
 }
 impl Session {
+    pub fn resolved(&self, range: std::ops::Range<usize>) -> Vec<Message> {
+        range
+            .flat_map(|i| {
+                self.context_edits
+                    .get(&i)
+                    .map(Vec::as_slice)
+                    .unwrap_or_else(|| std::slice::from_ref(&self.history[i]))
+                    .iter()
+                    .cloned()
+            })
+            .collect()
+    }
+
     pub fn projected(&self) -> Vec<Message> {
         let mut out = Vec::new();
         let mut from = 0;
@@ -138,7 +155,7 @@ impl Session {
                 c.summary
             )));
         }
-        out.extend_from_slice(&self.history[from..]);
+        out.extend(self.resolved(from..self.history.len()));
         out
     }
     pub fn context_bytes(&self) -> usize {
@@ -210,7 +227,7 @@ fn checkpoint(
         .map_or_else(String::new, |c| c.summary.clone());
     let summary = summarize(
         p,
-        &s.history[start..end],
+        &s.resolved(start..end),
         prior,
         (s.token_budget().clamp(1, 24576)) as usize,
         "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.",
