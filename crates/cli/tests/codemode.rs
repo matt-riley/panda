@@ -537,3 +537,87 @@ fn reads_limits_and_cancellation() -> Result<()> {
     assert_eq!(calls, 1);
     Ok(())
 }
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn noisy_shell_failure_can_be_read_in_plan_and_codemode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let tools = coding(root.path())?;
+    let nested = Codemode::new(&tools, EXE.as_ref());
+    let cancel = Cancel::default();
+    let command = "echo EARLY_MARKER; awk 'BEGIN { for (i=0;i<100000;i++) print \"long-output-line\" }'; echo final-stdout; echo FINAL_FAILURE >&2; exit 7";
+    let failure = tools
+        .run(
+            Mode::Code,
+            &call("shell", json!({"command":command})),
+            &cancel,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("exit status: 7") && failure.contains("FINAL_FAILURE"));
+    assert!(!failure.contains("EARLY_MARKER") && failure.len() < 100_000);
+    let path = failure
+        .lines()
+        .find_map(|line| line.strip_prefix("Full output: "))
+        .expect("full log path");
+    let args = json!({"path":path,"offset":1,"limit":1});
+    assert_eq!(
+        tools.run(Mode::Plan, &call("read", args.clone()), &cancel)?,
+        "EARLY_MARKER\n"
+    );
+    let js = json!({"code":format!("text(tools.read({args}))")});
+    assert_eq!(
+        nested.run(Mode::Plan, &call("codemode", js), &cancel)?,
+        "EARLY_MARKER\n"
+    );
+    let log = fs::read_to_string(root.path().join(path))?;
+    assert_eq!(
+        log,
+        format!(
+            "EARLY_MARKER\n{}final-stdout\nFINAL_FAILURE\n",
+            "long-output-line\n".repeat(100000)
+        )
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn shell_timeout_stops_process_group() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let tools = coding(root.path())?;
+    let cancel = Cancel::default();
+    let command = "sleep 6 & echo $$ $! > pids; wait; echo survived > late";
+    let start = Instant::now();
+    let result = tools.run(
+        Mode::Code,
+        &call("shell", json!({"command":command,"timeout":1})),
+        &cancel,
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("timed out after 1s")
+    );
+    assert!((Duration::from_secs(1)..Duration::from_secs(4)).contains(&start.elapsed()));
+    let pids = fs::read_to_string(root.path().join("pids"))?;
+    let pids = pids
+        .split_whitespace()
+        .map(str::parse::<i32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(pids.len(), 2);
+    for pid in pids {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "process {pid} survived");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+    assert!(!root.path().join("late").exists());
+    Ok(())
+}

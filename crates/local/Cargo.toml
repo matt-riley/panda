@@ -12,6 +12,7 @@ panda-coding = { path = "../coding" }
 panda-core = { path = "../core" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
+fastrand = "2"
 walkdir = "2"
 globset = "0.4"
 ignore = "0.4"

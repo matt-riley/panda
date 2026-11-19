@@ -120,6 +120,24 @@ pub fn field<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("expected string field {key}"))
 }
+pub const DEFAULT_SHELL_TIMEOUT: u64 = 120;
+pub const MAX_SHELL_TIMEOUT: u64 = 600;
+
+pub fn shell_timeout(args: &Value) -> Result<std::time::Duration> {
+    let seconds = match args.get("timeout") {
+        None => DEFAULT_SHELL_TIMEOUT,
+        Some(value) => value
+            .as_u64()
+            .filter(|n| (1..=MAX_SHELL_TIMEOUT).contains(n))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "timeout must be a whole number of seconds from 1 to {MAX_SHELL_TIMEOUT}"
+                )
+            })?,
+    };
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
 fn catalog(mode: Mode) -> Vec<Value> {
     let specs: &[(&str, &str, &[&str], bool)] = &[
         (
@@ -178,7 +196,7 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "shell",
-            "Run a shell command in the workspace.",
+            "Run a shell command in the workspace. Long output returns the tail and a full log path for line-range reads.",
             &["command"],
             true,
         ),
@@ -189,6 +207,9 @@ fn catalog(mode: Mode) -> Vec<Value> {
             let mut props = serde_json::Map::new();
             for key in *fields {
                 props.insert(key.to_string(), json!({"type":"string"}));
+            }
+            if *name == "shell" {
+                props.insert("timeout".into(), json!({"type":"integer","minimum":1,"maximum":MAX_SHELL_TIMEOUT,"default":DEFAULT_SHELL_TIMEOUT,"description":"Time limit in seconds."}));
             }
             if *name == "edit" {
                 let pair = json!({"old":{"type":"string","minLength":1},"new":{"type":"string"}});
@@ -294,6 +315,45 @@ mod tests {
             Ok("".into())
         }
     }
+    #[test]
+    fn shell_timeout_matches_its_schema() {
+        let schema = catalog(Mode::Code)
+            .into_iter()
+            .find(|s| s["function"]["name"] == "shell")
+            .unwrap();
+        let timeout = &schema["function"]["parameters"]["properties"]["timeout"];
+        assert_eq!(
+            schema["function"]["parameters"]["required"],
+            json!(["command"])
+        );
+        assert_eq!(timeout["type"], "integer");
+        for (args, expected) in [
+            (json!({}), 120),
+            (json!({"timeout":1}), 1),
+            (json!({"timeout":600}), 600),
+        ] {
+            assert_eq!(shell_timeout(&args).unwrap().as_secs(), expected);
+        }
+        assert_eq!(
+            (
+                &timeout["minimum"],
+                &timeout["maximum"],
+                &timeout["default"]
+            ),
+            (&json!(1), &json!(600), &json!(120))
+        );
+        for invalid in [
+            json!(0),
+            json!(-1),
+            json!(601),
+            json!(1.5),
+            json!("1"),
+            Value::Null,
+        ] {
+            assert!(shell_timeout(&json!({"timeout":invalid})).is_err());
+        }
+    }
+
     #[test]
     fn plan_blocks_mutation_at_dispatch() {
         let c = Coding {

@@ -1,3 +1,5 @@
+mod shell;
+
 use anyhow::{Context, Result, ensure};
 use panda_coding::{Workspace, field};
 use panda_core::{Cancel, ToolOutput};
@@ -101,15 +103,7 @@ impl Native {
         }
         Ok(rules)
     }
-    fn exec(
-        &self,
-        cmd: &Path,
-        args: &[&str],
-        input: &[u8],
-        write: bool,
-        cancel: &Cancel,
-        emit: &mut panda_core::Emit,
-    ) -> Result<String> {
+    fn command(&self, cmd: &Path, args: &[&str], write: bool) -> Result<Command> {
         let scratch = self.scratch.path().canonicalize()?;
         let bins = self
             .toolchains
@@ -134,85 +128,50 @@ impl Native {
             )
             .env("PATH", path)
             .env("LC_ALL", "C")
-            .process_group(0)
+            .process_group(0);
+        Ok(proc)
+    }
+
+    fn exec_file(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
+        let input = serde_json::to_vec(args)?;
+        let mut proc = self.command(
+            &self.worker,
+            &["--file-worker", name],
+            matches!(name, "write" | "edit"),
+        )?;
+        cancel.check()?;
+        let mut child = proc
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        cancel.check()?;
-        let mut child = proc.spawn()?;
-        let pid = child.id() as i32;
+            .stderr(Stdio::piped())
+            .spawn()?;
         let mut stdin = child.stdin.take().unwrap();
-        let input = input.to_vec();
         let writer = std::thread::spawn(move || stdin.write_all(&input));
-        let (updates, rx) = std::sync::mpsc::channel();
         fn drain(
             mut pipe: impl Read + Send + 'static,
-            updates: Option<std::sync::mpsc::Sender<String>>,
-            limit: usize,
+            limit: u64,
         ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
             std::thread::spawn(move || {
-                let mut out = Vec::new();
-                let mut buffer = [0u8; 8192];
-                loop {
-                    let n = pipe.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
-                    }
-                    let count = n.min(limit - out.len());
-                    if let Some(tx) = &updates
-                        && count > 0
-                    {
-                        let _ = tx.send(String::from_utf8_lossy(&buffer[..count]).into_owned());
-                    }
-                    out.extend_from_slice(&buffer[..count]);
-                }
-                Ok(out)
+                let mut bytes = Vec::new();
+                pipe.by_ref().take(limit).read_to_end(&mut bytes)?;
+                std::io::copy(&mut pipe, &mut std::io::sink())?;
+                Ok(bytes)
             })
         }
-        let image_capable_read = cmd == self.worker && args == ["--file-worker", "read"];
-        let stdout = drain(
-            child.stdout.take().unwrap(),
-            (cmd == Path::new("/bin/sh")).then(|| updates.clone()),
-            if image_capable_read {
-                // An 8 MiB base64 image or 1 MiB of JSON-escaped UTF-8 text.
-                crate::files::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024
-            } else {
-                1_100_000
-            },
-        );
-        let stderr = drain(
-            child.stderr.take().unwrap(),
-            (cmd == Path::new("/bin/sh")).then_some(updates),
-            1_100_000,
-        );
-        let start = Instant::now();
-        let result = loop {
-            for chunk in rx.try_iter() {
-                emit(panda_core::Event::ToolOutput(chunk));
-            }
-            if let Err(e) = cancel.check() {
-                break Err(e);
-            }
-            if start.elapsed() > Duration::from_secs(120) {
-                break Err(anyhow::anyhow!("tool timed out"));
-            }
-            if let Some(s) = child.try_wait()? {
-                break Ok(s);
-            }
-            std::thread::sleep(Duration::from_millis(15))
+        let limit = if name == "read" {
+            // An 8 MiB base64 image or 1 MiB of JSON-escaped UTF-8 text.
+            (crate::files::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024) as u64
+        } else {
+            1_100_000
         };
-        // Every command gets a private process group, including shell descendants.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-        let _ = child.wait();
-        let status = result?;
+        let stdout = drain(child.stdout.take().unwrap(), limit);
+        let stderr = drain(child.stderr.take().unwrap(), 1_100_000);
+        let status = wait_group(child, Duration::from_secs(120), cancel, || Ok(false))?;
         let _ = writer.join();
         let out = stdout.join().unwrap()?;
         let err = stderr.join().unwrap()?;
-        for chunk in rx.try_iter() {
-            emit(panda_core::Event::ToolOutput(chunk));
-        }
         let error = String::from_utf8_lossy(&err);
-        if image_capable_read {
+        if name == "read" {
             ensure!(status.success(), "command {status}: {error}");
             return Ok(String::from_utf8(out)?);
         }
@@ -224,6 +183,35 @@ impl Native {
         Ok(format!("{}{error}", String::from_utf8_lossy(&out)))
     }
 }
+// Always terminate the private process group, including on cancellation, timeout
+// or an I/O error. Busy output must still yield to the deadline every iteration.
+fn wait_group(
+    mut child: std::process::Child,
+    timeout: Duration,
+    cancel: &Cancel,
+    mut pump: impl FnMut() -> Result<bool>,
+) -> Result<std::process::ExitStatus> {
+    let pid = child.id() as i32;
+    let started = Instant::now();
+    let result = (|| loop {
+        cancel.check()?;
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        ensure!(
+            started.elapsed() < timeout,
+            "tool timed out after {}s",
+            timeout.as_secs()
+        );
+        if !pump()? {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    child.wait()?;
+    result
+}
+
 impl Workspace for Native {
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         self.invoke_stream(name, args, cancel, &mut |_| {})
@@ -237,25 +225,12 @@ impl Workspace for Native {
         emit: &mut panda_core::Emit,
     ) -> Result<ToolOutput> {
         if name == "shell" {
-            return self
-                .exec(
-                    Path::new("/bin/sh"),
-                    &["-c", field(args, "command")?],
-                    &[],
-                    true,
-                    cancel,
-                    emit,
-                )
-                .map(Into::into);
+            let timeout = panda_coding::shell_timeout(args)?;
+            let proc =
+                self.command(Path::new("/bin/sh"), &["-c", field(args, "command")?], true)?;
+            return shell::run(proc, &self.root, timeout, cancel, emit).map(Into::into);
         }
-        let result = self.exec(
-            &self.worker,
-            &["--file-worker", name],
-            &serde_json::to_vec(args)?,
-            matches!(name, "write" | "edit"),
-            cancel,
-            emit,
-        )?;
+        let result = self.exec_file(name, args, cancel)?;
         if name == "read" {
             Ok(serde_json::from_str(&result)?)
         } else {

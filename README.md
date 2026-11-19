@@ -37,6 +37,8 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 
 In plan and code mode, `read` accepts UTF-8 text files and images. PNG, JPEG and WebP images can be up to 8 MiB each. Panda recognizes images by their contents and sends the original bytes to the model. Use `offset` and `limit` for text line ranges. In Codemode, `tools.read({path: "diagram.png"})` returns a short description to the script and attaches the image when the script succeeds.
 
+In code mode, `shell` accepts an optional whole-number `timeout` from 1 to 600 seconds and defaults to 120 seconds. A timeout stops the shell and its process group. When combined stdout and stderr exceed 64 KiB, the result includes the exit status, the last 64 KiB and the workspace-relative path to a full log under `.panda/`. The log stays in the workspace after Panda exits. Use `read` or Codemode’s `tools.read` with `offset` and `limit` to inspect earlier lines.
+
 In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new":"after"}` replacement or a batch such as `{"path":"src/app.rs","edits":[{"old":"fn check()","new":"fn verify()"},{"old":"    check();","new":"    verify();"}]}`. Each target must occur exactly once in the original file. Edits may be listed in any order. A valid batch writes the file once and returns one numbered diff. A missing, ambiguous, or overlapping target rejects the entire batch.
 
 | To do this | In Panda |
