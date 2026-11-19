@@ -45,7 +45,7 @@ async function offlineBrowser(file, verify) {
             chrome.stdio[3].write(JSON.stringify({ id, method, params, sessionId: attached }) + "\0");
         });
     }
-    const closed = once(chrome, "exit");
+    const closed = once(chrome, "close");
     const timeout = setTimeout(() => chrome.kill("SIGKILL"), 30_000);
     try {
         await Promise.race([closed.then(() => { throw Error("Chrome exited before verification"); }), (async () => {
@@ -71,9 +71,15 @@ async function offlineBrowser(file, verify) {
             assert.deepEqual(requests.filter(u => /^https?:/.test(u)), []);
         })()]);
     } finally {
-        clearTimeout(timeout);
-        chrome.kill();
-        await closed;
+        try {
+            if (chrome.exitCode === null && chrome.signalCode === null && !chrome.killed) {
+                attached = undefined;
+                await Promise.race([send("Browser.close"), closed]).catch(() => chrome.kill());
+            }
+            await closed;
+        } finally {
+            clearTimeout(timeout);
+        }
     }
 }
 
@@ -109,5 +115,5 @@ try {
         assert.doesNotMatch(await transcript(), /active answer|a\.rs|b\.rs|c\.rs/);
     });
 } finally {
-    rmSync(dir, {recursive:true, force:true});
+    rmSync(dir, {recursive:true, force:true, maxRetries:5, retryDelay:100});
 }
