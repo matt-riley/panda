@@ -172,3 +172,20 @@ fn login_and_model_pickers_accept_provider_names_and_route_gpt() {
         r#"["openai-codex","gpt-fixture"]"#
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires native Chrome for the offline export viewer"]
+fn html_export_opens_offline_on_active_branch() {
+    assert!(
+        Command::new("node")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/html_export.mjs"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

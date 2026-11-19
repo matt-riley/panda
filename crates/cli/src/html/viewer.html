@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panda session</title>
+<style>
+:root { color-scheme: light dark; --page:#f8f8f5; --ink:#202723; --muted:#525f58; --line:#cbd2cb; --accent:#22654a; --panel:#edf1ec }
+@media (prefers-color-scheme:dark) { :root { --page:#19201d; --ink:#edf2ec; --muted:#b0c0b7; --line:#48534d; --accent:#98d5b5; --panel:#222d27 } }
+* { box-sizing:border-box }
+body { margin:0; background:var(--page); color:var(--ink); font:16px/1.55 system-ui,sans-serif }
+main { max-width:54rem; margin:auto; padding:clamp(1rem,5vw,3rem) }
+header { border-bottom:2px solid var(--ink); padding-bottom:1.3rem }
+h1 { margin:0 0 .75rem; font:600 clamp(1.8rem,4vw,2.6rem)/1.2 Georgia,serif; overflow-wrap:anywhere }
+label, h2, h3 { font-size:.85rem; line-height:1.4; font-weight:650 }
+label { margin-right:.55rem }
+select { max-width:100%; padding:.35rem; color:var(--ink); background:var(--page); font:inherit }
+article { padding:1.25rem 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere }
+h2 { color:var(--accent); margin:0 0 .45rem }
+h3 { color:var(--muted); margin:.75rem 0 .2rem }
+pre, .message { margin:.35rem 0; white-space:pre-wrap; overflow-wrap:anywhere }
+pre { padding:.7rem .85rem; background:var(--panel); font: .88rem/1.5 ui-monospace,monospace }
+ul { margin:.2rem 0; padding-left:1.4rem; font-family:ui-monospace,monospace }
+img { max-width:100%; height:auto }
+</style>
+</head>
+<body>
+<main>
+<header><h1 id="title">Session transcript</h1><label for="branch">Branch</label><select id="branch"></select></header>
+<section id="transcript" aria-label="Branch transcript"></section>
+<noscript>Enable JavaScript to browse the saved branches.</noscript>
+</main>
+<script type="application/octet-stream" id="archive">{{SESSION}}</script>
+<script>
+"use strict";
+const archive = document.getElementById("archive");
+const bytes = Uint8Array.from(atob(archive.textContent), c => c.charCodeAt(0));
+archive.remove();
+const [, ...entries] = new TextDecoder().decode(bytes).trimEnd().split("\n").map(line => JSON.parse(line));
+const selector = document.getElementById("branch");
+const transcript = document.getElementById("transcript");
+const nodes = new Map(), nearest = new Map(), labels = new Map(), tips = new Set();
+let active = null, name = "";
+for (const entry of entries) {
+    // Label edits and export markers can be the final record or form their own
+    // leaves. Resolve them to their transcript position before building choices.
+    active = nearest.get(entry.parentId) ?? null;
+    if (entry.type === "label") {
+        labels.set(entry.targetId, entry.label || "");
+    } else if (entry.type === "session_info") {
+        name = entry.name || "";
+    } else if (["message", "compaction", "branch_summary", "custom_message"].includes(entry.type)
+               || entry.customType === "panda.truncated-reply") {
+        if (active !== null) nodes.get(active).children++;
+        nodes.set(entry.id, {entry, parent:active, children:0});
+        tips.delete(active);
+        active = entry.id;
+        tips.add(active);
+    }
+    nearest.set(entry.id, active);
+}
+if (name) document.getElementById("title").textContent = name;
+document.title = document.getElementById("title").textContent + " · Panda";
+
+function element(tag, text) {
+    const el = document.createElement(tag);
+    if (text != null) el.textContent = text;
+    return el;
+}
+function pathTo(id) {
+    const path = [];
+    while (nodes.has(id)) {
+        const node = nodes.get(id);
+        path.push(node.entry);
+        id = node.parent;
+    }
+    return path.reverse();
+}
+function textOf(content) {
+    if (typeof content === "string") return content;
+    return Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join(" ") : "";
+}
+function branchName(tip) {
+    let id = tip;
+    let preview;
+    while (nodes.has(id)) {
+        const {entry, parent, children} = nodes.get(id);
+        if (children > 1 && id !== tip) break;
+        if (labels.get(id)) return labels.get(id);
+        if (!preview) preview = textOf(entry.message?.content).trim().replace(/\s+/g, " ").slice(0, 72);
+        id = parent;
+    }
+    return preview || tip || "Session start";
+}
+function contentBlocks(body, content, tool) {
+    const blocks = Array.isArray(content) ? content : [{type:"text", text:content}];
+    for (const block of blocks) {
+        if (block.type === "text" && typeof block.text === "string") {
+            const part = element(tool ? "pre" : "div", block.text);
+            part.className = "message";
+            body.append(part);
+        } else if (block.type === "toolCall") {
+            body.append(element("h3", block.name), element("pre", JSON.stringify(block.arguments, null, 2)));
+        } else if (block.type === "thinking") {
+            const details = element("details");
+            details.append(element("summary", "Reasoning"), element("pre", block.thinking));
+            body.append(details);
+        } else if (block.type === "image" && ["image/png","image/jpeg","image/webp","image/gif"].includes(block.mimeType)) {
+            const img = element("img");
+            img.alt = "Session image";
+            img.src = "data:" + block.mimeType + ";base64," + block.data;
+            body.append(img);
+        }
+    }
+}
+function checkpoint(body, entry) {
+    // Pi includes the same canonical lists in both summary text and details.
+    const lists = [];
+    for (const [key, tag, heading] of [["readFiles","read-files","Files read"], ["modifiedFiles","modified-files","Files modified"]]) {
+        const paths = entry.details?.[key];
+        if (Array.isArray(paths) && paths.length && paths.every(p => typeof p === "string"))
+            lists.push({tag, heading, paths});
+    }
+    const suffix = lists.map(({tag, paths}) => "\n\n<"+tag+">\n"+paths.join("\n")+"\n</"+tag+">").join("");
+    const summary = entry.summary || "";
+    contentBlocks(body, suffix && summary.endsWith(suffix) ? summary.slice(0, -suffix.length) : summary, false);
+    for (const {heading, paths} of lists) {
+        const list = element("ul");
+        for (const path of paths) list.append(element("li", path));
+        body.append(element("h3", heading), list);
+    }
+}
+function render(id) {
+    const page = document.createDocumentFragment();
+    for (const e of pathTo(id)) {
+        const body = element("article");
+        if (e.type === "message") {
+            const m = e.message;
+            const tool = m.role === "toolResult";
+            const heading = tool ? (m.isError ? "Tool error" : "Tool output") + " · " + m.toolName :
+                ({user:"User", assistant:"Assistant", bashExecution:"Shell"})[m.role] || m.role;
+            body.append(element("h2", heading));
+            if (m.role === "bashExecution") body.append(element("pre", m.command), element("pre", m.output));
+            else contentBlocks(body, m.content, tool);
+        } else if (e.type === "compaction") {
+            body.append(element("h2", "Compaction"));
+            checkpoint(body, e);
+        } else if (e.type === "custom_message") {
+            body.append(element("h2", e.customType || "Custom message"));
+            contentBlocks(body, e.content, false);
+        } else if (e.type === "branch_summary") {
+            body.append(element("h2", "Branch summary"));
+            contentBlocks(body, e.summary, false);
+        } else {
+            body.append(element("h2", "Partial reply"));
+            contentBlocks(body, e.data?.text, false);
+        }
+        page.append(body);
+    }
+    if (!page.childElementCount) page.append(element("p", "No messages on this branch."));
+    transcript.replaceChildren(page);
+}
+const choices = [active, ...Array.from(tips).filter(id => id !== active)];
+for (const [index, id] of choices.entries()) {
+    selector.add(new Option((index === 0 ? "Active · " : "") + branchName(id), String(index)));
+}
+selector.addEventListener("change", () => render(choices[selector.selectedIndex]));
+render(active);
+</script>
+</body>
+</html>

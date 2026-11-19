@@ -102,8 +102,11 @@ Import a Pi v3 JSONL file in the workspace where you want to continue it. Import
 panda --import-session review.jsonl
 panda --print --session 42 "Continue the review"
 panda --export-session 42 continued.jsonl
+panda --export-session 42 review.html
 pi --session continued.jsonl
 ```
+
+Open the standalone HTML file in a browser offline. It opens on the active branch. Use the branch selector to review a sibling, including its tool output and compaction checkpoints. Export requires a new destination file and preserves the order used by `--continue`.
 
 Import and export also accept a trailing `--session-dir DIR`. Export creates a new file and includes all branches. Pi opens the selected branch, including its compaction checkpoint. Imported entries retain their IDs, parent links and extension payloads. The exported header points to the importing workspace. Panda uses its own configured model and tools when continuing. For Panda-authored entries that lack original timestamps or model metadata, the export uses the time of first export and identifies the model as unknown.
 
