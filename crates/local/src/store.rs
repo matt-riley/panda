@@ -68,6 +68,10 @@ impl Disk {
                 s.checkpoint = None;
             }
         }
+        self.create_fork(dir, repo, s, name)
+    }
+
+    fn create_fork(&self, dir: &Path, repo: &Path, mut s: Session, name: &str) -> Result<Self> {
         if !s.context_edits.is_empty() {
             // A fork starts a new tree with the visible path as its seed.
             let mut boundaries = vec![0];

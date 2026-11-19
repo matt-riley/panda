@@ -101,6 +101,45 @@ with tempfile.TemporaryDirectory() as tmp:
     assert [m["Assistant"]["text"] for m in history if "Assistant" in m] == ["First answer", "Second answer"]
     requests = [json.loads(line) for line in (initial_state / "requests.jsonl").read_text().splitlines()]
     assert requests == [history[:1], history[:3]]
+
+    def saved_sessions():
+        with sqlite3.connect(initial_state / "sessions.sqlite3") as db:
+            return {sid: json.loads(data) for sid, data in db.execute("SELECT id,data FROM sessions")}
+
+    def logged_requests():
+        return [json.loads(line) for line in (initial_state / "requests.jsonl").read_text().splitlines()]
+
+    parent = saved_sessions()[1]
+    with panda(repo, initial_state, args=["--continue"]) as (send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("/Follow up")
+        expect("fork")
+        send("\x06")
+        expect("session 2 (Code)")
+        expect("Follow up")
+        before_submit = saved_sessions()
+        assert before_submit[1] == parent
+        assert before_submit[2]["parent"] == 1 and before_submit[2]["history"] == history[:2]
+        assert logged_requests() == requests
+        send(" differently\r")
+        expect("Revised answer")
+        expect("deepseek-flash")
+
+    revised = history[:2] + [{"User": "Follow up differently"}]
+    with panda(repo, initial_state, args=["--continue"], startup="session 2 (Code)") as (send, expect):
+        send(":resume 1\r")
+        expect("session 1 (Code)")
+        expect("you> Follow up")
+        expect("deepseek-flash")
+        send(":resume 2\r")
+        expect("session 2 (Code)")
+        expect("you> Follow up differently")
+        expect("deepseek-flash")
+    both = saved_sessions()
+    assert logged_requests() == requests + [revised]
+    assert both[1] == parent
+    assert both[2]["history"] == revised + [{"Assistant": {"text": "Revised answer", "calls": []}}]
     for flags in (["--print"], ["--mode", "json"], ["--no-session"]):
         with panda(repo, Path(tmp) / "once", args=flags + ["/review startup"], one_shot=True) as (_, expect):
             expect('"type":"done"' if flags == ["--mode", "json"] else "First answer\r\n")
