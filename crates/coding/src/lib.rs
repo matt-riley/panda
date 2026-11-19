@@ -69,13 +69,13 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "repo_map",
-            "List workspace files in lexical order. Use glob to filter paths and next_offset to fetch the next page.",
+            "List workspace files in lexical order, respecting .gitignore. Use glob to filter paths and next_offset to fetch the next page.",
             &[],
             false,
         ),
         (
             "search",
-            "Find matching lines in workspace files. The query is literal by default. Set regex to true for a Rust regular expression. Use glob to filter paths and next_offset to fetch the next page.",
+            "Find matching lines in workspace files, respecting .gitignore. The query is literal by default. Set regex to true for a Rust regular expression. Use glob to filter paths and next_offset to fetch the next page.",
             &["query"],
             false,
         ),

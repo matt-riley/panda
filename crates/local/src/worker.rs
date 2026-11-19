@@ -46,6 +46,27 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), "aa cc aa");
     }
     #[test]
+    fn ignore_rules_stay_within_the_workspace_and_their_subtree() -> anyhow::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let root = parent.path().join("workspace");
+        fs::write(parent.path().join(".gitignore"), "*.rs\n")?;
+        for (name, rule) in [("a", "/main.rs"), ("b", "/deep.rs")] {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join(".gitignore"), rule)?;
+            fs::write(dir.join("main.rs"), "")?;
+        }
+        let linked = root.join("c");
+        fs::create_dir(&linked)?;
+        std::os::unix::fs::symlink(parent.path().join(".gitignore"), linked.join(".gitignore"))?;
+        fs::write(linked.join("main.rs"), "")?;
+        let page: Value =
+            serde_json::from_str(&run(&root, "repo_map", &json!({"glob":"**/*.rs"}))?)?;
+        assert_eq!(page["items"], json!(["b/main.rs", "c/main.rs"]));
+        Ok(())
+    }
+
+    #[test]
     fn patterns_filter_before_pagination() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();

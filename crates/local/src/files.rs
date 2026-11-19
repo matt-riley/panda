@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail, ensure};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use panda_coding::field;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Component, Path},
 };
 use walkdir::WalkDir;
@@ -158,6 +160,69 @@ fn path_filter(value: &Value) -> Result<GlobSet> {
     Ok(GlobSetBuilder::new().add(glob).build()?)
 }
 
+fn directory_rules(dir: &Path) -> Option<Gitignore> {
+    // Ignore files are workspace inputs too. Skip symlinks and special files.
+    let file = fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir.join(".gitignore"))
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut builder = GitignoreBuilder::new(dir);
+    for (i, bytes) in BufReader::new(file)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .enumerate()
+    {
+        if let Ok(line) = std::str::from_utf8(&bytes) {
+            let line = line.trim_end_matches('\r');
+            let line = if i == 0 {
+                line.trim_start_matches('\u{feff}')
+            } else {
+                line
+            };
+            // One malformed pattern does not invalidate the other rules.
+            let _ = builder.add_line(None, line);
+        }
+    }
+    builder.build().ok()
+}
+
+fn workspace_entries(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    let mut rules: Vec<Option<Gitignore>> = Vec::new();
+    WalkDir::new(root)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(move |entry| {
+            // The walk is depth-first. Keep only the current directory's ancestors.
+            rules.truncate(entry.depth());
+            let is_dir = entry.file_type().is_dir();
+            if entry.depth() > 0
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | "target" | "node_modules")
+                )
+            {
+                return false;
+            }
+            let decision = rules
+                .iter()
+                .rev()
+                .flatten()
+                .map(|rules| rules.matched(entry.path(), is_dir))
+                .find(|decision| !decision.is_none());
+            if decision.is_some_and(|decision| decision.is_ignore()) {
+                return false;
+            }
+            if is_dir {
+                rules.push(directory_rules(entry.path()));
+            }
+            true
+        })
+}
+
 fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
     let offset = args
         .get("offset")
@@ -183,17 +248,7 @@ fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
         items.push(v);
         true
     };
-    let files = WalkDir::new(root)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0
-                || !matches!(
-                    e.file_name().to_str(),
-                    Some(".git" | "target" | "node_modules")
-                )
-        });
-    'files: for entry in files {
+    'files: for entry in workspace_entries(root) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
