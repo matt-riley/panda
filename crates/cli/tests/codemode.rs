@@ -180,7 +180,7 @@ fn plan_search_patterns_work_directly_and_in_codemode() -> Result<()> {
         ("repo_map", json!({"glob":"**/*.rs"}), json!(["src/lib.rs"])),
         (
             "search",
-            json!({"query":"^fn (one|two)", "regex":true, "glob":"**/*.rs", "offset":1}),
+            json!({"query":"^FN (ONE|TWO)", "regex":true, "ignoreCase":true, "context":0, "glob":"**/*.rs", "offset":1}),
             json!([{"path":"src/lib.rs","line":2,"text":"fn two() {}"}]),
         ),
     ] {
@@ -279,6 +279,66 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
         );
         assert_eq!(serde_json::from_str::<Value>(&nested)?, pages, "{name}");
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn search_context_pages_count_only_hits_in_plan_and_codemode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join(".gitignore"), "discard.txt\n")?;
+    fs::write(root.path().join("discard.txt"), "TODO")?;
+    // Consecutive hits straddle the page boundary. The first and last hit
+    // also touch file boundaries, where context must stop.
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    for i in 0..51 {
+        hits.push(lines.len());
+        lines.push(if i % 2 == 0 { "TODO" } else { "Todo" });
+        if i < 49 {
+            lines.push("nearby");
+        }
+    }
+    fs::write(root.path().join("notes.txt"), lines.join("\n"))?;
+    let expected: Vec<_> = hits
+        .into_iter()
+        .map(|i| {
+            json!({
+                "path":"notes.txt","line":i+1,"text":lines[i],
+                "before":lines[i.saturating_sub(2)..i],
+                "after":lines[i+1..(i+3).min(lines.len())]
+            })
+        })
+        .collect();
+    let base = coding(root.path())?;
+    let enabled = Codemode::new(&base, EXE.as_ref());
+    let mut args = json!({"query":"todo","ignoreCase":true,"context":2});
+    let code = format!(
+        "const args = {args}; const first = tools.search(args); text([first, tools.search({{...args, offset:first.next_offset}})]);"
+    );
+    let expected_pages = [
+        json!({"items":expected[..50],"next_offset":50}),
+        json!({"items":expected[50..],"next_offset":null}),
+    ];
+    for expected_page in &expected_pages {
+        let direct = base.run(
+            Mode::Plan,
+            &call("search", args.clone()),
+            &Cancel::default(),
+        )?;
+        let direct: Value = serde_json::from_str(&direct)?;
+        assert_eq!(&direct, expected_page);
+        args["offset"] = direct["next_offset"].clone();
+    }
+    let nested = enabled.run(
+        Mode::Plan,
+        &call("codemode", json!({"code":code})),
+        &Cancel::default(),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&nested)?,
+        json!(expected_pages)
+    );
     Ok(())
 }
 
