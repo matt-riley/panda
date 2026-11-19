@@ -14,6 +14,17 @@ fn fixture() {
             cancel: &Cancel,
             emit: &mut Emit,
         ) -> Result<(String, Vec<Call>)> {
+            if let Some(log) = std::env::var_os("PANDA_TEST_REQUEST_LOG") {
+                let mut file = fs::OpenOptions::new().append(true).create(true).open(log)?;
+                writeln!(file, "{}", serde_json::to_string(history)?)?;
+                let answer = if history.len() == 1 {
+                    "First answer"
+                } else {
+                    "Second answer"
+                };
+                emit(Event::Text(answer.into()));
+                return Ok((answer.into(), vec![]));
+            }
             if system.starts_with("Summarize") {
                 if std::env::var_os("PANDA_SLOW_SUMMARY").is_some() {
                     loop {
@@ -53,7 +64,11 @@ fn fixture() {
             Ok((answer.into(), vec![]))
         }
     }
-    run(vec!["--continue".into()], |_, _, _| Ok(Box::new(Offline))).unwrap();
+    let args = match std::env::var("PANDA_TREE_ARGS") {
+        Ok(args) => serde_json::from_str(&args).unwrap(),
+        Err(_) => vec!["--continue".into()],
+    };
+    run(args, |_, _, _| Ok(Box::new(Offline))).unwrap();
 }
 #[test]
 #[ignore = "requires a native macOS terminal"]

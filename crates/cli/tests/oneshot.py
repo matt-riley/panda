@@ -301,3 +301,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     shared.chmod(0o755)
     run(["--print", "--session-dir", str(shared), "probe"], "", error="private directory")
     assert not list(shared.iterdir())
+
+    output = run(["Review this diff"], diff)
+    assert "reviewed" in output and len(requests) == 1
+    _, body = requests.pop()
+    assert body["messages"][1:] == [{"role": "user", "content": diff + "\nReview this diff"}]
