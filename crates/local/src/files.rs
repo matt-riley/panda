@@ -2,9 +2,14 @@ use anyhow::{Context, Result, bail, ensure};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use panda_coding::field;
-use regex::Regex;
-use serde_json::{Value, json};
+use regex::{Regex, RegexBuilder};
+use serde::Serialize;
+use serde_json::{
+    Value,
+    value::{RawValue, to_raw_value},
+};
 use std::{
+    cell::OnceCell,
     fs,
     io::{BufRead, BufReader, Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -134,13 +139,27 @@ enum LineQuery<'a> {
 impl<'a> LineQuery<'a> {
     fn parse(args: &'a Value) -> Result<Self> {
         let query = field(args, "query")?;
-        match args.get("regex") {
-            None | Some(Value::Bool(false)) => Ok(Self::Literal(query)),
-            Some(Value::Bool(true)) => Ok(Self::Regex(
-                Regex::new(query).map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?,
-            )),
-            _ => bail!("regex must be a boolean"),
+        let flag = |key: &str| match args.get(key) {
+            None => Ok(false),
+            Some(Value::Bool(b)) => Ok(*b),
+            _ => bail!("{key} must be a boolean"),
+        };
+        let regex = flag("regex")?;
+        let ignore_case = flag("ignoreCase")?;
+        if !regex && !ignore_case {
+            return Ok(Self::Literal(query));
         }
+        let mut builder = if regex {
+            RegexBuilder::new(query)
+        } else {
+            RegexBuilder::new(&regex::escape(query))
+        };
+        Ok(Self::Regex(
+            builder
+                .case_insensitive(ignore_case)
+                .build()
+                .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?,
+        ))
     }
 
     fn matches(&self, line: &str) -> bool {
@@ -223,6 +242,61 @@ fn workspace_entries(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdi
         })
 }
 
+fn excerpt(line: &str) -> &str {
+    line.char_indices()
+        .nth(500)
+        .map_or(line, |(end, _)| &line[..end])
+}
+
+#[derive(Serialize)]
+struct SearchHit<'a> {
+    line: usize,
+    path: &'a str,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<&'a [&'a str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<&'a [&'a str]>,
+}
+
+#[derive(Default, Serialize)]
+struct Page {
+    items: Vec<Box<RawValue>>,
+    next_offset: Option<u64>,
+    #[serde(skip)]
+    bytes: usize,
+    #[serde(skip)]
+    seen: u64,
+}
+
+impl Page {
+    fn add<T: Serialize>(&mut self, offset: u64, item: impl FnOnce() -> T) -> Result<bool> {
+        self.seen += 1;
+        if self.seen <= offset {
+            return Ok(true);
+        }
+        let next = offset + self.items.len() as u64;
+        if self.items.len() == 50 {
+            self.next_offset = Some(next);
+            return Ok(false);
+        }
+        let item = to_raw_value(&item())?;
+        // Reserve space for the envelope, the numeric cursor and each comma.
+        let bytes = item.get().len() + 1;
+        if self.bytes + bytes + 64 > crate::MAX_TOOL_RESULT_BYTES {
+            ensure!(
+                !self.items.is_empty(),
+                "search hit exceeds 1 MiB; reduce context"
+            );
+            self.next_offset = Some(next);
+            return Ok(false);
+        }
+        self.bytes += bytes;
+        self.items.push(item);
+        Ok(true)
+    }
+}
+
 fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
     let offset = args
         .get("offset")
@@ -233,21 +307,15 @@ fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
         .then(|| LineQuery::parse(args))
         .transpose()?;
     let glob = args.get("glob").map(path_filter).transpose()?;
-    let mut seen = 0u64;
-    let mut items = Vec::new();
-    let mut more = false;
-    let mut add = |v| {
-        seen += 1;
-        if seen <= offset {
-            return true;
-        }
-        if items.len() == 50 {
-            more = true;
-            return false;
-        }
-        items.push(v);
-        true
+    let context = match args.get("context") {
+        Some(value) if query.is_some() => usize::try_from(
+            value
+                .as_u64()
+                .context("context must be a non-negative integer")?,
+        )?,
+        _ => 0,
     };
+    let mut page = Page::default();
     'files: for entry in workspace_entries(root) {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -262,18 +330,34 @@ fn page(root: &Path, name: &str, args: &Value) -> Result<String> {
             let Ok(text) = read(entry.path()) else {
                 continue;
             };
+            let excerpts = OnceCell::new();
             for (i, line) in text.lines().enumerate() {
-                if q.matches(line)
-                    && !add(
-                        json!({"path":path,"line":i+1,"text":line.chars().take(500).collect::<String>()}),
-                    )
-                {
+                if !q.matches(line) {
+                    continue;
+                }
+                if !page.add(offset, || {
+                    let mut hit = SearchHit {
+                        path: &path,
+                        line: i + 1,
+                        text: excerpt(line),
+                        before: None,
+                        after: None,
+                    };
+                    if context > 0 {
+                        let lines =
+                            excerpts.get_or_init(|| text.lines().map(excerpt).collect::<Vec<_>>());
+                        hit.before = Some(&lines[i.saturating_sub(context)..i]);
+                        hit.after =
+                            Some(&lines[i + 1..(i + 1).saturating_add(context).min(lines.len())]);
+                    }
+                    hit
+                })? {
                     break 'files;
                 }
             }
-        } else if !add(json!(path)) {
+        } else if !page.add(offset, || &path)? {
             break;
         }
     }
-    Ok(json!({"items":items,"next_offset":more.then(||offset+50)}).to_string())
+    Ok(serde_json::to_string(&page)?)
 }

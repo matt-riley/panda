@@ -134,6 +134,8 @@ fn catalog(mode: Mode) -> Vec<Value> {
             }
             if *name == "search" {
                 props.insert("regex".into(), json!({"type":"boolean"}));
+                props.insert("ignoreCase".into(), json!({"type":"boolean","description":"Case-insensitive matching for literal or regex queries. Defaults to false."}));
+                props.insert("context".into(), json!({"type":"integer","minimum":0,"description":"Lines on each side of a hit. Positive values add before and after arrays of text in file order. Only hits count toward the offset. Defaults to 0."}));
             }
             json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}})
         })

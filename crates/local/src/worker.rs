@@ -120,11 +120,71 @@ mod tests {
             ("repo_map", json!({"glob":"["}), "glob"),
             ("search", json!({"regex":true, "query":"["}), "regex"),
             ("search", json!({"regex":"true", "query":"a"}), "regex"),
+            ("search", json!({"ignoreCase":1,"query":"x"}), "ignoreCase"),
+            ("search", json!({"context":-1,"query":"x"}), "context"),
+            ("search", json!({"context":1.5,"query":"x"}), "context"),
             ("repo_map", json!({"glob":false}), "glob"),
         ] {
             let error = run(dir.path(), name, &args).unwrap_err();
             assert!(error.to_string().contains(message), "{error}");
         }
+    }
+
+    #[test]
+    fn literal_search_keeps_metacharacters_and_original_case() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("a"), "é.x\r\nÉ.X\r\nÉax\r\n")?;
+        let search = |args| -> anyhow::Result<Value> {
+            Ok(serde_json::from_str(&run(dir.path(), "search", &args)?)?)
+        };
+        let plain = json!({"path":"a","line":1,"text":"é.x"});
+        assert_eq!(search(json!({"query":"é.x"}))?["items"], json!([plain]));
+        assert_eq!(
+            search(json!({"query":"é.x","ignoreCase":false,"context":0}))?["items"],
+            json!([plain])
+        );
+        let page = search(json!({"query":"é.x","ignoreCase":true,"context":u64::MAX}))?;
+        assert_eq!(
+            page,
+            json!({"items":[
+            {"path":"a","line":1,"text":"é.x","before":[],"after":["É.X","Éax"]},
+            {"path":"a","line":2,"text":"É.X","before":["é.x"],"after":["Éax"]}
+        ],"next_offset":null})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pages_fit_the_nested_result_limit_without_losing_hits() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("a"),
+            ("🐼".repeat(520) + "hit\n").repeat(51),
+        )?;
+        let mut offset = 0;
+        loop {
+            let output = run(
+                dir.path(),
+                "search",
+                &json!({"query":"hit","context":8,"offset":offset}),
+            )?;
+            assert!(output.len() <= crate::MAX_TOOL_RESULT_BYTES);
+            let page: Value = serde_json::from_str(&output)?;
+            let items = page["items"].as_array().unwrap();
+            assert!(!items.is_empty());
+            for item in items {
+                offset += 1;
+                assert_eq!(item["line"], offset);
+                assert_eq!(item["text"].as_str().unwrap().chars().count(), 500);
+            }
+            if page["next_offset"].is_null() {
+                break;
+            }
+            assert_eq!(page["next_offset"], offset);
+            assert!(offset < 50);
+        }
+        assert_eq!(offset, 51);
+        Ok(())
     }
 
     #[test]
