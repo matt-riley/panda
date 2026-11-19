@@ -6,7 +6,7 @@ mod messages;
 use super::{Disk, save_snapshot, tree};
 use anyhow::{Context, Result, ensure};
 use messages::string;
-use panda_core::{Checkpoint, Message, Session, Store, UsageRecord};
+use panda_core::{Checkpoint, CheckpointFiles, Message, Session, Store, UsageRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -171,9 +171,23 @@ fn import_entry(
         } else {
             ancestor("firstKeptEntryId")?.before
         };
+        // Extension checkpoints may carry unrelated details. Their raw record is retained.
+        let details = &e["details"];
+        let files: Option<CheckpointFiles> =
+            if details["readFiles"].is_array() || details["modifiedFiles"].is_array() {
+                serde_json::from_value(details.clone()).ok()
+            } else {
+                None
+            };
+        let summary = string(&e, "summary")?;
+        let suffix = files
+            .as_ref()
+            .map(CheckpointFiles::summary_suffix)
+            .unwrap_or_default();
         Some(Checkpoint {
             through,
-            summary: string(&e, "summary")?.into(),
+            summary: summary.strip_suffix(&suffix).unwrap_or(summary).into(),
+            files,
         })
     } else {
         None

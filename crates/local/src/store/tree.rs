@@ -354,6 +354,7 @@ mod tests {
         s.checkpoint = Some(Checkpoint {
             through: 4,
             summary: "original summary".into(),
+            ..Default::default()
         });
         s.usage.push(UsageRecord {
             through: 4,

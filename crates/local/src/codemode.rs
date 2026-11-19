@@ -210,6 +210,12 @@ impl<'a> Codemode<'a> {
                                     Ok(result.text)
                                 })
                                 .map_err(|err| err.to_string());
+                            if reply.is_ok()
+                                && child_call.name == "read"
+                                && let Some(path) = child_call.args["path"].as_str()
+                            {
+                                emit(Event::NestedRead(path.to_owned()));
+                            }
                             send(&mut output, &reply)?;
                         }
                     }

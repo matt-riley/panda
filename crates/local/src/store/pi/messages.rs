@@ -94,6 +94,8 @@ pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
                 id: string(m, "toolCallId")?.into(),
                 text: c.text,
                 images: c.images,
+                nested_reads: serde_json::from_value(m["details"]["pandaNestedReads"].clone())
+                    .unwrap_or_default(),
                 is_error: m["isError"].as_bool().unwrap_or(false),
             });
         }
@@ -143,9 +145,14 @@ pub(super) fn encode(
             text,
             images,
             is_error,
+            nested_reads,
         } => {
-            json!({"role":"toolResult","toolCallId":id,"toolName":tool_name.context("tool result has no matching ancestor call")?,
-            "content":blocks(text,images)?,"isError":is_error})
+            let mut result = json!({"role":"toolResult","toolCallId":id,"toolName":tool_name.context("tool result has no matching ancestor call")?,
+            "content":blocks(text,images)?,"isError":is_error});
+            if !nested_reads.is_empty() {
+                result["details"] = json!({"pandaNestedReads":nested_reads});
+            }
+            result
         }
         Message::Assistant { .. } | Message::Reasoning(_) => {
             let (mut parts, calls) = match message {

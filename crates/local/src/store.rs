@@ -285,6 +285,7 @@ mod tests {
                 text: "hidden tool output".into(),
                 images: vec![],
                 is_error: false,
+                nested_reads: vec![],
             },
             Message::Assistant {
                 text: "visible reply".into(),

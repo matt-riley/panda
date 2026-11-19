@@ -478,7 +478,10 @@ fn run(
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
     let recent = keep_recent_tokens(&state)?;
-    let native = Native::new(&root, &std::env::current_exe()?)?;
+    let executable = std::env::current_exe()?;
+    #[cfg(test)]
+    let executable = std::env::var_os("PANDA_TEST_WORKER").map_or(executable, PathBuf::from);
+    let native = Native::new(&root, &executable)?;
     let sessions = match &options.session_dir {
         Some(dir) if !options.no_session => native.session_dir(dir)?,
         _ => state.clone(),
@@ -526,7 +529,6 @@ fn run(
         workspace: native,
         skills: Library::new(roots),
     };
-    let executable = std::env::current_exe()?;
     let selected_tools = options
         .tools
         .take()
