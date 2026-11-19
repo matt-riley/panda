@@ -213,8 +213,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert [m["content"] for m in body["messages"] if m["role"] == "user"] == [
         "seed conversation", "follow up", "last turn"]
 
-    def new_session(prompt):
-        result = done(run(["--mode", "json", prompt], ""))
+    def new_session(prompt, store_flags=(), cwd=repo):
+        result = done(run(["--mode", "json", *store_flags, prompt], "", cwd=cwd))
         assert len(requests) == 1
         requests.pop()
         return result["session_id"]
@@ -253,7 +253,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
             run(interface + [conflict, "--session", str(a), "probe"], "", error="conflicts")
     assert snapshot() == before
 
-    # Both stores have session 1, but the default store's latest session is B.
+    # Session 1 belongs to a different conversation in each store.
     custom = root / "custom store"
     selected = ["--session-dir", "../custom store"]
     output = run(["--mode", "json"] + selected + ["Custom review"], "")
@@ -286,9 +286,45 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert snapshot() == before
     custom_db = custom / "sessions.sqlite3"
     custom_before = custom_db.read_bytes()
-    followups([], ["--session", "1"], 1, ["seed conversation", "follow up", "last turn"])
-    followups([], ["--continue"], b, ["Review B"])
+    default_users = ["seed conversation", "follow up", "last turn"]
+    followups([], ["--session", "1"], 1, default_users)
+    followups([], ["--continue"], 1, default_users)
     assert custom_db.read_bytes() == custom_before
+
+    for store, flags in [(state, []), (custom, ["--session-dir", str(custom)])]:
+        for interface in (["--print"], ["--mode", "json"]):
+            a = new_session("Start A", flags)
+            b = new_session("Start B", flags)
+            assert a < b
+            with sqlite3.connect(store / "sessions.sqlite3") as db:
+                def saved_b():
+                    return db.execute("SELECT * FROM sessions WHERE id=?", (b,)).fetchone()
+
+                original_b = saved_b()
+                run(interface + flags + ["--session", str(a), "Update A"], "")
+                assert len(requests) == 1
+                requests.pop()
+                archive = root / f"{store.name}-{b}.jsonl"
+                run(["--export-session", str(b), str(archive)] + flags, "")
+                assert archive.is_file() and not requests
+                new_session("Other workspace", flags, cwd=foreign)
+
+                output = run(interface + flags + ["--continue", "Continue A"], "")
+                assert len(requests) == 1
+                messages = requests.pop()[1]["messages"]
+                assert messages[0]["role"] == "system"
+                assert messages[1:] == [
+                    {"role": "user", "content": "Start A"},
+                    {"role": "assistant", "content": "reviewed"},
+                    {"role": "user", "content": "Update A"},
+                    {"role": "assistant", "content": "reviewed"},
+                    {"role": "user", "content": "Continue A"},
+                ], messages
+                if interface == ["--print"]:
+                    assert "reviewed" in output
+                else:
+                    assert done(output) == {"type": "done", "session_id": a, "text": "reviewed"}
+                assert saved_b() == original_b
 
     workspace_store = repo / "unsafe-store"
     workspace_store.mkdir(mode=0o700)

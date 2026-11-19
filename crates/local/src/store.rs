@@ -2,7 +2,7 @@ mod pi;
 mod tree;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs, path::Path};
 pub use tree::TreeEntry;
 pub struct SessionPreview {
@@ -15,6 +15,26 @@ pub struct Disk {
     id: i64,
     _lock: fs::File,
 }
+
+fn open_database(path: &Path) -> Result<Connection> {
+    let mut conn = Connection::open(path)?;
+    if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 0 {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Another process may have migrated the store while we waited for the lock.
+        if tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 0 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL,
+                     revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL);
+                 ALTER TABLE sessions ADD COLUMN modified_seq INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX sessions_by_activity ON sessions(repo, modified_seq DESC, id DESC);
+                 PRAGMA user_version = 1;",
+            )?;
+        }
+        tx.commit()?;
+    }
+    Ok(conn)
+}
+
 impl Disk {
     pub fn open(dir: &Path, repo: &Path, id: Option<i64>) -> Result<Self> {
         Self::open_seed(dir, repo, id, &Session::default())
@@ -24,12 +44,14 @@ impl Disk {
         if !file.try_exists()? {
             return Ok(None);
         }
-        let conn = Connection::open(file)?;
-        Ok(conn.query_row(
-            "SELECT MAX(id) FROM sessions WHERE repo=?",
-            [repo.to_str().context("non UTF-8 workspace")?],
-            |row| row.get(0),
-        )?)
+        let conn = open_database(&file)?;
+        Ok(conn
+            .query_row(
+                "SELECT id FROM sessions WHERE repo=? ORDER BY modified_seq DESC, id DESC LIMIT 1",
+                [repo.to_str().context("non UTF-8 workspace")?],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
     pub fn fork(&self, dir: &Path, repo: &Path, turn: Option<usize>, name: &str) -> Result<Self> {
         let mut s = self.load()?;
@@ -122,8 +144,7 @@ impl Disk {
         if let Some(id) = id {
             ensure!(path.try_exists()?, "unknown session {id}");
         }
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)")?;
+        let mut conn = open_database(&path)?;
         let root = repo.to_str().context("non UTF-8 workspace")?;
         let tx = conn.transaction()?;
         let id = match id {
@@ -137,7 +158,8 @@ impl Disk {
             }
             None => {
                 tx.execute(
-                    "INSERT INTO sessions(repo,data) VALUES (?,?)",
+                    "INSERT INTO sessions(repo,data,modified_seq)
+                     SELECT ?1, ?2, coalesce(max(modified_seq),0)+1 FROM sessions WHERE repo=?1",
                     params![root, serde_json::to_string(seed)?],
                 )?;
                 tx.last_insert_rowid()
@@ -186,7 +208,10 @@ fn save_snapshot(conn: &Connection, id: i64, s: &mut Session) -> Result<()> {
     let mut next = s.clone();
     next.revision += 1;
     let updated = conn.execute(
-        "UPDATE sessions SET revision=?,data=? WHERE id=? AND revision=?",
+        "UPDATE sessions SET revision=?, data=?,
+             modified_seq=(SELECT max(previous.modified_seq)+1 FROM sessions AS previous
+                           WHERE previous.repo=sessions.repo)
+         WHERE id=? AND revision=?",
         params![next.revision, serde_json::to_string(&next)?, id, s.revision],
     )?;
     ensure!(updated == 1, "stale session revision");
@@ -196,6 +221,38 @@ fn save_snapshot(conn: &Connection, id: i64, s: &mut Session) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_sessions_keep_creation_order_until_a_successful_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let db = Connection::open(repo.join("sessions.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE sessions(id INTEGER PRIMARY KEY, repo TEXT NOT NULL,
+                 revision INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
+        )
+        .unwrap();
+        let seed = serde_json::to_string(&Session::default()).unwrap();
+        for _ in 0..2 {
+            db.execute(
+                "INSERT INTO sessions(repo,data) VALUES (?,?)",
+                params![repo.to_str(), seed],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let latest = || Disk::latest(dir.path(), repo).unwrap().unwrap();
+        assert_eq!(latest(), 2);
+        let mut first = Disk::open(dir.path(), repo, Some(1)).unwrap();
+        let mut state = first.load().unwrap();
+        first.save(&mut state).unwrap();
+        assert_eq!(latest(), 1);
+        let newest = Disk::open(dir.path(), repo, None).unwrap();
+        assert_eq!(latest(), newest.id());
+        first.previews(repo).unwrap();
+        assert!(first.save(&mut Session::default()).is_err());
+        assert_eq!(latest(), newest.id());
+    }
+
     #[test]
     fn previews_are_workspace_scoped_and_read_only_while_sessions_are_open() {
         use panda_core::Message;
