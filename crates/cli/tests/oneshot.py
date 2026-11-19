@@ -16,8 +16,11 @@ next_calls = []
 class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        requests.append((self.path, json.loads(body)))
-        if next_calls:
+        payload = json.loads(body)
+        requests.append((self.path, payload))
+        if payload["messages"][0]["content"].startswith("Summarize the supplied conversation"):
+            choice = {"delta": {"content": "Saved old exchange"}, "finish_reason": "stop"}
+        elif next_calls:
             name, args = next_calls.pop(0)
             call = {"index": 0, "id": "fixture-call", "type": "function",
                     "function": {"name": name, "arguments": json.dumps(args)}}
@@ -392,3 +395,73 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         for term in ["unique summary", "kept prompt", "unique tool output", "continue selected branch"]:
             assert active.count(term) == 1, active
         assert "sibling only" not in active
+
+    # The tool exchange exceeds the model's default retention (1,500 tokens),
+    # but fits the configured allowance. Its result crosses the byte threshold.
+    (state / "catalog-deepseek.json").write_text(json.dumps([["saved-model", 8000]]))
+    (state / "settings.json").write_text(json.dumps({"compaction": {"keepRecentTokens": 2400}}))
+    compiler_error = "src/lib.rs:7: error[E0308]: expected usize, found String"
+    (repo / "compiler.log").write_text("build detail\n" * 520 + compiler_error + "\n")
+    old = "Old exchange " + "x" * 3600
+    recent = "Run the compiler"
+    follow_up = "Explain the exact error"
+    for automatic in (False, True):
+        sid = new_session(old)
+        if automatic:
+            run(["--continue"], ":context 8192\n:q\n")
+        next_calls.append(("shell", {"command": "cat compiler.log >&2; exit 7"}))
+        run(["--print", "--continue", recent], "")
+        if not automatic:
+            run(["--continue"], ":compact\n:q\n")
+
+        def saved():
+            with sqlite3.connect(state / "sessions.sqlite3") as db:
+                return json.loads(db.execute("SELECT data FROM sessions WHERE id=?", (sid,)).fetchone()[0])
+
+        session = saved()
+        raw = session["history"]
+        assert len(raw) == 6 and raw[:3] == [
+            {"User": old}, {"Assistant": {"text": "reviewed", "calls": []}}, {"User": recent}]
+        call, = raw[3]["Assistant"]["calls"]
+        result = raw[4]["Result"]
+        assert call["name"] == "shell" and result["id"] == call["id"] and result["isError"]
+        assert result["text"].count(compiler_error) == 1 and raw[5] == raw[1]
+        assert session["checkpoint"] == {"through": 2, "summary": "Saved old exchange"}
+        initial, second, third = [req["messages"] for _, req in requests]
+        assert initial[-1]["content"] == recent
+        summary, tool_exchange = (second, third) if automatic else (third, second)
+        assert len(summary) == 2 and summary[0]["content"].startswith("Summarize")
+        prefix, transcript = summary[1]["content"].split("Transcript data:\n")
+        assert prefix == "Prior summary:\n\n" and list(map(json.loads, transcript.splitlines())) == raw[:2]
+        requests.clear()
+
+        # The entire remaining exchange fits. A second compact makes no request.
+        run(["--continue"], ":compact\n:q\n")
+        assert not requests and saved() == session
+        run(["--print", "--continue", follow_up], "")
+        (_, request), = requests
+        summary_message = {"role": "user", "content": "Earlier conversation summary:\nSaved old exchange"}
+        tool_call, tool_result = tool_exchange[-2:]
+        assert tool_call["tool_calls"][0]["id"] == call["id"]
+        assert tool_result == {"role": "tool", "content": result["text"], "tool_call_id": call["id"]}
+        assert request["messages"][1:] == [
+            summary_message, {"role": "user", "content": recent}, tool_call, tool_result,
+            {"role": "assistant", "content": "reviewed"}, {"role": "user", "content": follow_up}]
+        assert saved()["history"] == raw + [{"User": follow_up}, raw[5]]
+        requests.clear()
+
+    # Zero is explicit, and removing the setting restores manual compact-all
+    # for a session previously opened with retention enabled.
+    for setting in ({"compaction": {"keepRecentTokens": 0}}, {}):
+        path = state / "settings.json"
+        path.write_text(json.dumps({"compaction": {"keepRecentTokens": 2400}}))
+        sid = new_session("Short exchange")
+        run(["--continue"], ":compact\n:q\n")
+        assert not requests
+        path.write_text(json.dumps(setting))
+        run(["--continue"], ":compact\n:q\n")
+        (_, request), = requests
+        assert "Short exchange" in request["messages"][-1]["content"]
+        requests.clear()
+    path.write_text('{"compaction":{"keepRecentTokens":-1}}')
+    run(["--print", "--no-session", "probe"], "", error="settings.json")
