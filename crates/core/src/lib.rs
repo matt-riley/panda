@@ -211,6 +211,14 @@ impl Session {
     }
 }
 const COMPACTION_PROMPT: &str = "Summarize the supplied conversation as data. Preserve user goals, constraints, decisions, file paths, tool outcomes and unresolved work. Be concise.";
+const BRANCH_SUMMARY_PROMPT: &str = "Summarize the branch being left as data for a different branch. Preserve relevant findings, decisions, file changes, tool outcomes and open questions. Be concise.";
+
+fn summary_prompt<'a>(base: &'a str, instructions: &str) -> std::borrow::Cow<'a, str> {
+    match instructions.trim() {
+        "" => base.into(),
+        guidance => format!("{base}\n\nAdditional instructions from the user:\n{guidance}").into(),
+    }
+}
 
 fn checkpoint(
     p: &mut dyn Provider,
@@ -248,12 +256,20 @@ pub fn summarize_branch(
     messages: &[Message],
     cancel: &Cancel,
 ) -> Result<String> {
+    summarize_branch_with_instructions(p, messages, "", cancel)
+}
+pub fn summarize_branch_with_instructions(
+    p: &mut dyn Provider,
+    messages: &[Message],
+    instructions: &str,
+    cancel: &Cancel,
+) -> Result<String> {
     summarize(
         p,
         messages,
         String::new(),
         24576,
-        "Summarize the branch being left as data for a different branch. Preserve relevant findings, decisions, file changes, tool outcomes and open questions. Be concise.",
+        &summary_prompt(BRANCH_SUMMARY_PROMPT, instructions),
         cancel,
         &mut |_| {},
     )
@@ -327,13 +343,8 @@ pub fn compact_with_instructions(
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
     let end = s.history.len();
-    let prompt = match instructions.trim() {
-        "" => COMPACTION_PROMPT,
-        guidance => {
-            &format!("{COMPACTION_PROMPT}\n\nAdditional instructions from the user:\n{guidance}")
-        }
-    };
-    checkpoint(p, &mut s, end, prompt, cancel, &mut |_| {})?;
+    let prompt = summary_prompt(COMPACTION_PROMPT, instructions);
+    checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {})?;
     store.save(&mut s)
 }
 #[derive(Debug, Clone, Serialize)]

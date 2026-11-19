@@ -83,6 +83,72 @@ def request_log(state):
     return [json.loads(line) for line in (state / "requests.jsonl").read_text().splitlines()]
 
 
+def test_guided_branch_summary(repo, state):
+    guidance = "Carry over the  unresolved test."
+    summary = {"BranchSummary": "Checkpoint answer"}
+
+    def open_destination(send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("/revised answerS")
+        expect("Branch summary instructions")
+
+    def stored_tree():
+        with sqlite3.connect(state / "sessions.sqlite3") as db:
+            head = db.execute("select tip from tree_heads where session=1").fetchone()
+            nodes = db.execute("select id,parent,message from tree_nodes order by id").fetchall()
+        return head, nodes
+
+    with panda(repo, state, args=["Shared decision"], startup="First answer") as (send, expect):
+        send("Follow up differently\r")
+        expect("Revised answer")
+        expect("deepseek-flash")
+        branch_b = active_history(state)
+        send(":tree\r")
+        expect("Session tree")
+        send("/follow up differently\r")
+        expect("deepseek-flash")
+        send(" on branch A\r")
+        expect("Second answer")
+        expect("deepseek-flash")
+        branch_a = active_history(state)
+        assert branch_a[:2] == branch_b[:2] and branch_a[2:] != branch_b[2:]
+        initial_requests = request_log(state)
+
+        open_destination(send, expect)
+        original_tree = stored_tree()
+        send("discard this\x1b")
+        expect("Session tree")
+        assert request_log(state) == initial_requests
+        send("S")
+        expect("Branch summary instructions")
+        send("Fail this summary\r")
+        expect("summary unavailable")
+        expect("deepseek-flash")
+        assert active_history(state) == branch_a and stored_tree() == original_tree
+
+        open_destination(send, expect)
+        send(guidance + "\r")
+        expect("Checkpoint answer")
+        expect("deepseek-flash")
+        assert active_history(state) == branch_b + [summary]
+
+    with panda(repo, state, args=["--continue"], startup="Checkpoint answer") as (send, expect):
+        send("What survived?\r")
+        expect("Second answer")
+        expect("deepseek-flash")
+
+    failed, guided, follow_up = request_log(state)[len(initial_requests):]
+    assert failed["system"].count("Fail this summary") == 1
+    assert guided["system"].count(guidance) == 1
+    payload, = guided["history"]
+    prefix = "Prior summary:\n\nTranscript data:\n"
+    assert payload["User"].startswith(prefix)
+    assert [json.loads(line) for line in payload["User"][len(prefix):].splitlines()] == branch_a[2:]
+    assert follow_up["history"] == branch_b + [summary, {"User": "What survived?"}]
+    assert guidance not in follow_up["system"]
+
+
 def test_manual_compaction(repo, state):
     # A numeric first word also catches accidentally treating guidance as a new byte limit.
     instructions = "8192  is the ticket number. Preserve its decision."
@@ -141,6 +207,7 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    test_guided_branch_summary(repo, Path(tmp) / "guided")
     test_manual_compaction(repo, Path(tmp) / "compact")
     # Two identical prompts have different ancestors. Mark the second, then open
     # the exported tree in a fresh store so local node IDs cannot be relied on.
