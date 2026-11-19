@@ -13,6 +13,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
 walkdir = "2"
 globset = "0.4"
+ignore = "0.4"
 regex = "1"
 libc = "0.2"
 rquickjs = "0.14"

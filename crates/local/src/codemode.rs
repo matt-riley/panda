@@ -194,7 +194,7 @@ For per-file results, group the items by their path in the same loop and emit on
         let mut schemas = self.inner.schemas(mode);
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":"Run isolated JavaScript to compose read-only workspace tools. tools.search({query,regex?,glob?,offset?}) and tools.repo_map({glob?,offset?}) return {items,next_offset}; search items have path,line,text. Search is literal by default. Set regex:true for a Rust regex. Both tools accept a workspace-relative glob such as **/*.rs. tools.read({path,offset?,limit?}) returns a string. Calls are synchronous. Use text(value) to emit selected output; only that output is returned. Limits: 64 calls, 10 seconds, 16 KiB output.",
+            "description":"Run isolated JavaScript to compose read-only workspace tools. tools.search({query,regex?,glob?,offset?}) and tools.repo_map({glob?,offset?}) return {items,next_offset}; search items have path,line,text. Search is literal by default. Set regex:true for a Rust regex. Both tools respect .gitignore and accept a workspace-relative glob such as **/*.rs. tools.read({path,offset?,limit?}) returns a string. Calls are synchronous. Use text(value) to emit selected output; only that output is returned. Limits: 64 calls, 10 seconds, 16 KiB output.",
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas

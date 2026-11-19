@@ -211,6 +211,79 @@ fn plan_search_patterns_work_directly_and_in_codemode() -> Result<()> {
 
 #[test]
 #[ignore = "requires native macOS Seatbelt"]
+fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let dir = root.path();
+    fs::create_dir(dir.join("src"))?;
+    fs::create_dir(dir.join("build"))?;
+    fs::write(
+        dir.join(".gitignore"),
+        "/build/\n*.skip.rs\n!root.skip.rs\n",
+    )?;
+    fs::write(dir.join("src/.gitignore"), "/a-local.rs\n!z-keep.skip.rs\n")?;
+    fs::write(dir.join("build/.gitignore"), "!unreachable.rs\n")?;
+    for ignored in [
+        "a.skip.rs",
+        "build/unreachable.rs",
+        "src/a-local.rs",
+        "src/b.skip.rs",
+    ] {
+        fs::write(dir.join(ignored), "match")?;
+    }
+
+    let mut paths = vec![".hidden.rs".to_owned(), "root.skip.rs".to_owned()];
+    paths.extend((0..48).map(|i| format!("src/{i:02}.rs")));
+    paths.push("src/z-keep.skip.rs".to_owned());
+    for path in &paths {
+        fs::write(dir.join(path), "match")?;
+    }
+
+    let base = coding(dir)?;
+    let enabled = Codemode::new(&base, EXE.as_ref());
+    for (name, mut args) in [
+        ("search", json!({"query":"match"})),
+        ("repo_map", json!({"glob":"**/*.rs"})),
+    ] {
+        let expected: Vec<_> = paths
+            .iter()
+            .map(|path| match name {
+                "search" => json!({"path":path,"line":1,"text":"match"}),
+                _ => json!(path),
+            })
+            .collect();
+        let code = format!(
+            "const first = tools.{name}({args}); text([first, tools.{name}({{...{args}, offset:first.next_offset}})]);"
+        );
+        let nested = enabled.run(
+            Mode::Plan,
+            &call("codemode", json!({"code":code})),
+            &Cancel::default(),
+        )?;
+        let direct_page = |args: &Value| -> Result<Value> {
+            Ok(serde_json::from_str(&base.run(
+                Mode::Plan,
+                &call(name, args.clone()),
+                &Cancel::default(),
+            )?)?)
+        };
+        let first = direct_page(&args)?;
+        args["offset"] = first["next_offset"].clone();
+        let pages = json!([first, direct_page(&args)?]);
+        assert_eq!(
+            pages,
+            json!([
+                {"items":expected[..50],"next_offset":50},
+                {"items":expected[50..],"next_offset":null}
+            ]),
+            "{name}"
+        );
+        assert_eq!(serde_json::from_str::<Value>(&nested)?, pages, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
 fn reads_limits_and_cancellation() -> Result<()> {
     let root = tempfile::tempdir()?;
     fs::write(root.path().join("note"), "hello")?;
