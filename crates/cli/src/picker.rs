@@ -50,6 +50,7 @@ enum PickerMode<'a> {
 pub enum TreeAction {
     Switch,
     Summarize,
+    GuidedSummary,
     Fork,
     EditLabel,
 }
@@ -108,9 +109,9 @@ fn pick(
         };
         let title = if matches!(mode, PickerMode::Tree(_)) {
             if state.labeled_only {
-                "Labeled entries · Shift-L edit · Ctrl-L all"
+                "Labeled entries · Shift-L edit · Ctrl-L all · Shift-S guided summary"
             } else {
-                "Session tree · Shift-L edit · Ctrl-L labeled"
+                "Session tree · Shift-L edit · Ctrl-L labeled · Shift-S guided summary"
             }
         } else {
             title
@@ -191,6 +192,11 @@ impl Selection {
                     return ids
                         .get(self.pos)
                         .map_or(Action::Stay, |&i| Action::Tree(i, TreeAction::EditLabel));
+                }
+                KeyCode::Char('S') if k.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                    return ids.get(self.pos).map_or(Action::Stay, |&i| {
+                        Action::Tree(i, TreeAction::GuidedSummary)
+                    });
                 }
                 KeyCode::Char('f') if k.modifiers == KeyModifiers::CONTROL => {
                     return if can_fork {
@@ -306,17 +312,20 @@ pub fn tree(
     .map(|p| (entries[p.index].id, p.action)))
 }
 
-pub fn edit_label(label: &str) -> io::Result<Option<String>> {
-    use reedline::{DefaultPrompt, DefaultPromptSegment, EditCommand, Reedline, Signal};
+pub fn edit_text(title: &str, initial: &str) -> io::Result<Option<String>> {
+    use reedline::{
+        DefaultPrompt, DefaultPromptSegment, EditCommand, Emacs, Reedline, ReedlineEvent, Signal,
+        default_emacs_keybindings,
+    };
     let prompt = DefaultPrompt {
-        left_prompt: DefaultPromptSegment::Basic(
-            "Edit label (empty clears, Ctrl-C cancels)".into(),
-        ),
+        left_prompt: DefaultPromptSegment::Basic(title.into()),
         right_prompt: DefaultPromptSegment::Empty,
     };
-    let mut editor = Reedline::create();
+    let mut keys = default_emacs_keybindings();
+    keys.add_binding(KeyModifiers::NONE, KeyCode::Esc, ReedlineEvent::CtrlC);
+    let mut editor = Reedline::create().with_edit_mode(Box::new(Emacs::new(keys)));
     editor.run_edit_commands(&[EditCommand::InsertString(crate::ui::inline(
-        label,
+        initial,
         usize::MAX,
     ))]);
     Ok(match editor.read_line(&prompt)? {
@@ -444,14 +453,19 @@ mod tests {
 
     proptest! {
         #[test]
-        fn tree_action_key_sequences(keys in prop::collection::vec(0u8..11,1..96)) {
+        fn tree_action_key_sequences(keys in prop::collection::vec(0u8..13,1..96)) {
             let mut state=Selection::default();
             let mut search=false;
             let mut selected=0;
             let ids=[41,89];
             for n in keys {
-                let code=match n {0..=2=>KeyCode::Char('s'),3=>KeyCode::Char('/'),4=>KeyCode::Down,5=>KeyCode::Up,6=>KeyCode::Char('a'),7=>KeyCode::Enter,8=>KeyCode::Esc,10=>KeyCode::Char('f'),_=>KeyCode::Backspace};
-                let mut k=event::KeyEvent::new(code,if n==2 || n==10 {KeyModifiers::CONTROL} else {KeyModifiers::NONE});
+                let code=match n {0..=2=>KeyCode::Char('s'),3=>KeyCode::Char('/'),4=>KeyCode::Down,5=>KeyCode::Up,6=>KeyCode::Char('a'),7=>KeyCode::Enter,8=>KeyCode::Esc,10=>KeyCode::Char('f'),11|12=>KeyCode::Char('S'),_=>KeyCode::Backspace};
+                let modifiers = match n {
+                    2|10 => KeyModifiers::CONTROL,
+                    12 => KeyModifiers::SHIFT,
+                    _ => KeyModifiers::NONE,
+                };
+                let mut k=event::KeyEvent::new(code,modifiers);
                 if n==1 {k.kind=KeyEventKind::Release;}
                 let can_fork = selected == 0;
                 let expected=match n {
@@ -460,6 +474,7 @@ mod tests {
                     0 if !search=>Action::Tree(ids[selected], TreeAction::Summarize),
                     10 if can_fork=>Action::Tree(ids[selected], TreeAction::Fork),
                     10=>Action::Stay,
+                    11|12=>Action::Tree(ids[selected], TreeAction::GuidedSummary),
                     3 if !search=>{search=true;Action::Stay}
                     4|5=>{selected=1-selected;search=false;Action::Stay}
                     7=>Action::Close(Some(ids[selected])),

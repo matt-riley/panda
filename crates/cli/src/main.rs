@@ -730,8 +730,10 @@ fn run(
                             picker::TreeAction::EditLabel => {
                                 let entry = entries.iter_mut().find(|e| e.id == node).unwrap();
                                 let current = entry.label.as_deref().unwrap_or_default();
-                                if let Some(label) = picker::edit_label(current)?
-                                    && label != current
+                                if let Some(label) = picker::edit_text(
+                                    "Edit label (empty clears, Ctrl-C cancels)",
+                                    current,
+                                )? && label != current
                                 {
                                     db.set_tree_label(node, &label)?;
                                     entry.label = (!label.is_empty()).then_some(label);
@@ -744,13 +746,26 @@ fn run(
                                 Some(prompt)
                             }
                             picker::TreeAction::Switch => db.navigate(node)?,
-                            picker::TreeAction::Summarize => {
+                            picker::TreeAction::Summarize | picker::TreeAction::GuidedSummary => {
+                                let instructions = if action == picker::TreeAction::GuidedSummary {
+                                    let Some(text) = picker::edit_text(
+                                        "Branch summary instructions (Esc cancels)",
+                                        "",
+                                    )?
+                                    else {
+                                        continue;
+                                    };
+                                    text
+                                } else {
+                                    String::new()
+                                };
                                 cancel.reset();
                                 db.navigate_summarized(node, &cancel, |messages| {
                                     eprintln!("Summarizing branch… Ctrl-C to cancel");
-                                    summarize_branch(
+                                    summarize_branch_with_instructions(
                                         provider(&state, &p, &model)?.as_mut(),
                                         messages,
+                                        &instructions,
                                         &cancel,
                                     )
                                 })?
