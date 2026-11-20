@@ -10,7 +10,7 @@ impl Toolset for Tools {
     fn system(&self) -> Result<String> {
         Ok(String::new())
     }
-    fn schemas(&self, _: Mode) -> Vec<Value> {
+    fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
         vec![]
     }
     fn run(
