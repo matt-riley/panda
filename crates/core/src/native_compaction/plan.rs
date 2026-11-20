@@ -188,8 +188,20 @@ pub fn visible(session: &Session, end: usize) -> Vec<Segment> {
                         );
                     }
                 }
+                Message::Bash {
+                    command,
+                    outcome,
+                    exclude,
+                } => {
+                    if !exclude {
+                        push(Role::User, &outcome.context(command), None, None, false)
+                    }
+                }
                 Message::BranchSummary(text) => push(Role::Branch, text, None, None, false),
-                Message::Truncated(_) | Message::CodemodeStore(_) | Message::Reasoning(_) => {}
+                Message::Truncated(_)
+                | Message::CodemodeStore(_)
+                | Message::Reasoning(_)
+                | Message::Replay(_) => {}
             }
         }
     }

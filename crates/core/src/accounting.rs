@@ -84,7 +84,7 @@ pub struct UsageRecord {
     pub timestamp: Option<u64>,
 }
 impl UsageRecord {
-    pub(crate) fn from_event(u: &Value) -> Option<Self> {
+    pub fn from_event(u: &Value) -> Option<Self> {
         let read = u
             .pointer("/prompt_tokens_details/cached_tokens")
             .or(u.pointer("/input_tokens_details/cached_tokens"))
@@ -133,9 +133,15 @@ pub(crate) fn tracked(
     send: impl FnOnce(&mut dyn Provider, &mut Emit) -> Result<(String, Vec<Call>)>,
 ) -> Result<(String, Vec<Call>)> {
     let requested = p.model();
+    let mut backing = requested.clone();
     let mut model = requested.clone();
     let mut report = None;
     let result = send(p, &mut |event| {
+        if let Event::BackingModel(id) = event {
+            backing = Some(id.clone());
+            model = Some(id);
+            return;
+        }
         if let Event::Responder(name) = event {
             if let Some(id) = &mut model
                 && !name.is_empty()
@@ -162,7 +168,7 @@ pub(crate) fn tracked(
     });
     let calculated = usage
         .as_ref()
-        .filter(|_| model == requested)
+        .filter(|_| model == backing)
         .and_then(|reading| p.prices().and_then(|prices| prices.price(reading)));
     let cost = reported.or(calculated);
     let source = if reported.is_some() {

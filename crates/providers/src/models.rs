@@ -27,6 +27,16 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                 "deepseek" => client
                     .get("https://api.deepseek.com/models")
                     .bearer_auth(key.context("DeepSeek key required")?),
+                "openai-api" => client
+                    .get("https://api.openai.com/v1/models")
+                    .bearer_auth(key.context("OpenAI API key required")?),
+                "anthropic" => client
+                    .get("https://api.anthropic.com/v1/models")
+                    .header("anthropic-version", "2023-06-01")
+                    .header("x-api-key", key.context("Anthropic key required")?),
+                "google" => client
+                    .get("https://generativelanguage.googleapis.com/v1beta/models")
+                    .header("x-goog-api-key", key.context("Gemini key required")?),
                 "openrouter" => client.get("https://openrouter.ai/api/v1/models"),
                 "openai-codex" => {
                     let cred = auth::credential(state, auth::CODEX, &client).await?;
@@ -50,7 +60,18 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                 .iter()
                 .filter(|m| m["visibility"] != "hide")
                 .filter_map(|m| {
-                    let id = m["id"].as_str().or(m["slug"].as_str())?;
+                    let id = if provider == "google" {
+                        if !m["supportedGenerationMethods"]
+                            .as_array()?
+                            .iter()
+                            .any(|v| v == "generateContent")
+                        {
+                            return None;
+                        }
+                        m["name"].as_str()?.strip_prefix("models/")?
+                    } else {
+                        m["id"].as_str().or(m["slug"].as_str())?
+                    };
                     if let Some(price) = catalogue_price(&m["pricing"]) {
                         prices.insert(id.to_owned(), price);
                     }
@@ -73,7 +94,8 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                         id.to_owned(),
                         m["context_window"]
                             .as_u64()
-                            .or(m["context_length"].as_u64()),
+                            .or(m["context_length"].as_u64())
+                            .or(m["inputTokenLimit"].as_u64()),
                     ))
                 })
                 .collect();

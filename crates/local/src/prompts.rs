@@ -9,9 +9,21 @@ use std::{
     sync::LazyLock,
 };
 
-pub struct Templates(BTreeMap<String, PathBuf>);
+enum Source {
+    File(PathBuf),
+    Markdown(String),
+}
+pub struct Templates(BTreeMap<String, Source>);
 impl Templates {
     pub fn discover(state: &Path, project: &Path, trusted: bool) -> Result<Self> {
+        Self::with_packages(state, project, trusted, BTreeMap::new())
+    }
+    pub fn with_packages(
+        state: &Path,
+        project: &Path,
+        trusted: bool,
+        packages: BTreeMap<String, String>,
+    ) -> Result<Self> {
         let mut files = BTreeMap::new();
         let user = state.join("prompts");
         let local = project.join(".pi/prompts");
@@ -28,9 +40,12 @@ impl Templates {
                     && path.extension().is_some_and(|e| e == "md")
                     && let Some(name) = path.file_stem().and_then(|s| s.to_str())
                 {
-                    files.entry(name.to_owned()).or_insert(path);
+                    files.entry(name.to_owned()).or_insert(Source::File(path));
                 }
             }
+        }
+        for (name, body) in packages {
+            files.entry(name).or_insert(Source::Markdown(body));
         }
         Ok(Self(files))
     }
@@ -47,8 +62,11 @@ impl Templates {
         let Some(path) = self.0.get(name) else {
             return Ok(None);
         };
-        let raw =
-            optional_text(path)?.with_context(|| format!("missing template {}", path.display()))?;
+        let raw = match path {
+            Source::File(path) => optional_text(path)?
+                .with_context(|| format!("missing template {}", path.display()))?,
+            Source::Markdown(text) => text.clone(),
+        };
         let normalized = raw.replace("\r\n", "\n");
         let body = if let Some(meta) = normalized.strip_prefix("---\n") {
             let end = meta

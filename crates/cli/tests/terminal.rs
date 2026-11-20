@@ -228,3 +228,35 @@ fn custom_model_routes_branches_scopes_and_usage() {
             .success()
     );
 }
+
+#[test]
+fn native_families_and_routed_responders() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/native_models.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "uses native Seatbelt, npm and loopback MCP servers"]
+fn workspace_trust_packages_and_mcp_transports() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/project_servers.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

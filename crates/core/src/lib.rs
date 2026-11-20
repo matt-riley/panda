@@ -1,4 +1,5 @@
 mod accounting;
+pub mod sdk;
 use accounting::tracked;
 pub use accounting::{Attempt, FailedUsage, IdentifiedProvider, ModelId, TokenPrices, UsageRecord};
 mod checkpoint_files;
@@ -62,6 +63,13 @@ impl From<String> for ToolOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    /// Provider-signed reasoning metadata belongs only to the originating backend.
+    Replay(ProviderReplay),
+    Bash {
+        command: String,
+        outcome: sdk::ShellOutcome,
+        exclude: bool,
+    },
     CodemodeStore(StoreWrites),
     Truncated(LengthStop),
     BranchSummary(String),
@@ -87,6 +95,14 @@ pub enum Message {
         #[serde(default, rename = "nestedReads", skip_serializing_if = "Vec::is_empty")]
         nested_reads: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderReplay {
+    pub provider: String,
+    pub model: String,
+    pub family: String,
+    pub blocks: Vec<Value>,
 }
 
 /// Pi's branch-local codemode-store custom entry. Applied in delete-then-set order.
@@ -130,6 +146,10 @@ pub enum Mode {
 }
 #[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_auto_retry: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_auto_compaction: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -171,7 +191,7 @@ pub struct Session {
     pub mode: Mode,
     pub revision: u64,
 }
-#[derive(Default, Clone, Serialize, Deserialize, Debug)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
@@ -181,13 +201,20 @@ pub struct Checkpoint {
     pub files: Option<CheckpointFiles>,
 }
 
+impl From<String> for Message {
+    fn from(value: String) -> Self {
+        Self::User(value)
+    }
+}
 impl Session {
     fn resolved_at(&self, i: usize) -> &[Message] {
         match self.context_edits.get(&i) {
             Some(replacement) => replacement,
             None if matches!(
                 self.history[i],
-                Message::Truncated(_) | Message::CodemodeStore(_)
+                Message::Truncated(_)
+                    | Message::CodemodeStore(_)
+                    | Message::Bash { exclude: true, .. }
             ) =>
             {
                 &[]
@@ -197,7 +224,17 @@ impl Session {
     }
 
     pub fn resolved(&self, range: std::ops::Range<usize>) -> Vec<Message> {
-        range.flat_map(|i| self.resolved_at(i)).cloned().collect()
+        range
+            .flat_map(|i| self.resolved_at(i))
+            .filter_map(|m| match m {
+                Message::Bash {
+                    command,
+                    outcome,
+                    exclude,
+                } => (!exclude).then(|| Message::User(outcome.context(command))),
+                other => Some(other.clone()),
+            })
+            .collect()
     }
 
     pub fn projected(&self) -> Vec<Message> {
@@ -413,7 +450,7 @@ fn summarize(
             Ok(())
         };
     for message in messages {
-        if matches!(message, Message::CodemodeStore(_)) {
+        if matches!(message, Message::CodemodeStore(_) | Message::Replay(_)) {
             continue;
         }
         for ch in message.summary_text().chars().chain(std::iter::once('\n')) {
@@ -431,6 +468,9 @@ fn summarize(
 impl Message {
     pub fn summary_text(&self) -> String {
         match self {
+            Self::Bash {
+                command, outcome, ..
+            } => outcome.context(command),
             Self::Images { text, urls } => format!("{text} [{} attached images]", urls.len()),
             Self::Result {
                 id, text, images, ..
@@ -482,6 +522,8 @@ pub enum Event {
     Truncated { text: String, retrying: bool },
     Retry { attempt: u32, seconds: u64 },
     Responder(String),
+    BackingModel(ModelId),
+    Replay(ProviderReplay),
     Reasoning(String),
     ToolOutput(String),
     CompactionNotice(String),
@@ -634,28 +676,69 @@ pub fn turn_message(
     emit: &mut Emit,
     pending: &mut dyn FnMut(bool) -> Vec<String>,
 ) -> Result<()> {
+    drive_turn(p, store, tools, Some(input), cancel, emit, &mut |idle| {
+        pending(idle).into_iter().map(Message::User).collect()
+    })
+}
+
+fn drive_turn(
+    p: &mut dyn Provider,
+    store: &mut dyn Store,
+    tools: &dyn Toolset,
+    input: Option<Message>,
+    cancel: &Cancel,
+    emit: &mut Emit,
+    pending: &mut dyn FnMut(bool) -> Vec<Message>,
+) -> Result<()> {
     let mut s = store.load()?;
-    anyhow::ensure!(
-        !s.active,
-        "interrupted turn: acknowledge unknown outcomes before continuing"
-    );
+    if input.is_some() {
+        anyhow::ensure!(
+            !s.active,
+            "interrupted turn: acknowledge unknown outcomes before continuing"
+        );
+    } else {
+        anyhow::ensure!(s.active, "no interrupted request to retry");
+        let last_assistant = s
+            .history
+            .iter()
+            .rposition(|m| matches!(m, Message::Assistant { .. }));
+        if let Some(i) = last_assistant
+            && let Message::Assistant { calls, .. } = &s.history[i]
+        {
+            anyhow::ensure!(
+                calls.iter().all(|c| s.history[i + 1..]
+                    .iter()
+                    .any(|m| matches!(m,Message::Result{id,..} if id==&c.id))),
+                "acknowledge unknown tool outcomes before retrying"
+            );
+        }
+    }
     cancel.check()?;
     let system = tools.system()?;
     let judge = p.compaction_judge();
     let native = judge.is_some();
-    if let Some(judge) = judge {
+    if !s.disable_auto_compaction
+        && let Some(judge) = judge
+        && let Some(input) = &input
+    {
         let used = s.estimated_tokens(&system, &tools.schemas_for(&s));
-        native_compaction::before_turn(&mut s, store, judge, used, &input, cancel, emit)?;
+        native_compaction::before_turn(&mut s, store, judge, used, input, cancel, emit)?;
     }
-    let turn_start = s.history.len();
+    let turn_start = if input.is_some() {
+        s.history.len()
+    } else {
+        s.history.iter().rposition(Message::user).unwrap_or(0)
+    };
     let mut retried_length = false;
     s.active = true;
     if s.model.is_none() {
         s.model = p.default_model();
     }
-    s.history.push(input);
-    s.preferences
-        .insert(s.history.len(), (s.model.clone(), s.reasoning.clone()));
+    if let Some(input) = input {
+        s.history.push(input);
+        s.preferences
+            .insert(s.history.len(), (s.model.clone(), s.reasoning.clone()));
+    }
     store.save(&mut s)?;
     let mut pending_image_exchange = None;
     for _ in 0..64 {
@@ -672,7 +755,8 @@ pub fn turn_message(
         let mut compacted = false;
         let schemas = tools.schemas_for(&s);
         let previous = s.checkpoint.as_ref().map_or(0, |c| c.through);
-        if !native
+        if !s.disable_auto_compaction
+            && !native
             && s.needs_compaction(&system, &schemas)
             && keep > previous
             && let end = s.compact_through(keep, (s.token_budget() / 4).min(20000))
@@ -682,10 +766,15 @@ pub fn turn_message(
             save_summary(store, &mut s, result)?;
             compacted = true;
         }
-        let (text, calls, thought, reading) = loop {
+        let (text, calls, thought, reading, replay) = loop {
+            let mut replay = None;
             let mut reading = None;
             let mut thought = String::new();
             let mut relay = |e| {
+                if let Event::Replay(data) = e {
+                    replay = Some(data);
+                    return;
+                }
                 if let Event::Usage(u) = &e {
                     reading = UsageRecord::from_event(u);
                 }
@@ -695,7 +784,7 @@ pub fn turn_message(
                 emit(e);
             };
             let history = s.projected();
-            let reply = recovery::request(cancel, &mut relay, |events| {
+            let reply = recovery::request_if(!s.disable_auto_retry, cancel, &mut relay, |events| {
                 tracked(
                     p,
                     &mut s.attempts,
@@ -718,11 +807,11 @@ pub fn turn_message(
                 store.save(&mut s)?;
             }
             match reply {
-                Ok((text, calls)) => break (text, calls, thought, reading),
+                Ok((text, calls)) => break (text, calls, thought, reading, replay),
                 Err(e) if e.is::<LengthStop>() => {
                     let mut partial = e.downcast::<LengthStop>()?;
                     partial.reasoning = thought;
-                    let retrying = partial.early() && !retried_length;
+                    let retrying = partial.early() && !retried_length && !s.disable_auto_retry;
                     let notice = Event::Truncated {
                         text: partial.text.clone(),
                         retrying,
@@ -750,14 +839,15 @@ pub fn turn_message(
                     retried_length = true;
                     cancel.check()?;
                     let end = s.compact_through(turn_start, 0);
-                    if !compacted && end > previous {
+                    if !s.disable_auto_compaction && !compacted && end > previous {
                         let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
                         save_summary(store, &mut s, result)?;
                         compacted = true;
                     }
                 }
                 Err(e)
-                    if !compacted
+                    if !s.disable_auto_compaction
+                        && !compacted
                         && !retried_length
                         && e.is::<ContextOverflow>()
                         && keep > previous =>
@@ -779,6 +869,9 @@ pub fn turn_message(
             calls.iter().all(|c| !c.id.is_empty() && ids.insert(&c.id)),
             "duplicate or missing tool ID"
         );
+        if let Some(replay) = replay {
+            s.history.push(Message::Replay(replay));
+        }
         if !thought.is_empty() {
             s.history.push(Message::Reasoning(thought));
         }
@@ -900,7 +993,7 @@ pub fn turn_message(
             return store.save(&mut s);
         }
         if !queued.is_empty() {
-            s.history.extend(queued.into_iter().map(Message::User));
+            s.history.extend(queued);
             store.save(&mut s)?;
         }
     }
@@ -936,8 +1029,8 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                 break;
             }
             Message::Result { id, .. } => completed.push(id.clone()),
-            Message::Reasoning(_) | Message::CodemodeStore(_) => {}
-            Message::BranchSummary(_) | Message::Truncated(_) => break,
+            Message::Reasoning(_) | Message::CodemodeStore(_) | Message::Replay(_) => {}
+            Message::Bash { .. } | Message::BranchSummary(_) | Message::Truncated(_) => break,
             Message::User(_) | Message::Images { .. } => break,
         }
     }

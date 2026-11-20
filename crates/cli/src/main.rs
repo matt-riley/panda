@@ -9,6 +9,7 @@ mod model_catalog;
 use model_catalog::{Catalog, available_models, scope_effort};
 mod picker;
 mod renderer;
+mod routing;
 mod screen;
 mod settings;
 mod terminal_config;
@@ -32,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -51,6 +52,9 @@ fn key_env(provider: &str) -> Result<&'static str> {
     match provider {
         "deepseek" => Ok("DEEPSEEK_API_KEY"),
         "openrouter" => Ok("OPENROUTER_API_KEY"),
+        "anthropic" => Ok("ANTHROPIC_API_KEY"),
+        "openai-api" => Ok("OPENAI_API_KEY"),
+        "google" => Ok("GEMINI_API_KEY"),
         _ => bail!("unknown API-key provider"),
     }
 }
@@ -66,7 +70,9 @@ fn provider_id(input: &str) -> Result<&str> {
 
 fn canonical_model<'a>(id: &'a str, model: &'a str) -> (&'a str, &'a str) {
     let name = model.rsplit('/').next().unwrap_or(model);
-    if PROVIDERS.contains(&id) && name.to_ascii_lowercase().starts_with("gpt-") {
+    if matches!(id, "deepseek" | "openrouter" | "openai-codex")
+        && name.to_ascii_lowercase().starts_with("gpt-")
+    {
         ("openai-codex", name)
     } else {
         (id, model)
@@ -99,10 +105,20 @@ enum Picker {
     Select,
 }
 
-const PROVIDERS: [&str; 3] = ["openai-codex", "deepseek", "openrouter"];
+const PROVIDERS: [&str; 6] = [
+    "openai-codex",
+    "deepseek",
+    "openrouter",
+    "anthropic",
+    "openai-api",
+    "google",
+];
 fn configured(state: &Path, id: &str) -> Result<bool> {
     if model_catalog::logged_out(state, id)? {
         return Ok(false);
+    }
+    if id == "router" {
+        return Ok(!Catalog::read(state)?.routes.is_empty());
     }
     if let Some(ep) = Catalog::read(state)?.providers.get(id) {
         return Ok(ep.key(state, id).is_ok());
@@ -116,6 +132,14 @@ fn configured(state: &Path, id: &str) -> Result<bool> {
     )
 }
 fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Option<u64>)>> {
+    if id == "router" {
+        let catalog = Catalog::read(state)?;
+        return Ok(catalog
+            .routes
+            .iter()
+            .map(|(name, r)| (name.clone(), r.window(&catalog)))
+            .collect());
+    }
     if let Some(ep) = Catalog::read(state)?.providers.get(id) {
         return Ok(ep
             .models
@@ -131,11 +155,11 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
     {
         return Ok(rows);
     }
-    let key = if id == "deepseek" {
+    let key = if matches!(id, "deepseek" | "anthropic" | "openai-api" | "google") {
         Some(
             std::env::var(key_env(id)?)
-                .or_else(|_| fs::read_to_string(state.join("deepseek.key")))
-                .context("use :login deepseek first")?,
+                .or_else(|_| fs::read_to_string(state.join(format!("{id}.key"))))
+                .with_context(|| format!("use :login {id} first"))?,
         )
     } else {
         None
@@ -271,6 +295,19 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     );
     if let Some(ep) = Catalog::read(state)?.providers.get(p) {
         let model = ep.model(m)?;
+        if let Some(api) = ep.api.as_deref().filter(|api| *api != "openai-completions") {
+            return Ok(Box::new(panda_providers::native::NativeApi {
+                family: panda_providers::native::Family::parse(api)?,
+                provider: p.into(),
+                api: Api {
+                    model: m.into(),
+                    endpoint: ep.base_url.clone(),
+                    key: ep.key(state, p)?,
+                },
+                max_tokens: model.max_tokens,
+                images: model.input.iter().any(|s| s == "image"),
+            }));
+        }
         return Ok(Box::new(
             Api {
                 key: ep.key(state, p)?,
@@ -294,6 +331,19 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     let key = std::env::var(var)
         .or_else(|_| fs::read_to_string(state.join(format!("{p}.key"))))
         .with_context(|| format!("set {var} or use :login {p}"))?;
+    if let Some((family, base)) = panda_providers::native::builtin(p) {
+        return Ok(Box::new(panda_providers::native::NativeApi {
+            family,
+            provider: p.into(),
+            api: Api {
+                key: key.trim().into(),
+                model: m.into(),
+                endpoint: base.into(),
+            },
+            max_tokens: 4096,
+            images: true,
+        }));
+    }
     let endpoint = match p {
         "deepseek" => "https://api.deepseek.com/chat/completions",
         _ => "https://openrouter.ai/api/v1/chat/completions",
@@ -345,37 +395,14 @@ fn safe(s: &str) -> String {
         .collect()
 }
 fn usage(s: &Session) -> String {
-    let accounted: std::collections::BTreeSet<_> = s
-        .attempts
-        .iter()
-        .filter(|a| a.purpose == "turn" && a.usage.is_some())
-        .map(|a| a.through)
-        .collect();
-    let legacy = s.usage.iter().filter(|u| !accounted.contains(&u.through));
-    let readings = legacy
-        .clone()
-        .chain(s.attempts.iter().filter_map(|a| a.usage.as_ref()));
-    let mut input = 0;
-    let mut output = 0;
-    let mut read = 0;
-    let mut write = 0;
-    let cost: f64 = legacy
-        .clone()
-        .filter_map(|u| u.cost)
-        .chain(s.attempts.iter().filter_map(|a| a.cost))
-        .sum();
-    for u in readings {
-        input += u.input;
-        output += u.output;
-        read += u.cache_read.unwrap_or(0);
-        write += u.cache_write.unwrap_or(0);
-    }
-    let unknown = s
-        .attempts
-        .iter()
-        .filter(|a| a.cost_source == "unknown")
-        .count()
-        + legacy.filter(|u| u.cost.is_none()).count();
+    let sdk::UsageTotals {
+        input,
+        output,
+        read,
+        write,
+        cost,
+        unknown,
+    } = sdk::UsageTotals::from(s);
     let mut text =
         format!("↑{input} ↓{output} · cache read {read} write {write} · known ${cost:.6}");
     if unknown > 0 {
@@ -396,9 +423,15 @@ fn configure_context(
     let keep_recent_tokens = settings.retention(id, model);
     let path = state.join(format!("catalog-{id}.json"));
     let catalog = Catalog::read(state)?;
-    let window = if let Some(ep) = catalog.providers.get(id) {
+    let window = if id == "router" {
+        catalog
+            .routes
+            .get(model)
+            .context("unknown virtual model")?
+            .window(&catalog)
+    } else if let Some(ep) = catalog.providers.get(id) {
         Some(ep.model(model)?.context_window)
-    } else if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
+    } else if PROVIDERS.contains(&id) && path.try_exists()? {
         let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
         rows.iter().find(|(m, _)| m == model).and_then(|r| r.1)
     } else {
@@ -417,9 +450,12 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     screen.footer.effort = s.reasoning.clone();
     screen.line(Tone::Dim, &format!("session {} ({:?})", db.id(), s.mode));
     let mut calls_by_id = std::collections::HashMap::new();
-    for m in &s.history {
+    for (index, m) in s.history.iter().enumerate() {
         match m {
-            Message::CodemodeStore(_) => continue,
+            Message::Bash {
+                command, outcome, ..
+            } => screen.line(Tone::Tool, &safe(&outcome.context(command))),
+            Message::CodemodeStore(_) | Message::Replay(_) => continue,
             Message::Truncated(partial) => {
                 screen.line(Tone::Dim, "Partial reply (output length limit)");
                 if !partial.reasoning.is_empty() {
@@ -437,6 +473,14 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
             ),
             Message::User(t) => screen.line(Tone::User, &format!("you> {}", safe(t))),
             Message::Assistant { text, calls } => {
+                if s.model.as_ref().is_some_and(|id| id.provider == "router")
+                    && let Some(actual) = s.responders.get(&index)
+                {
+                    screen.line(
+                        Tone::Dim,
+                        &format!("Responder · {}/{}", actual.provider, actual.model),
+                    );
+                }
                 screen.finish_reply(text);
                 for c in calls {
                     if screen.active {
@@ -565,8 +609,32 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
+        return Ok(());
+    }
+    if let Some(flag @ ("--trust" | "--package")) = args.first().map(String::as_str) {
+        let root = std::env::current_dir()?.canonicalize()?;
+        let project = panda_local::resources::project_root(&root);
+        let state = state_dir()?;
+        if flag == "--package" {
+            println!(
+                "{}",
+                panda_local::packages::manage(&state, project, &args[1..])?
+            );
+        } else {
+            ensure!(args.len() <= 2, "usage: --trust [allow|deny|revoke|status]");
+            let action = args.get(1).map_or("status", String::as_str);
+            if action != "status" {
+                panda_local::catalog::decide(&state, project, action)?;
+            }
+            let status = match panda_local::catalog::trusted(&state, project)? {
+                Some(true) => "allowed",
+                Some(false) => "denied",
+                None => "undecided",
+            };
+            println!("{} · {status}", project.display());
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--list-models") {
@@ -641,10 +709,44 @@ fn run(
         (root, None)
     };
     let project = panda_local::resources::project_root(&root);
+    let saved_trust = panda_local::catalog::trusted(&state, project)?;
+    if !options.trust_project
+        && saved_trust.is_none()
+        && interactive_terminal
+        && options.interface == automation::Interface::Terminal
+        && project.join(".panda/mcp.json").try_exists()?
+    {
+        let labels = [
+            "Skip this time".into(),
+            "Trust this workspace".into(),
+            "Decline and remember".into(),
+        ];
+        match picker::choose(
+            &format!(
+                "Allow project MCP servers from {}?",
+                ui::inline(&project.display().to_string(), 128)
+            ),
+            &labels,
+            0,
+        )? {
+            Some(1) => {
+                panda_local::catalog::decide(&state, project, "allow")?;
+                options.trust_project = true;
+            }
+            Some(2) => panda_local::catalog::decide(&state, project, "deny")?,
+            _ => {}
+        }
+    }
+    options.trust_project |= saved_trust == Some(true);
+    let packages = panda_local::packages::active(&state, project, options.trust_project)?;
     let mut settings = settings::Settings::read(&state, project)?;
     let cli_recent = options.recent_override;
-    let templates =
-        panda_local::prompts::Templates::discover(&state, project, options.trust_project)?;
+    let templates = panda_local::prompts::Templates::with_packages(
+        &state,
+        project,
+        options.trust_project,
+        packages.prompts,
+    )?;
     if options.prompt.starts_with('/')
         && let Some(prompt) = templates.expand(&options.prompt)?
     {
@@ -653,7 +755,8 @@ fn run(
     let executable = std::env::current_exe()?;
     #[cfg(test)]
     let executable = std::env::var_os("PANDA_TEST_WORKER").map_or(executable, PathBuf::from);
-    let native = Native::new(&root, &executable)?;
+    let mut native = Native::new(&root, &executable)?;
+    native.mcp = panda_local::mcp::Servers::load(&state, project, options.trust_project, &native)?;
     let sessions = match &options.session_dir {
         Some(dir) if !options.no_session => native.session_dir(dir)?,
         _ => state.clone(),
@@ -708,7 +811,7 @@ fn run(
     }
     let coding = Coding {
         workspace: native,
-        skills: Library::new(roots),
+        skills: Library::new(roots).with_packages(packages.skills),
     };
     let selected_tools = options
         .tools
@@ -811,7 +914,7 @@ fn run(
     }
     let session_id = disk.as_ref().map(Disk::id);
     let mut memory = panda_memory::MemoryStore::default();
-    let store: &mut (dyn Store + Send) = match &mut disk {
+    let store: &mut dyn panda_core::sdk::SessionHost = match &mut disk {
         Some(disk) => {
             disk.invocation_keep_recent_tokens = cli_recent;
             disk
@@ -872,24 +975,35 @@ fn run(
     let persist_default = options.model.is_none();
     let make_provider = |state: &Path, p: &str, m: &str| -> Result<Box<dyn Provider + Send>> {
         let configured = Catalog::read(state)?;
-        let prices = if let Some(ep) = configured.providers.get(p) {
-            ep.model(m)?.cost.clone()
-        } else if p == "openrouter" && state.join("catalog-openrouter-prices.json").try_exists()? {
-            let mut rows: std::collections::BTreeMap<String, TokenPrices> =
-                serde_json::from_slice(&fs::read(state.join("catalog-openrouter-prices.json"))?)?;
-            rows.remove(m)
-        } else {
-            None
+        let id = ModelId {
+            provider: p.into(),
+            model: m.into(),
         };
-        let inner = Box::new(IdentifiedProvider {
-            persist_default,
-            inner: provider(state, p, m)?,
-            id: ModelId {
-                provider: p.into(),
-                model: m.into(),
-            },
-            prices,
-        });
+        let inner: Box<dyn Provider + Send> = if p == "router" {
+            ensure!(
+                !model_catalog::logged_out(state, p)?,
+                "router is logged out"
+            );
+            Box::new(routing::Router {
+                id,
+                state: state.into(),
+                route: configured
+                    .routes
+                    .get(m)
+                    .context("unknown virtual model")?
+                    .clone(),
+                connect: provider,
+                persist: persist_default,
+                last_price: None,
+            })
+        } else {
+            Box::new(IdentifiedProvider {
+                persist_default,
+                inner: provider(state, p, m)?,
+                id,
+                prices: routing::prices(state, &configured, p, m)?,
+            })
+        };
         if std::env::var("PANDA_NATIVE_COMPACTION").as_deref() == Ok("1") {
             Ok(Box::new(panda_providers::jev::NativeProvider {
                 inner,
@@ -908,7 +1022,35 @@ fn run(
             db: store,
             session_id,
             tools,
-            connect: &|| make_provider(&state, &p, &model),
+            connect: &|selection| match selection {
+                Some(id) => make_provider(&state, &id.provider, &id.model),
+                None => make_provider(&state, &p, &model),
+            },
+            models: automation::ModelControls {
+                list: &|| {
+                    Ok(available_models(&state, "")?
+                        .0
+                        .into_iter()
+                        .map(|(provider, model)| ModelId { provider, model })
+                        .collect())
+                },
+                describe: &|id| model_catalog::rpc_model(&state, id),
+                effort: &|id| {
+                    let mut levels: Vec<_> = effort_levels(&state, &id.provider, &id.model, true)?
+                        .into_iter()
+                        .map(|level| {
+                            if matches!(level.as_str(), "default" | "none") {
+                                "off".into()
+                            } else {
+                                level
+                            }
+                        })
+                        .collect();
+                    levels.dedup();
+                    Ok(levels)
+                },
+                retention: &|id| settings.retention(&id.provider, &id.model),
+            },
             root: &root,
             cancel: &cancel,
         }
@@ -1136,11 +1278,11 @@ fn run(
                         at = Some(n);
                         rest = rest[word.len()..].trim();
                     }
-                    db = if first == ":new" {
-                        Disk::open(&state, &root, None)?
+                    if first == ":new" {
+                        panda_core::sdk::SessionHost::switch(&mut db, None)?;
                     } else {
-                        db.fork(&state, &root, at, rest)?
-                    };
+                        panda_core::sdk::SessionHost::fork_turn(&mut db, at, rest)?;
+                    }
                     screen.clipboard = None;
                     screen.clear();
                     screen.footer.usage.clear();
@@ -1174,11 +1316,11 @@ fn run(
                                 continue;
                             }
                             picker::TreeAction::Fork => {
-                                let (child, prompt) = db.fork_prompt(&state, &root, node)?;
-                                db = child;
-                                Some(prompt)
+                                Some(sdk::SessionHost::fork_prompt(&mut db, node)?)
                             }
-                            picker::TreeAction::Switch => db.navigate(node)?,
+                            picker::TreeAction::Switch => {
+                                sdk::SessionHost::navigate_entry(&mut db, node)?
+                            }
                             picker::TreeAction::Summarize | picker::TreeAction::GuidedSummary => {
                                 let instructions = if action == picker::TreeAction::GuidedSummary {
                                     let Some(text) = picker::edit_text(
@@ -1270,9 +1412,8 @@ fn run(
                 ":context" | ":compact" => {
                     if first == ":compact" {
                         cancel.reset();
-                        compact_with_instructions(
+                        panda_core::sdk::SessionSdk { host: &mut db }.compact(
                             make_provider(&state, &p, &model)?.as_mut(),
-                            &mut db,
                             &line[first.len()..],
                             &cancel,
                         )?;
@@ -1305,6 +1446,21 @@ fn run(
                     }
                 }
                 ":ack" => acknowledge(&mut db)?,
+                ":retry" => {
+                    cancel.reset();
+                    let mut pending = active::PendingTool::default();
+                    sdk::SessionSdk { host: &mut db }.retry(
+                        make_provider(&state, &p, &model)?.as_mut(),
+                        tools,
+                        &cancel,
+                        &mut |event| active::display(event, &mut screen, &mut pending),
+                        &std::sync::Mutex::new(sdk::Queue::<String> {
+                            delivery: options.delivery,
+                            ..Default::default()
+                        }),
+                    )?;
+                    screen.footer.usage = usage(&db.load()?);
+                }
                 ":resume" => {
                     let selected = if let Some(n) = words.next() {
                         Some(if let Ok(id) = n.parse() {
@@ -1331,9 +1487,7 @@ fn run(
                         None
                     };
                     if let Some(id) = selected {
-                        if id != db.id() {
-                            db = Disk::open(&state, &root, Some(id))?
-                        }
+                        sdk::SessionHost::switch(&mut db, Some(id))?;
                         screen.clear();
                         screen.footer.usage.clear();
                         (p, model) = restore_model(&mut db)?;
@@ -1349,7 +1503,7 @@ fn run(
                     } else {
                         "Choose a model provider"
                     };
-                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (:cancel to close)."));
+                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter · anthropic · openai-api · google. Enter a number or name (:cancel to close)."));
                 }
                 ":usage" => {
                     let s = db.load()?;
@@ -1401,6 +1555,7 @@ fn run(
                     for id in ids {
                         ensure!(catalog.ids().contains(&id), "unknown provider {id}");
                         if first == ":logout" {
+                            ensure!(id != "router", "manage credentials on the backing provider");
                             fs::write(state.join(format!("{id}.logged-out")), b"")?;
                             model_catalog::remove(&state.join(format!("{id}.key")))?;
                             if subscription(id) {
@@ -1535,10 +1690,13 @@ fn run(
                         };
                         let (id, m) = canonical_model(id, m);
                         ensure!(catalog.ids().contains(&id), "unknown provider");
+                        if id == "router" {
+                            ensure!(catalog.routes.contains_key(m), "unknown virtual model {m}");
+                        }
                         if let Some(ep) = catalog.providers.get(id) {
                             ep.model(m)?;
                         }
-                        let mut session = db.load()?;
+                        let mut selected_effort = None;
                         if let Some(effort) = words.next() {
                             ensure!(
                                 effort_levels(&state, id, m, true)?
@@ -1546,13 +1704,16 @@ fn run(
                                     .any(|v| v == effort),
                                 "unsupported thinking effort {effort}"
                             );
-                            session.reasoning = (effort != "default").then(|| effort.to_owned());
+                            selected_effort =
+                                Some((effort != "default").then(|| effort.to_owned()));
                         }
-                        session.model = Some(ModelId {
-                            provider: id.into(),
-                            model: m.into(),
-                        });
-                        db.save(&mut session)?;
+                        panda_core::sdk::SessionSdk { host: &mut db }.select_model(
+                            ModelId {
+                                provider: id.into(),
+                                model: m.into(),
+                            },
+                            selected_effort,
+                        )?;
                         let mut temp = tempfile::NamedTempFile::new_in(&state)?;
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
@@ -1693,7 +1854,16 @@ fn run(
                         &mut screen,
                         editor.as_mut(),
                     )?;
-                    screen.footer.usage = usage(&db.load()?);
+                    let session = db.load()?;
+                    if p == "router"
+                        && let Some((_, actual)) = session.responders.last_key_value()
+                    {
+                        screen.line(
+                            Tone::Dim,
+                            &format!("Responder · {}/{}", actual.provider, actual.model),
+                        );
+                    }
+                    screen.footer.usage = usage(&session);
                 }
             }
             Ok(())

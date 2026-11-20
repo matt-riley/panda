@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
     rename_all_fields = "camelCase"
 )]
 pub enum ToolDetails {
+    Shell {
+        outcome: crate::sdk::ShellOutcome,
+    },
     Discovery {
         tools: Vec<String>,
     },

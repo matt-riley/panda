@@ -21,6 +21,8 @@ panda
 
 For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `:model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `:login deepseek` or `:login openrouter`.
 
+Panda supports native Anthropic Messages, OpenAI Responses and Gemini alongside Codex subscriptions. Use a virtual model to route individual requests to the configured physical providers. [Provider and routing guide](docs/native-providers.md)
+
 Register OpenAI-compatible endpoints in `$PANDA_HOME/models.json` (the default state directory is `~/.panda`). Each model sets its context window, output ceiling and accepted inputs. Prices are US dollars per million tokens. Omitting a price leaves the corresponding cost unknown. For example:
 
 ```json
@@ -150,6 +152,8 @@ panda --continue --mode rpc
 
 Print mode writes the final answer. JSON mode emits one object per line, ending with a `done` object containing the answer and session ID. Both accept a prompt from standard input. If you also supply a prompt argument, Panda prepends the piped text verbatim, separates it from the prompt with a blank line, and resolves attachments from the argument.
 
+See [workspace trust, Markdown packages and MCP](docs/workspace-resources.md) for installation, activation and server configuration.
+
 The [terminal and workspace guide](docs/terminal-workspaces.md) covers cross-workspace sessions, private checkpoint recovery, themes and picker shortcuts.
 
 To follow up on a specific conversation, pass its numeric `session_id` from the JSON `done` object to either output mode, for example `panda --print --session 42 "Explain the first finding"`. The ID must identify an existing session in the current workspace. A JSON follow-up returns the same ID. The `--session` flag conflicts with `--continue` and `--no-session`.
@@ -187,6 +191,12 @@ RPC accepts one JSON object per input line and echoes its `id` on replies and tu
 ```
 
 During an RPC turn, send `steer` or `follow_up` with a `text` field, or send `cancel`. The terminal reply for that turn includes any undelivered input. Once the turn ends, send `session` to inspect the saved transcript, or `ack` after inspecting an interrupted tool call.
+
+Select the Pi JSONL adapter with `panda --mode rpc --rpc-version pi-v1`. Send a request such as `{"id":"run-1","type":"prompt","message":"Describe this workspace"}`. Its correlated response carries the prompt disposition. Read the event stream until `agent_settled` to observe completion. While the run is active, clients can query state, steer, queue a follow-up or abort. Clear the queue before aborting to discard pending text.
+
+Pi clients can inspect messages, tree entries and the active leaf, select models and thinking levels, change queue delivery, switch or fork sessions, execute cancellable shell commands, compact or retry. Pass the `sessionFile` value from `get_state` to `switch_session` to reopen a Panda session. The SQLite host also accepts Pi JSONL files for import. Extension UI requests and responses depend on a future Panda extension UI contract.
+
+Embedded Rust hosts use `panda_core::sdk::SessionSdk` with `panda_memory::MemoryStore` or `panda_local::store::Disk`. Supply your provider, toolset, cancellation handle and queue to `prompt` and `retry`. Reuse the queue between turns to preserve its delivery policy. The SDK integration test exercises both stores through the same sequence. [Rust host example](crates/cli/tests/session_sdk.rs)
 
 [Pi behavior and Rust test mapping](docs/pi-feature-map.md)
 

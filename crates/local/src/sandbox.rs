@@ -15,6 +15,7 @@ use std::{
 
 pub struct Native {
     pub root: PathBuf,
+    pub mcp: crate::mcp::Servers,
     worker: PathBuf,
     scratch: tempfile::TempDir,
     toolchains: Vec<PathBuf>,
@@ -55,6 +56,7 @@ impl Native {
         }
         Ok(Self {
             root,
+            mcp: Default::default(),
             worker: worker.canonicalize()?,
             scratch: tempfile::tempdir()?,
             toolchains,
@@ -72,13 +74,13 @@ impl Native {
         );
         Ok(dir)
     }
-    fn profile(&self, write: bool) -> Result<String> {
+    fn profile(&self, workspace: &Path, write: bool) -> Result<String> {
         let quoted = |p: &Path| -> Result<String> {
             Ok(serde_json::to_string(
                 p.to_str().context("non UTF-8 sandbox path")?,
             )?)
         };
-        let root = quoted(&self.root)?;
+        let root = quoted(workspace)?;
         let scratch = quoted(&self.scratch.path().canonicalize()?)?;
         let worker = quoted(&self.worker)?;
         let mut rules = format!(
@@ -98,12 +100,36 @@ impl Native {
             rules.push_str(&format!("(allow file-write* (subpath {root}))"))
         }
         for name in [".git", ".panda", ".agents", ".codex", ".pi"] {
-            let path = quoted(&self.root.join(name))?;
+            let path = quoted(&workspace.join(name))?;
             rules.push_str(&format!("(deny file-write* file-link (subpath {path}))"))
         }
         Ok(rules)
     }
     fn command(&self, cmd: &Path, args: &[&str], write: bool) -> Result<Command> {
+        self.command_in(&self.root, cmd, args, write)
+    }
+    pub(crate) fn project_server_command(
+        &self,
+        workspace: &Path,
+        cmd: &Path,
+        args: &[&str],
+    ) -> Result<Command> {
+        ensure!(
+            !overlaps(workspace, &state_dir()?)
+                && !Path::new(&std::env::var_os("HOME").context("missing HOME")?)
+                    .canonicalize()?
+                    .starts_with(workspace),
+            "workspace overlaps private state or home"
+        );
+        self.command_in(workspace, cmd, args, false)
+    }
+    fn command_in(
+        &self,
+        workspace: &Path,
+        cmd: &Path,
+        args: &[&str],
+        write: bool,
+    ) -> Result<Command> {
         let scratch = self.scratch.path().canonicalize()?;
         let bins = self
             .toolchains
@@ -115,10 +141,10 @@ impl Native {
         let path = std::env::join_paths(bins)?;
         let mut proc = Command::new("/usr/bin/sandbox-exec");
         proc.arg("-p")
-            .arg(self.profile(write)?)
+            .arg(self.profile(workspace, write)?)
             .arg(cmd)
             .args(args)
-            .current_dir(&self.root)
+            .current_dir(workspace)
             .env_clear()
             .env("HOME", &scratch)
             .env("TMPDIR", &scratch)
@@ -217,6 +243,9 @@ fn wait_group(
 }
 
 impl Workspace for Native {
+    fn registered_tools(&self) -> Vec<panda_core::ToolDefinition> {
+        self.mcp.definitions()
+    }
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         self.invoke_stream(name, args, cancel, &mut |_| {})
             .map(|output| output.text)
@@ -228,11 +257,14 @@ impl Workspace for Native {
         cancel: &Cancel,
         emit: &mut panda_core::Emit,
     ) -> Result<ToolOutput> {
+        if name.starts_with("mcp_") {
+            return self.mcp.invoke(name, args, cancel);
+        }
         if name == "shell" {
             let timeout = panda_coding::shell_timeout(args)?;
             let proc =
                 self.command(Path::new("/bin/sh"), &["-c", field(args, "command")?], true)?;
-            return shell::run(proc, &self.root, timeout, cancel, emit).map(Into::into);
+            return shell::run(proc, &self.root, timeout, cancel, emit);
         }
         let result = self.exec_file(name, args, cancel)?;
         if matches!(name, "read" | "edit") {

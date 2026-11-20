@@ -10,15 +10,18 @@ use std::{
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
+    #[serde(default)]
     pub providers: BTreeMap<String, Endpoint>,
+    #[serde(default, rename = "virtualModels")]
+    pub routes: BTreeMap<String, crate::routing::Route>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
-    base_url: String,
+    pub base_url: String,
     pub api_key: Option<String>,
-    api: Option<String>,
+    pub api: Option<String>,
     pub models: Vec<Model>,
 }
 
@@ -56,7 +59,7 @@ impl Catalog {
             serde_json::from_slice(&fs::read(&path)?).context("invalid models.json")?;
         for (id, ep) in &result.providers {
             ensure!(
-                valid_provider(id) && !matches!(id.as_str(), "openai" | "codex"),
+                valid_provider(id) && !matches!(id.as_str(), "openai" | "codex" | "router"),
                 "invalid models.json provider id {id}"
             );
             let url = panda_providers::endpoint_url(&ep.base_url)
@@ -65,7 +68,8 @@ impl Catalog {
             ensure!(
                 ep.api
                     .as_deref()
-                    .is_none_or(|api| api == "openai-completions"),
+                    .is_none_or(|api| api == "openai-completions"
+                        || panda_providers::native::Family::parse(api).is_ok()),
                 "unsupported API for {id} in models.json"
             );
             if let Some(key) = &ep.api_key {
@@ -101,6 +105,27 @@ impl Catalog {
                 );
             }
         }
+        for (name, route) in &result.routes {
+            ensure!(
+                !name.is_empty() && !name.chars().any(char::is_whitespace),
+                "invalid virtual model ID"
+            );
+            for target in route.targets() {
+                ensure!(
+                    target.provider != "router" && !target.model.is_empty(),
+                    "virtual model {name} must target a physical model"
+                );
+                if let Some(ep) = result.providers.get(&target.provider) {
+                    ep.model(&target.model)?;
+                } else {
+                    ensure!(
+                        crate::PROVIDERS.contains(&target.provider.as_str()),
+                        "unknown backing provider {}",
+                        target.provider
+                    );
+                }
+            }
+        }
         Ok(result)
     }
 
@@ -114,6 +139,7 @@ impl Catalog {
                     .map(String::as_str)
                     .filter(|id| !crate::PROVIDERS.contains(id)),
             )
+            .chain((!self.routes.is_empty()).then_some("router"))
             .collect()
     }
 }
@@ -230,4 +256,64 @@ pub fn available_models(state: &Path, scope: &str) -> Result<(ModelRows, Vec<Str
         }
     }
     Ok((filtered, errors))
+}
+
+/// Return public wire metadata. Keep provider credentials in the connection factory.
+pub fn rpc_model(state: &Path, id: &panda_core::ModelId) -> Result<serde_json::Value> {
+    use serde_json::json;
+    ensure!(valid_provider(&id.provider), "invalid model provider");
+    let configured = Catalog::read(state)?;
+    if let Some(endpoint) = configured.providers.get(&id.provider) {
+        let m = endpoint.model(&id.model)?;
+        let mut value = json!({"id":m.id,"name":m.name.as_ref().unwrap_or(&m.id),"provider":id.provider,
+            "api":endpoint.api.as_deref().unwrap_or("openai-completions"),"baseUrl":endpoint.base_url,"reasoning":true,"input":m.input,"contextWindow":m.context_window,"maxTokens":m.max_tokens});
+        if let Some(cost) = &m.cost {
+            value["cost"] = json!(cost);
+        }
+        return Ok(value);
+    }
+    if id.provider == "router" {
+        let route = configured
+            .routes
+            .get(&id.model)
+            .context("unknown virtual model")?;
+        return Ok(
+            json!({"id":id.model,"name":id.model,"provider":id.provider,"contextWindow":route.window(&configured),
+            "reasoning":!route.efforts.is_empty(),"input":if route.image.is_some(){vec!["text","image"]}else{vec!["text"]}}),
+        );
+    }
+    let (api, url) = match id.provider.as_str() {
+        "deepseek" => ("openai-completions", "https://api.deepseek.com"),
+        "openrouter" => ("openai-completions", "https://openrouter.ai/api/v1"),
+        "openai-codex" => ("openai-codex-responses", "https://chatgpt.com/backend-api"),
+        name if panda_providers::native::builtin(name).is_some() => {
+            let (family, url) = panda_providers::native::builtin(name).unwrap();
+            (family.name(), url)
+        }
+        _ => return Ok(json!({"id":id.model,"name":id.model,"provider":id.provider})),
+    };
+    let mut value = json!({"id":id.model,"name":id.model,"provider":id.provider,"api":api,"baseUrl":url,
+        "reasoning":true,"input":if id.provider=="deepseek"{vec!["text"]}else{vec!["text","image"]}});
+    let path = state.join(format!("catalog-{}.json", id.provider));
+    if path.try_exists()? {
+        let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
+        if let Some(n) = rows
+            .into_iter()
+            .find(|(m, _)| m == &id.model)
+            .and_then(|(_, n)| n)
+        {
+            value["contextWindow"] = json!(n);
+        }
+    }
+    if let Some(n) = crate::output_limit(state, &id.provider, &id.model)? {
+        value["maxTokens"] = json!(n);
+    }
+    if id.provider == "openrouter" && state.join("catalog-openrouter-prices.json").try_exists()? {
+        let prices: BTreeMap<String, panda_core::TokenPrices> =
+            serde_json::from_slice(&fs::read(state.join("catalog-openrouter-prices.json"))?)?;
+        if let Some(cost) = prices.get(&id.model) {
+            value["cost"] = json!(cost);
+        }
+    }
+    Ok(value)
 }

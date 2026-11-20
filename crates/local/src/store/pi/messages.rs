@@ -50,6 +50,11 @@ fn content(value: &Value) -> Result<Content> {
 
 pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
     let kind = string(entry, "type")?;
+    if kind == "custom" && entry["customType"] == "panda.provider-replay" {
+        return Ok(vec![Message::Replay(serde_json::from_value(
+            entry["data"].clone(),
+        )?)]);
+    }
     if kind == "custom" && entry["customType"] == "panda.truncated-reply" {
         return Ok(vec![Message::Truncated(serde_json::from_value(
             entry["data"].clone(),
@@ -154,7 +159,7 @@ fn ordered_blocks(
     Ok(out)
 }
 
-pub(super) fn encode(
+pub fn encode(
     message: &Message,
     timestamp: i64,
     tool_name: Option<&str>,
@@ -162,6 +167,20 @@ pub(super) fn encode(
     thinking: Option<&str>,
 ) -> Result<Value> {
     let mut m = match message {
+        Message::Replay(data) => {
+            return Ok(json!({"type":"custom","customType":"panda.provider-replay","data":data}));
+        }
+        Message::Bash {
+            command,
+            outcome,
+            exclude,
+        } => {
+            let mut m = serde_json::to_value(outcome)?;
+            m["command"] = json!(command);
+            m["role"] = json!("bashExecution");
+            m["excludeFromContext"] = json!(exclude);
+            m
+        }
         Message::CodemodeStore(writes) => {
             return Ok(json!({"type":"custom","customType":"codemode-store","data":writes}));
         }
