@@ -495,13 +495,34 @@ fn reads_limits_and_cancellation() -> Result<()> {
     );
     assert!(run("tools.write({path:'note', text:'bad'})").is_err());
     assert_eq!(fs::read_to_string(root.path().join("note"))?, "hello");
-    assert_eq!(run("text('x'.repeat(16384))")?, "x".repeat(16384));
+    assert_eq!(
+        run("text('first'); return await Promise.resolve('last');")?,
+        "first\nlast"
+    );
+    assert_eq!(run("text('first'); return; text('unreachable');")?, "first");
+    assert_eq!(run("return null;")?, "null");
+    assert_eq!(run("text(''); return false;")?, "\nfalse");
+    assert_eq!(run("return 'x'.repeat(16384)")?, "x".repeat(16384));
     assert!(!root.path().join(".panda").exists());
     let capped = run("text('x'.repeat(1048575)); try { text('x'); } catch {}");
     assert!(capped.unwrap_err().to_string().contains("1 MiB"));
     assert!(!root.path().join(".panda").exists());
+    assert!(
+        run("text('x'.repeat(1048575)); return 'x'")
+            .unwrap_err()
+            .to_string()
+            .contains("1 MiB")
+    );
+    assert!(
+        run("try { text('x'.repeat(1048577)); } catch { exit(); }")
+            .unwrap_err()
+            .to_string()
+            .contains("1 MiB")
+    );
     // Even worst-case JSON escaping must fit in the worker protocol frame.
-    let exact = run(r#"text("\u0001".repeat(1048576))"#)?;
+    let exact = run(r#"return "\u0001".repeat(1048576)"#)?;
+    assert!(exact.len() <= 16 * 1024);
+    assert!(exact.starts_with('\x01'));
     let path = exact
         .lines()
         .last()
@@ -696,12 +717,15 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         for (const {path} of p.items) state.counts[path] = (state.counts[path] ?? 0) + 1;
         state.cursor = p.next_offset;
         store("rank", state);
-        text(state.cursor === null ? Object.entries(state.counts).sort((a,b)=>b[1]-a[1]) : state.cursor);
+        if (state.cursor === null) return Object.entries(state.counts).sort((a,b)=>b[1]-a[1]);
+        text(state.cursor);
     "#;
     let mut db = Disk::open(state.path(), root.path(), None)?;
     let sid = db.id();
     let report = r#"text("HEAD"); text("🦀".repeat(2400)); text("MIDDLE"); text("é".repeat(4800)); text("TAIL");"#;
-    let preview = run(&mut db, &format!("{page}\n{report}"))?;
+    let stop = r#"try { exit(); } catch { store("rank", {cursor:999}); }
+        tools.search({query:"TODO", offset:50});"#;
+    let preview = run(&mut db, &format!("{page}\n{report}\n{stop}"))?;
     assert!(preview.starts_with("50\nHEAD\n"), "{preview:.100}");
     assert!(preview.contains("\nTAIL\n"));
     assert!(!preview.contains("MIDDLE"));
@@ -763,12 +787,29 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
         cursor
     );
-    let over_cap = r#"store("rank", {cursor:999}); try { text("x".repeat(1048577)); } catch {}"#;
-    assert!(run(&mut db, over_cap)?.contains("1 MiB"));
-    assert_eq!(
-        serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
-        cursor
-    );
+    let throwing_getter = r#"const err = Error();
+        Object.defineProperty(err, "message", {get() { exit(); return "diagnostic"; }});
+        throw err;"#;
+    for (completion, error) in [
+        (throwing_getter, "diagnostic"),
+        (r#"try { text("x".repeat(1048577)); } catch {}"#, "1 MiB"),
+        (r#"return "x".repeat(1048577)"#, "1 MiB"),
+        (
+            r#"return Promise.reject(Error("ranking failed"))"#,
+            "ranking failed",
+        ),
+        (
+            r#"return {toJSON() { throw Error("encoding failed"); }}"#,
+            "encoding failed",
+        ),
+    ] {
+        let failed = format!(r#"store("rank", {{cursor:999}}); {completion}"#);
+        assert!(run(&mut db, &failed)?.contains(error));
+        assert_eq!(
+            serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
+            cursor
+        );
+    }
 
     let mut archive = Vec::new();
     db.export_pi(&mut archive)?;
