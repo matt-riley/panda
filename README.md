@@ -248,7 +248,7 @@ At each directory from the Git root to the launch directory, Panda selects the f
 
 Markdown prompt files in `$PANDA_HOME/prompts/` become commands such as `/review "API compatibility"`. With `--trust-project`, Panda also discovers `.pi/prompts/` at the project root. User templates win name collisions and built-in terminal commands keep their names. Use `:prompts` to list templates. As in Pi, templates support positional arguments, all arguments, defaults and slices.
 
-Panda discovers ancestor `.agents/skills` and `.pi/skills` directories up to the Git root. The nearest definition wins duplicate names, followed by user and additional skill roots. `:skills` reports invalid frontmatter and lists both paths for name collisions. A skill declaring `disable-model-invocation: true` can still be invoked with `:skill:NAME`; model search, loading and the startup index omit it.
+Panda discovers ancestor `.agents/skills` and `.pi/skills` directories up to the Git root. The workspace sandbox protects these skill directories from writes at every depth. The nearest definition wins duplicate names, followed by user and additional skill roots. `:skills` reports invalid frontmatter and lists both paths for name collisions. A skill declaring `disable-model-invocation: true` can still be invoked with `:skill:NAME`; model search, loading and the startup index omit it.
 
 ## Offline diagnostics
 

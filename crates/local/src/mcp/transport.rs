@@ -13,6 +13,8 @@ const LIMIT: usize = 4 * 1024 * 1024;
 pub(super) enum Connection {
     Stdio {
         child: Child,
+        // Keep the per-server directory alive until shutdown and remove it on drop.
+        _scratch: Option<tempfile::TempDir>,
         input: ChildStdin,
         output: BufReader<ChildStdout>,
         line: Vec<u8>,
@@ -32,9 +34,15 @@ impl Connection {
     ) -> Result<Self> {
         match (&spec.command, &spec.url) {
             (Some(program), None) => {
-                let mut c = if let Some(native) = sandbox {
+                let (mut c, scratch) = if let Some(native) = sandbox {
+                    ensure!(
+                        !spec.env.contains_key("HOME") && !spec.env.contains_key("TMPDIR"),
+                        "Panda sets HOME and TMPDIR for project MCP servers"
+                    );
                     let args = spec.args.iter().map(String::as_str).collect::<Vec<_>>();
-                    Command::from(native.project_server_command(root, Path::new(program), &args)?)
+                    let (command, scratch) =
+                        native.project_server_command(root, Path::new(program), &args)?;
+                    (Command::from(command), Some(scratch))
                 } else {
                     let mut c = Command::new(program);
                     c.args(&spec.args).current_dir(root).env_clear();
@@ -43,7 +51,7 @@ impl Connection {
                             c.env(name, v);
                         }
                     }
-                    c
+                    (c, None)
                 };
                 c.envs(&spec.env)
                     .stdin(Stdio::piped())
@@ -56,12 +64,17 @@ impl Connection {
                 let output = BufReader::new(child.stdout.take().context("missing MCP stdout")?);
                 Ok(Self::Stdio {
                     child,
+                    _scratch: scratch,
                     input,
                     output,
                     line: Vec::new(),
                 })
             }
             (None, Some(raw)) => {
+                ensure!(
+                    sandbox.is_none(),
+                    "project MCP configuration supports only local stdio commands; configure HTTP servers in $PANDA_HOME/mcp.json"
+                );
                 let url = Url::parse(raw)?;
                 ensure!(
                     matches!(url.scheme(), "https" | "http")
