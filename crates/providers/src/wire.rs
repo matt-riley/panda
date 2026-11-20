@@ -234,6 +234,15 @@ pub(super) fn responses_history(
                 );
             }
             Message::Truncated(_) | Message::CodemodeStore(_) | Message::Replay(_) => continue,
+            Message::Bash {
+                command,
+                outcome,
+                exclude,
+            } => {
+                if !exclude {
+                    input.push(json!({"role":"user","content":outcome.context(command)}));
+                }
+            }
             Message::BranchSummary(s) => input.push(
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")}),
             ),

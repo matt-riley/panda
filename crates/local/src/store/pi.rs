@@ -2,6 +2,7 @@
 //! and checkpoints Panda needs to project the selected path.
 mod export;
 mod messages;
+pub use messages::encode as encode_message;
 
 use super::{Disk, save_snapshot, tree};
 use anyhow::{Context, Result, ensure};

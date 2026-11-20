@@ -159,7 +159,7 @@ fn ordered_blocks(
     Ok(out)
 }
 
-pub(super) fn encode(
+pub fn encode(
     message: &Message,
     timestamp: i64,
     tool_name: Option<&str>,
@@ -169,6 +169,17 @@ pub(super) fn encode(
     let mut m = match message {
         Message::Replay(data) => {
             return Ok(json!({"type":"custom","customType":"panda.provider-replay","data":data}));
+        }
+        Message::Bash {
+            command,
+            outcome,
+            exclude,
+        } => {
+            let mut m = serde_json::to_value(outcome)?;
+            m["command"] = json!(command);
+            m["role"] = json!("bashExecution");
+            m["excludeFromContext"] = json!(exclude);
+            m
         }
         Message::CodemodeStore(writes) => {
             return Ok(json!({"type":"custom","customType":"codemode-store","data":writes}));

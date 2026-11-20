@@ -3,19 +3,8 @@ use panda_coding::{Skills, Workspace, field};
 use panda_core::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-#[derive(Default)]
-pub struct MemoryStore(Session);
-impl Store for MemoryStore {
-    fn load(&self) -> Result<Session> {
-        Ok(self.0.clone())
-    }
-    fn save(&mut self, s: &mut Session) -> Result<()> {
-        ensure!(self.0.revision == s.revision, "stale revision");
-        s.revision += 1;
-        self.0 = s.clone();
-        Ok(())
-    }
-}
+mod sessions;
+pub use sessions::MemoryStore;
 pub struct Files(pub BTreeMap<String, String>);
 impl Workspace for Files {
     fn invoke(&self, name: &str, args: &Value, _: &Cancel) -> Result<String> {
