@@ -549,6 +549,54 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     os.environ["PANDA_TEST_WORKER"] = next(m["executable"] for m in map(json.loads, build.splitlines())
                                           if m.get("executable") and m["target"]["name"] == "panda")
 
+    ranking_repo = root / "ranking"
+    ranking_repo.mkdir()
+    for name, count in [("a.rs", 34), ("b.rs", 17)]:
+        (ranking_repo / name).write_text("TODO\n" * count)
+
+    def discover(selection, script):
+        next_calls.append(("codemode", {"code": script}))
+        output = run(["--mode", "json", "--no-session", "--tools", selection, "Rank TODOs"], "", cwd=ranking_repo)
+        first, followup = [body for _, body in requests]
+        requests.clear()
+        assert {t["function"]["name"] for t in first["tools"]} == set(selection.split(","))
+        result = followup["messages"][-1]
+        assert result["role"] == "tool", result
+        assert not result["content"].startswith("tool error:"), result["content"]
+        events = [json.loads(line) for line in output if line.startswith("{")]
+        nested = [e["event"]["data"]["call"] for e in events
+                  if e["type"] == "event" and e["event"]["type"] == "nested_call"]
+        return json.loads(result["content"]), [(c["name"], c["args"]) for c in nested]
+
+    found, calls = discover("codemode,read,search", """
+        const [hit] = await searchTools("find matching lines", {limit: 1});
+        const description = await describeTool(hit.name);
+        if (!description.includes("offset?: number")) throw Error(description);
+        const counts = new Map();
+        let offset = 0;
+        do {
+            const page = tools[hit.name]({query: "TODO", offset});
+            for (const {path} of page.items) counts.set(path, (counts.get(path) ?? 0) + 1);
+            offset = page.next_offset;
+        } while (offset !== null);
+        text([ALL_TOOLS.map(tool => tool.name).sort(), hit.name, [...counts].sort((a,b) => b[1]-a[1])]);
+    """)
+    assert found == [["read", "search"], "search", [["a.rs", 34], ["b.rs", 17]]], found
+    assert calls == [("search", {"query": "TODO", "offset": n}) for n in (0, 50)], calls
+
+    hidden, calls = discover("codemode,read", """
+        let blocked = false;
+        try { tools.search({query: "TODO"}); } catch (err) { blocked = err instanceof TypeError; }
+        text([ALL_TOOLS.map(tool => tool.name), (await searchTools("search")).map(tool => tool.name),
+              await describeTool("search") === undefined, Object.keys(tools), blocked]);
+    """)
+    assert hidden == [["read"], [], True, ["read"], True], hidden
+    assert calls == [], calls
+    next_calls.append(("search", {"query": "TODO"}))
+    run(["--print", "--no-session", "--tools", "codemode,read", "Search directly"], "", cwd=ranking_repo)
+    assert "tool search unavailable for this run" in requests[-1][1]["messages"][-1]["content"]
+    requests.clear()
+
     # This model always summarizes as "Saved old exchange", without filenames.
     for file in ("a.rs", "b.rs", "d.rs"):
         (repo / file).write_text("before")
