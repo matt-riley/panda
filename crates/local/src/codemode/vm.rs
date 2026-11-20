@@ -45,13 +45,60 @@ fn finish(result: Result<ScriptOutput>) -> Result<()> {
     send(&mut io::stdout().lock(), &WorkerMessage::Finished(output))
 }
 
+const CONSOLE_OPEN: &str = "<console_output>\n";
+const CONSOLE_CLOSE: &str = "\n</console_output>";
+
+#[derive(Default)]
+struct OutputBuffer {
+    text: Option<String>,
+    console: Option<String>,
+}
+
+impl OutputBuffer {
+    fn append(&mut self, value: String, console: bool) -> Result<()> {
+        let wrapper = if console || self.console.is_some() {
+            CONSOLE_OPEN.len() + CONSOLE_CLOSE.len()
+        } else {
+            0
+        };
+        // Each existing group contributes its bytes and one separator in the new result.
+        let size = value.len()
+            + wrapper
+            + self.text.as_ref().map_or(0, |s| s.len() + 1)
+            + self.console.as_ref().map_or(0, |s| s.len() + 1);
+        ensure!(size <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
+        let group = if console {
+            &mut self.console
+        } else {
+            &mut self.text
+        };
+        if let Some(lines) = group {
+            lines.push('\n');
+            lines.push_str(&value);
+        } else {
+            *group = Some(value);
+        }
+        Ok(())
+    }
+
+    fn render(self) -> String {
+        let Some(console) = self.console else {
+            return self.text.unwrap_or_default();
+        };
+        match self.text {
+            Some(text) => format!("{text}\n{CONSOLE_OPEN}{console}{CONSOLE_CLOSE}"),
+            None => format!("{CONSOLE_OPEN}{console}{CONSOLE_CLOSE}"),
+        }
+    }
+}
+
 fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
     let runtime = Runtime::new()?;
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
     let context = JsContext::full(&runtime)?;
     // None latches an overflow, even if the script catches the text() error.
-    let output = Rc::new(RefCell::new(Some(String::new())));
+    let output = Rc::new(RefCell::new(Some(OutputBuffer::default())));
     let buffer = output.clone();
     context.with(|ctx| -> Result<ScriptOutput> {
         ctx.globals()
@@ -95,25 +142,22 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
                 invoke(name, args).map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
             })?,
         )?;
-        let emitted = Cell::new(false);
         ctx.globals().set(
-            "__text",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, value: String| {
-                let mut slot = buffer.borrow_mut();
-                let Some(out) = slot.as_mut() else {
-                    return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
-                };
-                let newline = emitted.replace(true);
-                if out.len() + usize::from(newline) + value.len() > MAX_OUTPUT_BYTES {
-                    *slot = None;
-                    return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
-                }
-                if newline {
-                    out.push('\n');
-                }
-                out.push_str(&value);
-                Ok(())
-            })?,
+            "__emit",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, value: String, console: bool| {
+                    let mut slot = buffer.borrow_mut();
+                    let Some(out) = slot.as_mut() else {
+                        return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
+                    };
+                    if out.append(value, console).is_err() {
+                        *slot = None;
+                        return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
+                    }
+                    Ok(())
+                },
+            )?,
         )?;
         let running = Rc::new(Cell::new(true));
         let exit_enabled = running.clone();
@@ -130,7 +174,10 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
                     exit_output
                         .take()
                         .context(OUTPUT_LIMIT_ERROR)
-                        .map(|text| ScriptOutput { text, error: None }),
+                        .map(|buffer| ScriptOutput {
+                            text: buffer.render(),
+                            error: None,
+                        }),
                 );
                 std::process::exit(if sent.is_ok() { 0 } else { 1 });
             })?,
@@ -139,7 +186,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
         let result = run_script(&ctx, code);
         // Freeze output before formatting an exception, which may run JS getters.
         running.set(false);
-        let text = output.take().context(OUTPUT_LIMIT_ERROR)?;
+        let text = output.take().context(OUTPUT_LIMIT_ERROR)?.render();
         let error = result
             .catch(&ctx)
             .err()
@@ -161,6 +208,29 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn mixed_output_fits_exactly_at_the_rendered_byte_limit(
+            items in prop::collection::vec((any::<bool>(), ".{0,12}"), 0..8),
+            last_is_console in any::<bool>(),
+            over in any::<bool>(),
+        ) {
+            let mut buffer = OutputBuffer::default();
+            let (mut text, mut console) = (Vec::new(), Vec::new());
+            for (log, value) in items {
+                buffer.append(value.clone(), log).unwrap();
+                if log { console.push(value) } else { text.push(value) }
+            }
+            let last = if last_is_console { &mut console } else { &mut text };
+            last.push(String::new());
+            let mut groups = Vec::new();
+            if !text.is_empty() { groups.push(text.join("\n")); }
+            if !console.is_empty() { groups.push(format!("<console_output>\n{}\n</console_output>", console.join("\n"))); }
+            let padding = MAX_OUTPUT_BYTES - groups.join("\n").len() + usize::from(over);
+            let added = buffer.append("x".repeat(padding), last_is_console);
+            prop_assert_eq!(added.is_err(), over);
+            if !over { prop_assert_eq!(buffer.render().len(), MAX_OUTPUT_BYTES); }
+        }
+
         #[test]
         fn completion_preserves_emitted_items(items in prop::collection::vec(".{0,32}", 1..8), fails in any::<bool>()) {
             let values = json!(items);
