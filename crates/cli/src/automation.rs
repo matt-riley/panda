@@ -508,6 +508,9 @@ impl Provider for FixedEffort {
     fn prices(&self) -> Option<TokenPrices> {
         self.provider.prices()
     }
+    fn compaction_judge(&mut self) -> Option<&mut dyn panda_core::native_compaction::Judge> {
+        self.provider.compaction_judge()
+    }
     fn reply(
         &mut self,
         system: &str,

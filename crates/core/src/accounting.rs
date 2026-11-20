@@ -195,6 +195,9 @@ pub struct IdentifiedProvider {
     pub prices: Option<TokenPrices>,
 }
 impl Provider for IdentifiedProvider {
+    fn compaction_judge(&mut self) -> Option<&mut dyn crate::native_compaction::Judge> {
+        self.inner.compaction_judge()
+    }
     fn default_model(&self) -> Option<ModelId> {
         self.persist_default.then(|| self.id.clone())
     }

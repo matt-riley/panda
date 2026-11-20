@@ -74,6 +74,55 @@ mod tests {
     use panda_core::{Checkpoint, Message, Store};
 
     #[test]
+    fn checkpointing_after_tree_navigation_excludes_sibling_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut disk = Disk::open(dir.path(), dir.path(), None).unwrap();
+        let answer = |text: &str| Message::Assistant {
+            text: text.into(),
+            calls: vec![],
+        };
+        let mut s = disk.load().unwrap();
+        s.history = vec![
+            Message::User("root".into()),
+            answer("shared answer"),
+            Message::User("sibling-only note".into()),
+            answer("sibling-only reply"),
+        ];
+        disk.save(&mut s).unwrap();
+        let root_answer = disk
+            .tree()
+            .unwrap()
+            .iter()
+            .find(|e| e.text.contains("shared answer"))
+            .unwrap()
+            .id;
+        disk.navigate(root_answer).unwrap();
+        let mut active = disk.load().unwrap();
+        active.history.extend([
+            Message::User("new branch error 731".into()),
+            answer("acknowledged"),
+        ]);
+        active.checkpoint = Some(Checkpoint {
+            through: 4,
+            summary: "reviewed the error".into(),
+            ..Default::default()
+        });
+        disk.save_checkpoint(&mut active).unwrap();
+        drop(disk);
+        let disk = Disk::open(dir.path(), dir.path(), Some(1)).unwrap();
+        let cp = disk.load().unwrap().checkpoint.unwrap();
+        let jsonl = disk
+            .recover_transcript(cp.recovery.as_deref().unwrap())
+            .unwrap();
+        let actual = jsonl
+            .lines()
+            .map(|row| serde_json::from_str::<Message>(row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, active.history);
+        assert!(jsonl.contains("new branch error 731") && !jsonl.contains("sibling-only"));
+    }
+
+    #[test]
     fn recovery_survives_reopen_and_rejects_stale_writes_and_siblings() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();

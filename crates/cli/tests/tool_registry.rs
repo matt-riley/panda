@@ -32,10 +32,21 @@ impl Workspace for Fixture {
             output:OutputKind::Json,namespace:Some("fixture".into())
         }).collect()
     }
-    fn invoke(&self, name: &str, args: &Value, _: &Cancel) -> Result<String> {
+    fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         ensure!(name == "fixture", "unexpected dispatch of {name}");
         let value = args["value"].as_i64().unwrap();
+        if value == 999 {
+            let (lock, wake) = &self.arrived;
+            *lock.lock().unwrap() += 1;
+            wake.notify_all();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                cancel.check()?;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            anyhow::bail!("active nested handler failed to observe cancellation");
+        }
         if value != 0 {
             let (lock, wake) = &self.arrived;
             let mut arrived = lock.lock().unwrap();
@@ -213,5 +224,47 @@ return [results[0].value,results[1].status,String(results[1].reason),describeNam
     assert_eq!(coding.workspace.calls.load(Ordering::SeqCst), 4);
     let err = run("codemode", json!({"code":"await new Promise(()=>{})"})).unwrap_err();
     assert!(err.to_string().contains("no pending tool"));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn external_cancellation_stops_an_admitted_nested_handler() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let canonical = root.path().canonicalize()?;
+    let coding = fixture();
+    let runner = Codemode::new(&coding, env!("CARGO_BIN_EXE_panda").as_ref(), &canonical);
+    let cancel = Cancel::default();
+    let script = call(
+        "codemode",
+        json!({"code":"return asyncTools.fixture({value:999})"}),
+    );
+    std::thread::scope(|scope| -> Result<()> {
+        let worker = scope.spawn(|| runner.run(Mode::Plan, &script, &cancel));
+        let (lock, wake) = &coding.workspace.arrived;
+        let (guard, timeout) = wake
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(2), |n| *n == 0)
+            .unwrap();
+        drop(guard);
+        assert!(!timeout.timed_out());
+        cancel.stop();
+        assert!(
+            worker
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        Ok(())
+    })?;
+    let next = call(
+        "codemode",
+        json!({"code":"return asyncTools.fixture({value:0})"}),
+    );
+    assert_eq!(
+        runner.run(Mode::Plan, &next, &Cancel::default())?,
+        r#"{"value":0}"#
+    );
     Ok(())
 }

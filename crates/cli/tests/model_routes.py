@@ -29,6 +29,19 @@ class Endpoint(BaseHTTPRequestHandler):
         global fail_once
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         requests.append((self.path, self.headers.get("Authorization"), body))
+        if self.path == "/jev/systemone":
+            assert self.headers["Authorization"] == "Bearer fixture-judge-key"
+            answers = {}
+            for key, question in body["questions"].items():
+                if question["type"] == "noul":
+                    answers[key] = {"type": "noul", "noul": 0.9 if key.startswith("s") else 0.1}
+                else:
+                    answers[key] = {"type": "choice", "choice": "drop", "confidence": 1.0}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"answers": answers, "usage": {"input_tokens": 11, "output_tokens": 2}}).encode())
+            return
         if fail_once:
             fail_once = False
             self.send_response(503)
@@ -99,6 +112,7 @@ def exercise(port, root):
                 assert "text-only model" in content and "data:image" not in content
         return body
 
+    assert ":keys" in run("--help") and ":theme" in run("--help")
     listed = run("--list-models", "local-a/*")
     assert "Fixture Text" in listed and "32768" in listed and "text+image" in listed
     run(stdin=":model local-a gpt-text\n:effort low\nfirst @test.png\n:q\n")
@@ -127,7 +141,11 @@ def exercise(port, root):
 
     global fail_once
     fail_once = True
-    run(stdin=":model local-a gpt-text\nretry fixture\n:compact\n:usage\n:q\n")
+    compacted = run(stdin=":help\n:model local-a gpt-text\nretry fixture\n:compact\n:context\n:usage\n:q\n")
+    assert ":keys" in compacted and ":theme" in compacted
+    pointers = [line.split("Private transcript · ", 1)[1] for line in compacted.splitlines()
+                if "Private transcript · " in line]
+    assert len(pointers) == 2 and pointers[0] == pointers[1], pointers
     sid = imported + 1
     before = snapshot(sid)["attempts"]
     assert [(a["purpose"], a["outcome"], a["cost_source"]) for a in before] == [
@@ -181,6 +199,21 @@ def exercise(port, root):
     run(stdin=":login local-a\n:q\n")
     run("--print", "--no-session", "--provider", "local-a", "--model", "vision", "restored")
     check_route("a", "vision")
+    # Opting in keeps the wrapper's resolved model identity and price table. A real
+    # native checkpoint records a recoverable transcript and the active model override.
+    env.update(PANDA_NATIVE_COMPACTION="1", TYPESAFE_API_KEY="fixture-judge-key",
+               TYPESAFE_BASE_URL=f"http://127.0.0.1:{port}/jev")
+    (state / "settings.json").write_text(json.dumps({"compaction": {
+        "keepRecentTokens": 24000, "modelOverrides": {"local-a/gpt-text": {"keepRecentTokens": 0}}}}))
+    run("--print", "--session", 1, "native boundary " + "猫" * 12000)
+    run("--print", "--session", 1, "keep this exchange")
+    native = run("--continue", stdin=":resume 1\n:compact\n:context\n:q\n")
+    saved = snapshot(1)
+    assert "Compacted through" in native and "Reported usage:" in native, native
+    assert saved["keepRecentTokens"] == 0 and saved["checkpoint"]["recovery"]
+    assert saved["attempts"][-1]["model"]["provider"] == "local-a"
+    assert saved["attempts"][-1]["cost_source"] == "catalog"
+    assert any(path == "/jev/systemone" for path, _, _ in requests)
     text["maxTokens"] = -1
     count = len(requests)
     catalog.write_text(json.dumps(config))
