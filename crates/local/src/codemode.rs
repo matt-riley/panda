@@ -26,26 +26,31 @@ const ARG_BYTES: usize = 16 * 1024;
 const MAX_CALLS: usize = 64;
 // Bound the total retained across nested calls, including base64 expansion.
 const MAX_IMAGE_URL_BYTES: usize = 12 * 1024 * 1024;
-const HELPERS: &[(&str, &str)] = &[
+const HELPERS: &[(&str, &str, &str)] = &[
     (
         "ls",
+        "{items: {name: string, type: string}[], next_offset: number | null}",
         "tools.ls({path?,offset?}) lists immediate entries (name,type), includes dotfiles, defaults to the root, and returns {items,next_offset}.",
     ),
     (
         "search",
+        "{items: {path: string, line: number, text: string, before?: string[], after?: string[]}[], next_offset: number | null}",
         "tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) returns {items,next_offset} with path,line,text per hit. Search defaults to case-sensitive literal matching. Set regex:true for a Rust regex and ignoreCase:true to ignore case. Positive context adds before and after arrays in file order. Only matches count toward offsets. Search respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
     ),
     (
         "repo_map",
+        "{items: string[], next_offset: number | null}",
         "tools.repo_map({glob?,offset?}) returns {items,next_offset} with workspace paths. It respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
     ),
     (
         "read",
+        "string",
         "tools.read({path,offset?,limit?}) returns file text or a short image description. Reading a PNG, JPEG or WebP attaches the original image when the script succeeds; only text supports line ranges.",
     ),
 ];
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
-const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 1024;
+// Include the descriptions and declarations of the permitted workspace helpers.
+const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 16 * 1024;
 const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 1024;
 const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
 // Finished messages must also fit when every output byte needs JSON escaping.
@@ -69,6 +74,61 @@ fn finish_output(root: &std::fs::File, text: String) -> Result<String> {
         &text[..head],
         &text[tail..]
     ))
+}
+
+struct NestedHelper<'a> {
+    name: &'static str,
+    function: &'a Value,
+    result_type: &'static str,
+    usage: &'static str,
+}
+
+#[derive(Serialize)]
+struct ToolEntry {
+    name: &'static str,
+    description: String,
+}
+
+impl NestedHelper<'_> {
+    fn entry(&self) -> ToolEntry {
+        let params = &self.function["parameters"];
+        let required = params["required"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut fields = Vec::new();
+        if let Some(properties) = params["properties"].as_object() {
+            for (name, property) in properties {
+                let optional = if required.iter().any(|field| field == name) {
+                    ""
+                } else {
+                    "?"
+                };
+                let ty = match property["type"].as_str() {
+                    Some("integer" | "number") => "number",
+                    Some("string") => "string",
+                    Some("boolean") => "boolean",
+                    _ => "unknown",
+                };
+                fields.push(format!("{name}{optional}: {ty}"));
+            }
+        }
+        let args = if required.is_empty() { "args?" } else { "args" };
+        let declaration = format!(
+            "function {}({args}: {{ {} }}): {}",
+            self.name,
+            fields.join(", "),
+            self.result_type
+        );
+        ToolEntry {
+            name: self.name,
+            description: format!(
+                "{} {}\n{declaration}",
+                self.function["description"].as_str().unwrap_or_default(),
+                self.usage
+            ),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,12 +201,19 @@ impl<'a> Codemode<'a> {
         }
     }
 
-    fn helpers(
-        schemas: &[Value],
-    ) -> impl Iterator<Item = &'static (&'static str, &'static str)> + '_ {
-        HELPERS
-            .iter()
-            .filter(|(name, _)| schemas.iter().any(|s| s["function"]["name"] == *name))
+    fn helpers(schemas: &[Value]) -> impl Iterator<Item = NestedHelper<'_>> {
+        HELPERS.iter().filter_map(|&(name, result_type, usage)| {
+            let function = schemas
+                .iter()
+                .map(|s| &s["function"])
+                .find(|f| f["name"] == name)?;
+            Some(NestedHelper {
+                name,
+                function,
+                result_type,
+                usage,
+            })
+        })
     }
 
     fn execute(
@@ -159,8 +226,9 @@ impl<'a> Codemode<'a> {
     ) -> Result<(ToolOutput, StoreWrites)> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
-        let allowed: Vec<_> = Self::helpers(&self.inner.schemas(mode))
-            .map(|(name, _)| *name)
+        let schemas = self.inner.schemas(mode);
+        let catalog: Vec<_> = Self::helpers(&schemas)
+            .map(|helper| helper.entry())
             .collect();
         ensure!(
             script.len() <= SCRIPT_BYTES,
@@ -197,7 +265,7 @@ impl<'a> Codemode<'a> {
             let nested_cancel = nested.clone();
             let watchdog = scope.spawn(move || watch(child, done, cancel, &nested_cancel));
             let result = (|| {
-                send(&mut output, &(script, &allowed))?;
+                send(&mut output, &(script, &catalog))?;
                 let mut count = 0;
                 let mut images = Vec::new();
                 let mut image_bytes = 0;
@@ -223,7 +291,7 @@ impl<'a> Codemode<'a> {
                             count += 1;
                             ensure!(count <= MAX_CALLS, "Codemode nested call limit exceeded");
                             ensure!(
-                                allowed.contains(&name.as_str()),
+                                catalog.iter().any(|entry| entry.name == name),
                                 "unavailable nested tool {name}"
                             );
                             ensure!(
@@ -279,7 +347,7 @@ impl<'a> Codemode<'a> {
         Ok((result, writes))
     }
     pub fn append_guidance(&self, prompt: &mut String) {
-        if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|(name, _)| *name == "search") {
+        if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|helper| helper.name == "search") {
             return;
         }
         prompt.push_str(
@@ -327,12 +395,12 @@ impl Toolset for Codemode<'_> {
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         let mut schemas = self.inner.schemas(mode);
         let helpers = Self::helpers(&schemas)
-            .map(|(_, description)| *description)
+            .map(|helper| helper.usage)
             .collect::<Vec<_>>()
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit selected output. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas

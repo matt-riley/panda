@@ -1,5 +1,6 @@
 use super::*;
 use rquickjs::{CatchResultExt, Context as JsContext, Ctx, Exception, Function, Runtime};
+use serde_json::value::RawValue;
 use std::{cell::RefCell, io, rc::Rc};
 
 fn invoke(name: String, arguments: String) -> Result<String> {
@@ -17,7 +18,7 @@ fn exchange(message: WorkerMessage) -> Result<String> {
     result.map_err(anyhow::Error::msg)
 }
 
-fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
+fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
     let runtime = Runtime::new()?;
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
@@ -26,7 +27,8 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
     let output = Rc::new(RefCell::new(Some(String::new())));
     let buffer = output.clone();
     context.with(|ctx| -> Result<()> {
-        ctx.globals().set("__allowed", allowed)?;
+        ctx.globals()
+            .set("__catalog", ctx.json_parse(catalog.get())?)?;
         ctx.globals().set(
             "__load",
             Function::new(ctx.clone(), |ctx: Ctx<'_>, key: String| {
@@ -97,8 +99,46 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
 }
 
 pub fn worker() -> Result<()> {
-    let (script, allowed): (String, Vec<String>) = receive(&mut io::stdin().lock(), REQUEST_FRAME)?;
+    let (script, catalog): (String, Box<RawValue>) =
+        receive(&mut io::stdin().lock(), REQUEST_FRAME)?;
     ensure!(script.len() <= SCRIPT_BYTES, "script exceeds 64 KiB");
-    let result = evaluate(script, allowed).map_err(|err| err.to_string());
+    let result = evaluate(&script, &catalog).map_err(|err| err.to_string());
     send(&mut io::stdout().lock(), &WorkerMessage::Finished(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn discovery_respects_catalog_and_limit(
+            mask in 0u8..16, query in ".{0,64}", limit in 1usize..9,
+        ) {
+            let entries: Vec<_> = HELPERS.iter().enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, (name, _, usage))| json!({"name":name,"description":usage}))
+                .collect();
+            let catalog = serde_json::value::to_raw_value(&entries).unwrap();
+            let code = format!(r#"
+                const query = {}, limit = {limit};
+                const names = ALL_TOOLS.map(tool => tool.name);
+                for (const q of [query, "offset", ...names]) {{
+                    const hits = searchTools(q, {{limit}});
+                    if (hits.length > limit || hits.some(hit => !names.includes(hit.name)))
+                        throw Error("invalid result set");
+                    if (names.includes(q) && hits[0]?.name !== q)
+                        throw Error("exact name did not rank first");
+                    for (const hit of hits) {{
+                        if (describeTool(hit.name) !== hit.description) throw Error("metadata mismatch");
+                    }}
+                }}
+                text(names);
+            "#, json!(query));
+            let output = evaluate(&code, &catalog).unwrap();
+            let names: Vec<_> = entries.iter().map(|tool| &tool["name"]).collect();
+            prop_assert_eq!(output, serde_json::to_string(&names).unwrap());
+        }
+    }
 }
