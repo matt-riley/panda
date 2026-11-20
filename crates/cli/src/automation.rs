@@ -191,6 +191,15 @@ pub struct PromptedTools<'a> {
     pub prompt: String,
 }
 impl Toolset for PromptedTools<'_> {
+    fn run_in_session(
+        &self,
+        session: &Session,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(panda_core::ToolOutput, panda_core::StoreWrites)> {
+        self.tools.run_in_session(session, call, cancel, emit)
+    }
     fn system(&self) -> Result<String> {
         Ok(self.prompt.clone())
     }

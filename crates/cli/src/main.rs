@@ -349,6 +349,7 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     let mut calls_by_id = std::collections::HashMap::new();
     for m in &s.history {
         match m {
+            Message::CodemodeStore(_) => continue,
             Message::Truncated(partial) => {
                 screen.line(Tone::Dim, "Partial reply (output length limit)");
                 if !partial.reasoning.is_empty() {

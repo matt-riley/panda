@@ -81,6 +81,8 @@ Each invocation starts a fresh QuickJS worker under macOS Seatbelt. The script c
 
 Search and map honor workspace and nested `.gitignore` rules before returning up to 50 matching items per page. A later `!` rule can re-include a file if its parent directories are visible. Pass `next_offset` back as `offset` with the same arguments until it is `null`. Search items contain `path`, one-based `line`, and `text`. A positive `context` adds `before` and `after` arrays of text in file order, clipped at file boundaries. Each line is limited to 500 characters. Only matching lines count toward the offset. A context-heavy page can end early to fit the 1 MiB tool-result limit. Map items are paths. Use `text(value)` to select the text included in the saved tool result and the next model request. Nested calls appear live in the terminal and as `nested_call` events in JSON and RPC.
 
+Use `store("rank", {cursor: page.next_offset, counts})` to checkpoint a paginated search and `load("rank")` to resume it in a later script. Values follow the active session branch through reopening, compaction, and Pi JSONL export/import. A load returns a fresh JSON copy, or `undefined` for a missing key. Pass `undefined` to delete a key. Writes take effect together when the script succeeds. One value can contain 262,144 UTF-16 code units of JSON, and the combined keys and values can contain 1,048,576.
+
 A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls, 16 KiB of selected text and 12 MiB of base64-encoded image URLs. Ctrl-C cancels the worker and its active workspace read.
 
 ## Scripting

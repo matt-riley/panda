@@ -55,6 +55,14 @@ pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
             entry["data"].clone(),
         )?)]);
     }
+    if kind == "custom" && entry["customType"] == "codemode-store" {
+        // Preserve unrecognized versions verbatim without applying them to the VM.
+        return Ok(serde_json::from_value(entry["data"].clone())
+            .ok()
+            .map(Message::CodemodeStore)
+            .into_iter()
+            .collect());
+    }
     if kind == "branch_summary" {
         return Ok(vec![Message::BranchSummary(
             string(entry, "summary")?.into(),
@@ -133,6 +141,9 @@ pub(super) fn encode(
     thinking: Option<&str>,
 ) -> Result<Value> {
     let mut m = match message {
+        Message::CodemodeStore(writes) => {
+            return Ok(json!({"type":"custom","customType":"codemode-store","data":writes}));
+        }
         Message::Truncated(partial) => {
             return Ok(
                 json!({"type":"custom","customType":"panda.truncated-reply","data":partial}),

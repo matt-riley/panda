@@ -136,7 +136,7 @@ pub(crate) fn responses_body(
     let mut input = Vec::new();
     for m in history {
         match m {
-            Message::Truncated(_) => continue,
+            Message::Truncated(_) | Message::CodemodeStore(_) => continue,
             Message::BranchSummary(s) => input.push(
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")}),
             ),

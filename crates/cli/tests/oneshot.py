@@ -598,3 +598,34 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     run(["--continue"], ":compact\n:q\n")
     requests.clear()
     check_files(restored)
+
+    # The system-prompt wrapper must forward branch state on every tool round.
+    # Use a computed value so its appearance on the wire is distinguishable from the script.
+    flags = ["--codemode", "--system-prompt", "Check stored values.", *model]
+    scripts = [
+        'store("__proto__", {value:["private","cursor"].join("-")}); store("optional", null); text("saved")',
+        'const x = load("__proto__"); x.value = "changed"; text([load("__proto__").value.length, load("optional") === null]); store("optional", undefined)',
+        'text(load("optional") === undefined)',
+    ]
+    next_calls.extend(("codemode", {"code": script}) for script in scripts)
+    sid = done(run(["--mode", "json", *flags, "Remember the cursor"], ""))["session_id"]
+    results = [m["content"] for m in requests[-1][1]["messages"] if m["role"] == "tool"]
+    assert results == ["saved", "[14,true]", "true"], results
+    assert "private-cursor" not in json.dumps(requests)
+    requests.clear()
+    archive = root / "codemode-store.jsonl"
+    run(["--export-session", str(sid), str(archive)], "")
+    if os.environ.get("PANDA_TEST_PI"):
+        replies = pi_session(archive, ["get_entries", "get_messages"])
+        deltas = [e["data"] for e in replies["get_entries"]["data"]["entries"] if e.get("customType") == "codemode-store"]
+        assert deltas == [{"set":{"__proto__":{"value":"private-cursor"},"optional":None},"delete":[]},
+                          {"set":{},"delete":["optional"]}], deltas
+        assert "private-cursor" not in json.dumps(replies["get_messages"])
+    imported = run(["--import-session", str(archive)], "")
+    restored = next(json.loads(line)["session_id"] for line in imported if line.startswith("{"))
+    run(["--continue"], ":compact\n:q\n")
+    assert "private-cursor" not in json.dumps(requests)
+    requests.clear()
+    next_calls.append(("codemode", {"code": 'text([load("__proto__").value, load("optional") === undefined])'}))
+    run(["--print", "--session", str(restored), *flags, "Inspect the restored value"], "")
+    assert requests[-1][1]["messages"][-1]["content"] == '["private-cursor",true]'

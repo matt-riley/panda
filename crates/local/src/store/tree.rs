@@ -146,7 +146,7 @@ pub(super) fn restore_path(
             Message::Result { id, .. } => {
                 completed.insert(id);
             }
-            Message::Reasoning(_) => {}
+            Message::Reasoning(_) | Message::CodemodeStore(_) => {}
             Message::Assistant { calls, .. } => {
                 session.active = calls.iter().any(|c| !completed.contains(&c.id));
                 break;
