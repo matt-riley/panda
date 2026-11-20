@@ -8,10 +8,11 @@ fn invoke(name: String, arguments: String) -> Result<String> {
         "nested arguments exceed 16 KiB"
     );
     let args = serde_json::from_str(&arguments)?;
-    send(
-        &mut io::stdout().lock(),
-        &WorkerMessage::Invoke { name, args },
-    )?;
+    exchange(WorkerMessage::Invoke { name, args })
+}
+
+fn exchange(message: WorkerMessage) -> Result<String> {
+    send(&mut io::stdout().lock(), &message)?;
     let result: Result<String, String> = receive(&mut io::stdin().lock(), REPLY_FRAME)?;
     result.map_err(anyhow::Error::msg)
 }
@@ -25,6 +26,39 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
     let buffer = output.clone();
     context.with(|ctx| -> Result<()> {
         ctx.globals().set("__allowed", allowed)?;
+        ctx.globals().set(
+            "__load",
+            Function::new(ctx.clone(), |ctx: Ctx<'_>, key: String| {
+                if key.encode_utf16().count() > storage::TOTAL_CHARS {
+                    return Ok(String::new());
+                }
+                exchange(WorkerMessage::Load { key })
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            })?,
+        )?;
+        ctx.globals().set(
+            "__store",
+            Function::new(
+                ctx.clone(),
+                |ctx: Ctx<'_>, key: String, json: Option<String>| {
+                    let size = json.as_deref().map_or(0, |s| s.encode_utf16().count());
+                    if size > storage::VALUE_CHARS {
+                        return Err(Exception::throw_message(
+                            &ctx,
+                            "Codemode store value exceeds 256 Ki characters",
+                        ));
+                    }
+                    if key.encode_utf16().count() + size > storage::TOTAL_CHARS {
+                        return Err(Exception::throw_message(
+                            &ctx,
+                            "Codemode store exceeds 1 Mi characters",
+                        ));
+                    }
+                    exchange(WorkerMessage::Store { key, json })
+                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+                },
+            )?,
+        )?;
         ctx.globals().set(
             "__invoke",
             Function::new(ctx.clone(), |ctx: Ctx<'_>, name: String, args: String| {

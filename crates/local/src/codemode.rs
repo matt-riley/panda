@@ -1,8 +1,10 @@
 //! Optional read-only JavaScript composition for the native host.
+mod storage;
 mod vm;
+use storage::ScriptStore;
 
 use anyhow::{Context, Result, ensure};
-use panda_core::{Call, Cancel, Emit, Event, Mode, ToolOutput, Toolset};
+use panda_core::{Call, Cancel, Emit, Event, Mode, Session, StoreWrites, ToolOutput, Toolset};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -42,11 +44,14 @@ const HELPERS: &[(&str, &str)] = &[
 ];
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 1024;
+const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 1024;
 const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
 
 #[derive(Serialize, Deserialize)]
 enum WorkerMessage {
     Invoke { name: String, args: Value },
+    Load { key: String },
+    Store { key: String, json: Option<String> },
     Finished(Result<String, String>),
 }
 
@@ -117,7 +122,8 @@ impl<'a> Codemode<'a> {
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<ToolOutput> {
+        mut store: ScriptStore,
+    ) -> Result<(ToolOutput, StoreWrites)> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
         let allowed: Vec<_> = Self::helpers(&self.inner.schemas(mode))
@@ -162,11 +168,21 @@ impl<'a> Codemode<'a> {
                 let mut images = Vec::new();
                 let mut image_bytes = 0;
                 loop {
-                    match receive(&mut input, REQUEST_FRAME)? {
+                    match receive(&mut input, WORKER_FRAME)? {
+                        WorkerMessage::Load { key } => {
+                            send(&mut output, &Ok::<_, String>(store.load(&key)))?;
+                        }
+                        WorkerMessage::Store { key, json } => {
+                            let reply = store
+                                .store(key, json)
+                                .map(|()| "")
+                                .map_err(|e| e.to_string());
+                            send(&mut output, &reply)?;
+                        }
                         WorkerMessage::Finished(result) => {
                             let text = result.map_err(anyhow::Error::msg)?;
                             ensure!(text.len() <= OUTPUT_BYTES, "Codemode output exceeds 16 KiB");
-                            return Ok(ToolOutput { text, images });
+                            return Ok((ToolOutput { text, images }, store.writes));
                         }
                         WorkerMessage::Invoke { name, args } => {
                             cancel.check()?;
@@ -247,6 +263,26 @@ For per-file results, group the items by their path in the same loop and emit on
 }
 
 impl Toolset for Codemode<'_> {
+    fn run_in_session(
+        &self,
+        session: &Session,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
+        if call.name == "codemode" {
+            self.execute(
+                session.mode,
+                call,
+                cancel,
+                emit,
+                ScriptStore::from_history(&session.history),
+            )
+        } else {
+            self.inner.run_in_session(session, call, cancel, emit)
+        }
+    }
+
     fn system(&self) -> Result<String> {
         let mut prompt = self.inner.system()?;
         self.append_guidance(&mut prompt);
@@ -260,7 +296,7 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Limits: 64 calls, 10 seconds, 16 KiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 16 KiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
@@ -277,7 +313,8 @@ impl Toolset for Codemode<'_> {
         emit: &mut Emit,
     ) -> Result<ToolOutput> {
         if call.name == "codemode" {
-            self.execute(mode, call, cancel, emit)
+            self.execute(mode, call, cancel, emit, ScriptStore::default())
+                .map(|(output, _)| output)
         } else {
             self.inner.run_stream(mode, call, cancel, emit)
         }

@@ -52,6 +52,7 @@ impl From<String> for ToolOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    CodemodeStore(StoreWrites),
     Truncated(LengthStop),
     BranchSummary(String),
     User(String),
@@ -74,6 +75,19 @@ pub enum Message {
         #[serde(default, rename = "nestedReads", skip_serializing_if = "Vec::is_empty")]
         nested_reads: Vec<String>,
     },
+}
+
+/// Pi's branch-local codemode-store custom entry. Applied in delete-then-set order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoreWrites {
+    pub set: std::collections::BTreeMap<String, Value>,
+    pub delete: std::collections::BTreeSet<String>,
+}
+
+impl StoreWrites {
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.delete.is_empty()
+    }
 }
 
 /// A terminal provider response. Tool fragments are audit data, never executable calls.
@@ -167,7 +181,13 @@ impl Session {
     fn resolved_at(&self, i: usize) -> &[Message] {
         match self.context_edits.get(&i) {
             Some(replacement) => replacement,
-            None if matches!(self.history[i], Message::Truncated(_)) => &[],
+            None if matches!(
+                self.history[i],
+                Message::Truncated(_) | Message::CodemodeStore(_)
+            ) =>
+            {
+                &[]
+            }
             None => std::slice::from_ref(&self.history[i]),
         }
     }
@@ -209,8 +229,11 @@ impl Session {
                     .iter()
                     .any(|m| matches!(m, Message::Truncated(_)))
         }) {
-            let tail = &self.history[u.through..];
-            let bytes = serde_json::to_vec(tail).map_or(0, |v| v.len().saturating_sub(2));
+            let tail: Vec<_> = self.history[u.through..]
+                .iter()
+                .filter(|m| !matches!(m, Message::CodemodeStore(_)))
+                .collect();
+            let bytes = serde_json::to_vec(&tail).map_or(0, |v| v.len().saturating_sub(2));
             return u
                 .input
                 .saturating_add(u.output)
@@ -234,7 +257,7 @@ impl Session {
         let mut bytes = 0u64;
         let mut boundary = limit;
         for (i, message) in self.history.iter().enumerate().skip(previous).rev() {
-            if matches!(message, Message::Truncated(_)) {
+            if matches!(message, Message::Truncated(_) | Message::CodemodeStore(_)) {
                 continue;
             }
             let mut starts_exchange = message.user();
@@ -361,6 +384,9 @@ fn summarize(
             Ok(())
         };
     for message in messages {
+        if matches!(message, Message::CodemodeStore(_)) {
+            continue;
+        }
         for ch in message.summary_text().chars().chain(std::iter::once('\n')) {
             chunk.push(ch);
             if chunk.len() >= chunk_limit {
@@ -450,6 +476,20 @@ pub trait Store {
     fn save(&mut self, s: &mut Session) -> Result<()>;
 }
 pub trait Toolset {
+    /// The caller commits any returned branch-local writes atomically with the tool result.
+    fn run_in_session(
+        &self,
+        session: &Session,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
+        Ok((
+            self.run_stream(session.mode, call, cancel, emit)?,
+            StoreWrites::default(),
+        ))
+    }
+
     fn run_stream(
         &self,
         mode: Mode,
@@ -632,17 +672,21 @@ pub fn turn_message(
             cancel.check()?;
             emit(Event::Calling(call.clone()));
             let mut nested_reads = std::collections::BTreeSet::new();
-            let result = tools.run_stream(s.mode, &call, cancel, &mut |event| match event {
+            let result = tools.run_in_session(&s, &call, cancel, &mut |event| match event {
                 Event::NestedRead(path) => {
                     nested_reads.insert(path);
                 }
                 other => emit(other),
             });
             let is_error = result.is_err();
-            let output = result.unwrap_or_else(|e| format!("tool error: {e}").into());
+            let (output, writes) = result
+                .unwrap_or_else(|e| (format!("tool error: {e}").into(), StoreWrites::default()));
             cancel.check()?;
             if !output.images.is_empty() && pending_image_exchange.is_none() {
                 pending_image_exchange = s.history.iter().rposition(Message::user);
+            }
+            if !writes.is_empty() {
+                s.history.push(Message::CodemodeStore(writes));
             }
             s.history.push(Message::Result {
                 id: call.id,
@@ -695,7 +739,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                 break;
             }
             Message::Result { id, .. } => completed.push(id.clone()),
-            Message::Reasoning(_) => {}
+            Message::Reasoning(_) | Message::CodemodeStore(_) => {}
             Message::BranchSummary(_) | Message::Truncated(_) => break,
             Message::User(_) | Message::Images { .. } => break,
         }

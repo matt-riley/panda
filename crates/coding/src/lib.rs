@@ -22,7 +22,28 @@ impl<'a> SelectedTools<'a> {
         Ok(Self { inner, names })
     }
 }
+impl SelectedTools<'_> {
+    fn check(&self, call: &Call) -> Result<()> {
+        anyhow::ensure!(
+            self.names.contains(&call.name),
+            "tool {} unavailable for this run",
+            call.name
+        );
+        Ok(())
+    }
+}
 impl Toolset for SelectedTools<'_> {
+    fn run_in_session(
+        &self,
+        session: &Session,
+        call: &Call,
+        cancel: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
+        self.check(call)?;
+        self.inner.run_in_session(session, call, cancel, emit)
+    }
+
     fn system(&self) -> Result<String> {
         self.inner.system()
     }
@@ -48,11 +69,7 @@ impl Toolset for SelectedTools<'_> {
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<ToolOutput> {
-        anyhow::ensure!(
-            self.names.contains(&call.name),
-            "tool {} unavailable for this run",
-            call.name
-        );
+        self.check(call)?;
         self.inner.run_stream(mode, call, cancel, emit)
     }
 }

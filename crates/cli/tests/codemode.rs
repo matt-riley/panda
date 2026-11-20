@@ -621,3 +621,129 @@ fn shell_timeout_stops_process_group() -> Result<()> {
     assert!(!root.path().join("late").exists());
     Ok(())
 }
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
+    use panda_local::store::Disk;
+
+    struct Script<'a>(&'a str);
+    impl Provider for Script<'_> {
+        fn reply(
+            &mut self,
+            _: &str,
+            history: &[Message],
+            _: &[Value],
+            _: &Cancel,
+            _: &mut Emit,
+        ) -> Result<(String, Vec<Call>)> {
+            match history.last().unwrap() {
+                Message::User(_) => Ok((
+                    String::new(),
+                    vec![call("codemode", json!({"code": self.0}))],
+                )),
+                Message::Result { text, .. } => Ok((text.clone(), vec![])),
+                _ => anyhow::bail!("unexpected history"),
+            }
+        }
+    }
+    fn node(db: &mut Disk, text: &str) -> Result<i64> {
+        Ok(db
+            .tree()?
+            .into_iter()
+            .find(|n| n.text == text)
+            .expect("saved branch answer")
+            .id)
+    }
+
+    let root = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    fs::write(root.path().join("a.rs"), "TODO\n".repeat(34))?;
+    fs::write(root.path().join("b.rs"), "TODO\n".repeat(17))?;
+    let mut offsets = vec![];
+    let mut run = |db: &mut Disk, script: &str| -> Result<String> {
+        let base = coding(root.path())?;
+        let tools = Codemode::new(&base, EXE.as_ref());
+        turn(
+            &mut Script(script),
+            db,
+            &tools,
+            "Run".into(),
+            &Cancel::default(),
+            &mut |e| {
+                if let Event::NestedCall { call, .. } = e {
+                    assert_eq!(call.name, "search");
+                    offsets.push(call.args["offset"].as_u64().unwrap());
+                }
+            },
+        )?;
+        let Message::Assistant { text, .. } = db.load()?.history.pop().unwrap() else {
+            panic!("missing answer")
+        };
+        Ok(text)
+    };
+    let page = r#"
+        const state = load("rank") ?? {cursor:0, counts:{}};
+        const p = tools.search({query:"TODO", offset:state.cursor});
+        for (const {path} of p.items) state.counts[path] = (state.counts[path] ?? 0) + 1;
+        state.cursor = p.next_offset;
+        store("rank", state);
+        text(state.cursor === null ? Object.entries(state.counts).sort((a,b)=>b[1]-a[1]) : state.cursor);
+    "#;
+    let mut db = Disk::open(state.path(), root.path(), None)?;
+    let sid = db.id();
+    assert_eq!(run(&mut db, page)?, "50");
+    let common = node(&mut db, "50")?;
+    drop(db);
+    let mut db = Disk::open(state.path(), root.path(), Some(sid))?;
+    let ranking = r#"[["a.rs",34],["b.rs",17]]"#;
+    assert_eq!(run(&mut db, page)?, ranking);
+    db.navigate(common)?;
+    let inspect = r#"text(load("rank"))"#;
+    let cursor = json!({"cursor":50,"counts":{"a.rs":34,"b.rs":16}});
+    assert_eq!(
+        serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
+        cursor
+    );
+    assert!(
+        run(
+            &mut db,
+            r#"store("rank", {cursor:999}); throw Error("abandoned")"#
+        )?
+        .contains("abandoned")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
+        cursor
+    );
+
+    let mut archive = Vec::new();
+    db.export_pi(&mut archive)?;
+    let entries = std::str::from_utf8(&archive)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<serde_json::Result<Vec<Value>>>()?;
+    let writes: Vec<_> = entries
+        .iter()
+        .filter(|e| e["type"] == "custom" && e["customType"] == "codemode-store")
+        .collect();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(
+        writes[0]["data"],
+        json!({"set":{"rank":cursor},"delete":[]})
+    );
+    assert_eq!(writes[1]["data"]["set"]["rank"]["cursor"], Value::Null);
+    let mut restored = Disk::import_pi(state.path(), root.path(), archive.as_slice())?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&run(&mut restored, inspect)?)?,
+        cursor
+    );
+    let completed = node(&mut restored, ranking)?;
+    restored.navigate(completed)?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&run(&mut restored, inspect)?)?,
+        json!({"cursor":null,"counts":{"a.rs":34,"b.rs":17}})
+    );
+    assert_eq!(offsets, [0, 50]);
+    Ok(())
+}
