@@ -41,6 +41,8 @@ pub struct Options {
     pub thinking: Option<String>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
+    pub trust_project: bool,
+    pub recent_override: Option<u64>,
     pub prompt: String,
 }
 impl Options {
@@ -49,6 +51,13 @@ impl Options {
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "--trust-project" => out.trust_project = true,
+                "--keep-recent-tokens" => {
+                    out.recent_override =
+                        Some(it.next().and_then(|v| v.parse().ok()).context(
+                            "expected an unsigned token count after --keep-recent-tokens",
+                        )?)
+                }
                 "--codemode" => {
                     if out.codemode == CodemodeExposure::Off {
                         out.codemode = CodemodeExposure::Alongside;
@@ -211,7 +220,8 @@ pub fn prompt_text(value: &str) -> Result<String> {
 /// Keep the turn's token budgeting, retries and tool rounds on the same prompt.
 pub struct PromptedTools<'a> {
     pub tools: &'a (dyn Toolset + Sync),
-    pub prompt: String,
+    pub prompt: Option<String>,
+    pub index: &'a std::sync::RwLock<String>,
 }
 impl Toolset for PromptedTools<'_> {
     fn run_in_session(
@@ -224,7 +234,16 @@ impl Toolset for PromptedTools<'_> {
         self.tools.run_in_session(session, call, cancel, emit)
     }
     fn system(&self) -> Result<String> {
-        Ok(self.prompt.clone())
+        let mut prompt = match &self.prompt {
+            Some(p) => p.clone(),
+            None => self.tools.system()?,
+        };
+        let index = self.index.read().unwrap();
+        if !index.is_empty() {
+            prompt.push_str("\nAvailable skills:\n");
+            prompt.push_str(&index);
+        }
+        Ok(prompt)
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         self.tools.schemas(mode)

@@ -7,6 +7,7 @@ mod markdown;
 mod picker;
 mod renderer;
 mod screen;
+mod settings;
 mod ui;
 mod vim;
 use anyhow::{Context, Result, bail, ensure};
@@ -26,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -300,27 +301,6 @@ fn usage(s: &Session) -> String {
     }
     text
 }
-fn keep_recent_tokens(state: &Path) -> Result<Option<u64>> {
-    #[derive(serde::Deserialize, Default)]
-    struct Compaction {
-        #[serde(rename = "keepRecentTokens")]
-        keep_recent_tokens: Option<u64>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Settings {
-        #[serde(default)]
-        compaction: Compaction,
-    }
-
-    let path = state.join("settings.json");
-    if !path.try_exists()? {
-        return Ok(None);
-    }
-    let settings: Settings = serde_json::from_slice(&fs::read(&path)?)
-        .with_context(|| format!("reading {}", path.display()))?;
-    Ok(settings.compaction.keep_recent_tokens)
-}
-
 fn configure_context(
     db: &mut dyn Store,
     state: &Path,
@@ -488,7 +468,16 @@ fn run(
     let mut options = automation::Options::parse(&args, interactive_terminal)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
-    let recent = keep_recent_tokens(&state)?;
+    let project = panda_local::resources::project_root(&root);
+    let mut settings = settings::Settings::read(&state, project)?;
+    let cli_recent = options.recent_override;
+    let templates =
+        panda_local::prompts::Templates::discover(&state, project, options.trust_project)?;
+    if options.prompt.starts_with('/')
+        && let Some(prompt) = templates.expand(&options.prompt)?
+    {
+        options.prompt = prompt;
+    }
     let executable = std::env::current_exe()?;
     #[cfg(test)]
     let executable = std::env::var_os("PANDA_TEST_WORKER").map_or(executable, PathBuf::from);
@@ -498,13 +487,22 @@ fn run(
         _ => state.clone(),
     };
     let home = PathBuf::from(std::env::var_os("HOME").context("missing HOME")?);
-    let mut roots = vec![
-        root.join(".agents/skills"),
-        root.join(".pi/skills"),
+    let mut roots = Vec::new();
+    for dir in panda_local::resources::project_dirs(&root)
+        .into_iter()
+        .rev()
+    {
+        roots.extend(
+            [dir.join(".agents/skills"), dir.join(".pi/skills")]
+                .into_iter()
+                .filter(|path| path.canonicalize().is_ok_and(|real| real == *path)),
+        );
+    }
+    roots.extend([
         home.join(".agents/skills"),
         home.join(".pi/agent/skill-library"),
         home.join(".pi/agent/skills"),
-    ];
+    ]);
     if let Some(extra) = std::env::var_os("PANDA_SKILL_ROOTS") {
         roots.extend(std::env::split_paths(&extra))
     }
@@ -561,13 +559,24 @@ fn run(
             &provider_tools
         }
     };
-    let prompted;
-    let tools = if options.system_prompt.is_some()
+    let index = std::sync::RwLock::new(if settings.skill_index {
+        coding.skills.startup_index()?
+    } else {
+        String::new()
+    });
+    let replacement = match &options.system_prompt {
+        Some(value) => Some(automation::prompt_text(value)?),
+        None => settings::system_file(&state, project, options.trust_project, "SYSTEM.md")?,
+    };
+    let appended =
+        settings::system_file(&state, project, options.trust_project, "APPEND_SYSTEM.md")?;
+    let prompt = if replacement.is_some()
+        || appended.is_some()
         || !options.append_system_prompt.is_empty()
         || options.codemode == CodemodeExposure::Only
     {
-        let mut prompt = if let Some(value) = &options.system_prompt {
-            let mut prompt = coding.system_with_base(&automation::prompt_text(value)?)?;
+        let mut prompt = if let Some(value) = &replacement {
+            let mut prompt = coding.system_with_base(value)?;
             if options.codemode != CodemodeExposure::Off {
                 codemode.append_guidance(&mut prompt);
             }
@@ -578,15 +587,24 @@ fn run(
         if options.codemode == CodemodeExposure::Only {
             prompt.push_str("\nUse codemode for every tool call. Follow tool-selection guidance inside the script using the available helpers.");
         }
+        if let Some(text) = appended {
+            prompt.push_str("\n\n");
+            prompt.push_str(&text);
+        }
         for value in &options.append_system_prompt {
             prompt.push_str("\n\n");
             prompt.push_str(&automation::prompt_text(value)?);
         }
-        prompted = automation::PromptedTools { tools, prompt };
-        &prompted as &(dyn Toolset + Sync)
+        Some(prompt)
     } else {
-        tools
+        None
     };
+    let prompted = automation::PromptedTools {
+        tools,
+        prompt,
+        index: &index,
+    };
+    let tools = &prompted as &(dyn Toolset + Sync);
     let selected = state.join("model.json");
     let mut disk = options
         .session_id
@@ -622,10 +640,18 @@ fn run(
     let session_id = disk.as_ref().map(Disk::id);
     let mut memory = panda_memory::MemoryStore::default();
     let store: &mut (dyn Store + Send) = match &mut disk {
-        Some(disk) => disk,
-        None => &mut memory,
+        Some(disk) => {
+            disk.invocation_keep_recent_tokens = cli_recent;
+            disk
+        }
+        None => {
+            let mut session = memory.load()?;
+            session.invocation_keep_recent_tokens = cli_recent;
+            memory.save(&mut session)?;
+            &mut memory
+        }
     };
-    configure_context(store, &state, &p, &model, recent)?;
+    configure_context(store, &state, &p, &model, settings.keep)?;
     let cancel = Cancel::default();
     let signal = cancel.clone();
     ctrlc::set_handler(move || signal.stop())?;
@@ -655,6 +681,7 @@ fn run(
     let mut initial_prompt = (!options.prompt.is_empty()).then_some(options.prompt);
 
     loop {
+        db.invocation_keep_recent_tokens = cli_recent;
         if interactive {
             screen.footer.session = format!("{mode:?} · session {}", db.id());
             screen.footer.model = format!("{p}/{model}");
@@ -737,6 +764,18 @@ fn run(
             } else {
                 line
             };
+            let expanded = if allow_commands
+                && line.starts_with(':')
+                && !HELP
+                    .split(" · ")
+                    .any(|s| s.split_whitespace().next() == line.split_whitespace().next())
+            {
+                templates.expand(line)?
+            } else {
+                None
+            };
+            let allow_commands = allow_commands && expanded.is_none();
+            let line = expanded.as_deref().unwrap_or(line);
             let mut words = line.split_whitespace();
             let first = if allow_commands {
                 words.next().unwrap()
@@ -754,6 +793,30 @@ fn run(
                     db.save(&mut s)?;
                     mode = s.mode;
                     screen.line(Tone::Dim, &format!("{mode:?} mode"))
+                }
+                ":prompts" => {
+                    for name in templates.names() {
+                        screen.line(Tone::Dim, &format!("/{name}"));
+                    }
+                }
+                ":settings" => {
+                    match words.collect::<Vec<_>>().as_slice() {
+                        [] => {}
+                        ["reload"] => {
+                            let next = settings::Settings::read(&state, project)?;
+                            configure_context(&mut db, &state, &p, &model, next.keep)?;
+                            *index.write().unwrap() = if next.skill_index {
+                                coding.skills.startup_index()?
+                            } else {
+                                String::new()
+                            };
+                            settings = next;
+                        }
+                        _ => bail!("use :settings or :settings reload"),
+                    }
+                    for row in settings.describe(cli_recent).lines() {
+                        screen.line(Tone::Dim, row);
+                    }
                 }
                 ":session" => {
                     let s = db.load()?;
@@ -792,7 +855,7 @@ fn run(
                     screen.clipboard = None;
                     screen.clear();
                     screen.footer.usage.clear();
-                    configure_context(&mut db, &state, &p, &model, recent)?;
+                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
                     mode = show(&db, &mut screen)?;
                 }
                 ":tree" if interactive => {
@@ -955,7 +1018,7 @@ fn run(
                         }
                         screen.clear();
                         screen.footer.usage.clear();
-                        configure_context(&mut db, &state, &p, &model, recent)?;
+                        configure_context(&mut db, &state, &p, &model, settings.keep)?;
                         mode = show(&db, &mut screen)?
                     }
                 }
@@ -1010,7 +1073,7 @@ fn run(
                     let id = provider_id(words.next().unwrap_or(&p))?;
                     let filter = words.next().unwrap_or("").to_lowercase();
                     let entries = model_entries(&state, id, false)?;
-                    configure_context(&mut db, &state, &p, &model, recent)?;
+                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
                     catalogue = entries
                         .into_iter()
                         .map(|(m, _)| m)
@@ -1088,7 +1151,7 @@ fn run(
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
                         (p, model) = (id.into(), m.into());
-                        configure_context(&mut db, &state, &p, &model, recent)?;
+                        configure_context(&mut db, &state, &p, &model, settings.keep)?;
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))
                 }
@@ -1135,6 +1198,9 @@ fn run(
                 }
                 ":help" => screen.line(Tone::Dim, HELP),
                 ":skills" => {
+                    for diagnostic in coding.skills.diagnostics()? {
+                        screen.line(Tone::Dim, &safe(&diagnostic));
+                    }
                     let matches = coding.skills.ranked(line[first.len()..].trim())?;
                     if matches.is_empty() {
                         screen.line(Tone::Dim, "No matching skills. Try :skills to list all, or add a skill directory to PANDA_SKILL_ROOTS and restart.");
