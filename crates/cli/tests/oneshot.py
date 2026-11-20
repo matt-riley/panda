@@ -565,7 +565,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         resume = [*interface, *flags, "--session", str(sid)]
         script = """
             const page = tools.search({query:"TODO", offset:load("cursor")});
-            for (const hit of page.items) text([hit.path, hit.line, hit.text]);
+            text("last page");
+            for (const hit of page.items) console.warn([hit.path, hit.line, hit.text]);
             store("cursor", page.next_offset);
             throw Error(["page", "failed"].join("-"));
         """
@@ -576,6 +577,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         assert result["role"] == "tool"
         content = result["content"]
         hit = '["b.rs",17,"TODO"]'
+        assert f"last page\n<console_output>\n{hit}\n</console_output>\nScript error:" in content, content
         assert content.count(hit) == content.count("page-failed") == 1, content
         assert content.index(hit) < content.index("page-failed"), content
         if interface == ["--mode", "json"]:
@@ -613,10 +615,11 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         let offset = 0;
         do {
             const page = tools[hit.name]({query: "TODO", offset});
+            console.log("searched", offset);
             for (const {path} of page.items) counts.set(path, (counts.get(path) ?? 0) + 1);
             offset = page.next_offset;
         } while (offset !== null);
-        text([ALL_TOOLS.map(tool => tool.name).sort(), hit.name, [...counts].sort((a,b) => b[1]-a[1])]);
+        return [ALL_TOOLS.map(tool => tool.name).sort(), hit.name, [...counts].sort((a,b) => b[1]-a[1])];
     """
     read_version = """
         let blocked = false;
@@ -638,7 +641,9 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
             flags = [flag, "--tools", "codemode,read,search"]
             declared = {"codemode"} if only else selected
             found, nested = exercise_tools(interface, flags, declared, ("codemode", {"code": rank}), "Rank TODOs")
-            assert json.loads(found) == [["read", "search"], "search", [["a.rs", 34], ["b.rs", 17]]], found
+            ranking, console = found.split("\n<console_output>\n")
+            assert json.loads(ranking) == [["read", "search"], "search", [["a.rs", 34], ["b.rs", 17]]], found
+            assert console == "searched 0\nsearched 50\n</console_output>", found
             if interface == ["--mode", "json"]:
                 assert nested == [("search", {"query": "TODO", "offset": n}) for n in (0, 50)], nested
 

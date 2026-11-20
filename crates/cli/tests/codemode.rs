@@ -501,6 +501,12 @@ fn reads_limits_and_cancellation() -> Result<()> {
     );
     assert_eq!(run("text('first'); return; text('unreachable');")?, "first");
     assert_eq!(run("return null;")?, "null");
+    assert_eq!(
+        run(
+            "console.debug(); text('ok'); console.info({count:2}, null); console.error(undefined, NaN); exit();"
+        )?,
+        "ok\n<console_output>\n\n{\"count\":2} null\nundefined NaN\n</console_output>"
+    );
     assert_eq!(run("text(''); return false;")?, "\nfalse");
     assert_eq!(run("return 'x'.repeat(16384)")?, "x".repeat(16384));
     assert!(!root.path().join(".panda").exists());
@@ -779,19 +785,23 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
         cursor
     );
+    let console_report = r#"text("HEAD"); console.info("🦀".repeat(2400)); console.debug("MIDDLE"); console.log("é".repeat(4800)); console.error("TAIL");"#;
     let failed = run(
         &mut db,
-        &format!(r#"store("rank", {{cursor:999}}); {report} throw Error("abandoned")"#),
+        &format!(r#"store("rank", {{cursor:999}}); {console_report} throw Error("abandoned")"#),
     )?;
     let (preview, diagnostic) = failed
         .split_once("\nScript error: ")
         .expect("failure diagnostic");
     assert_eq!(diagnostic.matches("abandoned").count(), 1);
     let preview = preview.strip_prefix("tool error: ").unwrap();
-    assert!(preview.starts_with("HEAD\n") && preview.contains("\nTAIL\n"));
+    assert!(
+        preview.starts_with("HEAD\n<console_output>\n")
+            && preview.contains("\nTAIL\n</console_output>")
+    );
     assert!(!preview.contains("MIDDLE") && preview.len() <= 16 * 1024);
     let (_, path) = preview.rsplit_once("\nFull output: ").unwrap();
-    let read = call("read", json!({"path":path,"offset":3,"limit":1}));
+    let read = call("read", json!({"path":path,"offset":4,"limit":1}));
     assert_eq!(
         tools.run(Mode::Plan, &read, &Cancel::default())?,
         "MIDDLE\n"
@@ -805,6 +815,10 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         throw err;"#;
     for (completion, error) in [
         (throwing_getter, "diagnostic"),
+        (
+            r#"console.log("x".repeat(524288)); try { text("y".repeat(524288)); } catch { exit(); }"#,
+            "1 MiB",
+        ),
         (r#"try { text("x".repeat(1048577)); } catch {}"#, "1 MiB"),
         (r#"return "x".repeat(1048577)"#, "1 MiB"),
         (

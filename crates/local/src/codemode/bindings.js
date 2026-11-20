@@ -65,10 +65,26 @@
         matches.sort((a, b) => b.exact - a.exact || b.covered - a.covered || b.score - a.score);
         return matches.slice(0, limit).map(match => match.entry);
     };
-    globalThis.text = value => emit(typeof value === "string" ? value : stringify(value));
-})(globalThis.__invoke, globalThis.__text, globalThis.__catalog, globalThis.__load, globalThis.__store);
+    globalThis.text = value => emit(typeof value === "string" ? value : stringify(value), false);
+    function formatArgument(value) {
+        if (typeof value === "string") return value;
+        if (value instanceof Error) {
+            const message = String(value);
+            const stack = value.stack;
+            return typeof stack === "string" && stack ? message + "\n" + stack.trimEnd() : message;
+        }
+        if (typeof value === "number") return String(value);
+        try {
+            return stringify(value) ?? String(value);
+        } catch {
+            return String(value);
+        }
+    }
+    const log = (...args) => emit(args.map(formatArgument).join(" "), true);
+    globalThis.console = Object.freeze({ log, info: log, warn: log, error: log, debug: log });
+})(globalThis.__invoke, globalThis.__emit, globalThis.__catalog, globalThis.__load, globalThis.__store);
 delete globalThis.__load;
 delete globalThis.__store;
 delete globalThis.__catalog;
 delete globalThis.__invoke;
-delete globalThis.__text;
+delete globalThis.__emit;
