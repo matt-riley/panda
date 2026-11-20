@@ -467,7 +467,13 @@ mod delivery_tests {
             fn schemas(&self, _: Mode) -> Vec<Value> {
                 vec![json!({"function":{"name":"read"}})]
             }
-            fn run(&self, _: Mode, _: &Call, cancel: &Cancel) -> Result<String> {
+            fn run(
+                &self,
+                _: &Session,
+                _: &Call,
+                cancel: &Cancel,
+                _: &mut Emit,
+            ) -> Result<(ToolOutput, StoreWrites)> {
                 self.0.send(())?;
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while Instant::now() < deadline {

@@ -13,6 +13,9 @@ run = "cargo clippy --locked --workspace --all-targets -- -D warnings"
 description = "Run the complete suite on native macOS, including Seatbelt isolation"
 run = 'pi_bin=$(command -v pi) && PANDA_TEST_PI="$pi_bin" cargo test --locked --workspace -- --include-ignored'
 
+[tasks.linux-ci]
+depends = ["lint", "portable-test"]
+
 [tasks.portable-test]
 description = "Exercise the reusable host, agent loop, and providers on Linux"
 run = "cargo test --locked -p panda-core -p panda-coding -p panda-memory -p panda-providers"

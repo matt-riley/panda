@@ -461,9 +461,15 @@ impl Toolset for Batch {
     fn schemas(&self, _: Mode) -> Vec<Value> {
         vec![]
     }
-    fn run(&self, _: Mode, c: &Call, _: &Cancel) -> Result<String> {
+    fn run(
+        &self,
+        _: &Session,
+        c: &Call,
+        _: &Cancel,
+        _: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(c.id.clone())
+        Ok((c.id.clone().into(), StoreWrites::default()))
     }
 }
 struct Chat<'a> {
