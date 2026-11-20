@@ -98,9 +98,20 @@ pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
         }
         "toolResult" => {
             let c = content(&m["content"])?;
+            let details = serde_json::from_value(m["details"]["pandaToolDetails"].clone())
+                .unwrap_or_default();
+            let text = if matches!(details, Some(panda_core::ToolDetails::Codemode { .. })) {
+                m["details"]["pandaResultText"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or(c.text)
+            } else {
+                c.text
+            };
             messages.push(Message::Result {
                 id: string(m, "toolCallId")?.into(),
-                text: c.text,
+                details,
+                text,
                 images: c.images,
                 nested_reads: serde_json::from_value(m["details"]["pandaNestedReads"].clone())
                     .unwrap_or_default(),
@@ -120,15 +131,25 @@ pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
 }
 
 fn blocks(text: &str, images: &[String]) -> Result<Vec<Value>> {
-    let mut out = vec![json!({"type":"text","text":text})];
-    for url in images {
-        let Some((mime, data)) = url
-            .strip_prefix("data:")
-            .and_then(|v| v.split_once(";base64,"))
-        else {
-            bail!("Pi images require a base64 data URL")
-        };
-        out.push(json!({"type":"image","mimeType":mime,"data":data}));
+    ordered_blocks(text, images, None)
+}
+fn ordered_blocks(
+    text: &str,
+    images: &[String],
+    details: Option<&panda_core::ToolDetails>,
+) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for part in panda_core::parts(text, images, details) {
+        match part {
+            panda_core::Part::Text(t) => out.push(json!({"type":"text","text":t})),
+            panda_core::Part::Image(url) => {
+                let (mime, data) = url
+                    .strip_prefix("data:")
+                    .and_then(|v| v.split_once(";base64,"))
+                    .context("Pi images require a base64 data URL")?;
+                out.push(json!({"type":"image","mimeType":mime,"data":data}));
+            }
+        }
     }
     Ok(out)
 }
@@ -157,11 +178,18 @@ pub(super) fn encode(
             images,
             is_error,
             nested_reads,
+            details,
         } => {
             let mut result = json!({"role":"toolResult","toolCallId":id,"toolName":tool_name.context("tool result has no matching ancestor call")?,
-            "content":blocks(text,images)?,"isError":is_error});
+            "content":ordered_blocks(text,images,details.as_ref())?,"isError":is_error});
             if !nested_reads.is_empty() {
                 result["details"] = json!({"pandaNestedReads":nested_reads});
+            }
+            if let Some(details) = details {
+                result["details"]["pandaToolDetails"] = json!(details);
+                if matches!(details, panda_core::ToolDetails::Codemode { .. }) {
+                    result["details"]["pandaResultText"] = json!(text);
+                }
             }
             result
         }

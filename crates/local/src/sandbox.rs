@@ -134,6 +134,16 @@ impl Native {
 
     fn exec_file(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         let input = serde_json::to_vec(args)?;
+        let limit = match name {
+            // An 8 MiB base64 image or 1 MiB of JSON-escaped UTF-8 text.
+            "read" => crate::files::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024,
+            // Each replacement copies part of the JSON input and gains two byte offsets.
+            "edit" => input
+                .len()
+                .saturating_mul(5)
+                .saturating_add(6 * crate::MAX_TOOL_RESULT_BYTES + 1024),
+            _ => 1_100_000,
+        };
         let mut proc = self.command(
             &self.worker,
             &["--file-worker", name],
@@ -158,20 +168,14 @@ impl Native {
                 Ok(bytes)
             })
         }
-        let limit = if name == "read" {
-            // An 8 MiB base64 image or 1 MiB of JSON-escaped UTF-8 text.
-            (crate::files::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024) as u64
-        } else {
-            1_100_000
-        };
-        let stdout = drain(child.stdout.take().unwrap(), limit);
+        let stdout = drain(child.stdout.take().unwrap(), limit as u64);
         let stderr = drain(child.stderr.take().unwrap(), 1_100_000);
         let status = wait_group(child, Duration::from_secs(120), cancel, || Ok(false))?;
         let _ = writer.join();
         let out = stdout.join().unwrap()?;
         let err = stderr.join().unwrap()?;
         let error = String::from_utf8_lossy(&err);
-        if name == "read" {
+        if matches!(name, "read" | "edit") {
             ensure!(status.success(), "command {status}: {error}");
             return Ok(String::from_utf8(out)?);
         }
@@ -231,7 +235,7 @@ impl Workspace for Native {
             return shell::run(proc, &self.root, timeout, cancel, emit).map(Into::into);
         }
         let result = self.exec_file(name, args, cancel)?;
-        if name == "read" {
+        if matches!(name, "read" | "edit") {
             Ok(serde_json::from_str(&result)?)
         } else {
             Ok(result.into())

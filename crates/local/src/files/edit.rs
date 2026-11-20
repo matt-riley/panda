@@ -26,7 +26,7 @@ fn locate<'a>(original: &str, item: &'a Value) -> Result<Replacement<'a>> {
     })
 }
 
-pub(super) fn apply(original: &str, args: &Value) -> Result<(String, String)> {
+pub(super) fn apply(original: &str, args: &Value) -> Result<(String, panda_core::ToolOutput)> {
     let items = match args.get("edits") {
         None => std::slice::from_ref(args),
         Some(batch) => {
@@ -59,6 +59,7 @@ pub(super) fn apply(original: &str, args: &Value) -> Result<(String, String)> {
     let mut updated = String::with_capacity(original.len());
     let mut cursor = 0;
     let mut hunk_ends = Vec::new();
+    let mut patch = Vec::new();
     for edit in replacements {
         ensure!(
             edit.range.start >= cursor,
@@ -75,11 +76,36 @@ pub(super) fn apply(original: &str, args: &Value) -> Result<(String, String)> {
         updated.push_str(gap);
         updated.push_str(edit.text);
         cursor = edit.range.end;
+        if original[edit.range.clone()] != *edit.text {
+            patch.push(panda_core::Replacement {
+                start_byte: edit.range.start,
+                end_byte: edit.range.end,
+                replacement: edit.text.into(),
+            });
+        }
     }
     updated.push_str(&original[cursor..]);
     hunk_ends.push((original.len(), updated.len()));
     let report = edit_report(original, &updated, hunk_ends);
-    Ok((updated, report))
+    let first_changed_line = (updated != original).then(|| {
+        1 + original
+            .bytes()
+            .zip(updated.bytes())
+            .take_while(|(a, b)| a == b)
+            .filter(|(a, _)| *a == b'\n')
+            .count()
+    });
+    Ok((
+        updated,
+        panda_core::ToolOutput {
+            text: report,
+            details: Some(panda_core::ToolDetails::Edit {
+                first_changed_line,
+                patch,
+            }),
+            images: vec![],
+        },
+    ))
 }
 
 fn edit_report(original: &str, updated: &str, hunk_ends: Vec<(usize, usize)>) -> String {

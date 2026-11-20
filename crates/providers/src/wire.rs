@@ -159,16 +159,41 @@ pub(crate) fn responses_body(
                 }
             }
             Message::Result {
-                id, text, images, ..
+                id,
+                text,
+                images,
+                details,
+                ..
             } => {
                 let output = if images.is_empty() {
                     json!(text)
                 } else {
-                    let mut parts = vec![json!({"type":"input_text","text":text})];
-                    parts.extend(
-                        images
+                    let mut parts = Vec::new();
+                    if let Some(panda_core::ToolDetails::Codemode {
+                        images: positions, ..
+                    }) = details
+                        && !positions.is_empty()
+                    {
+                        let paths = positions
                             .iter()
-                            .map(|url| json!({"type":"input_image","image_url":url})),
+                            .map(|p| p.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        parts.push(
+                            json!({"type":"input_text","text":format!("Saved images: {paths}")}),
+                        );
+                    }
+                    parts.extend(
+                        panda_core::parts(text, images, details.as_ref())
+                            .into_iter()
+                            .map(|part| match part {
+                                panda_core::Part::Text(text) => {
+                                    json!({"type":"input_text","text":text})
+                                }
+                                panda_core::Part::Image(url) => {
+                                    json!({"type":"input_image","image_url":url})
+                                }
+                            }),
                     );
                     Value::Array(parts)
                 };
@@ -209,6 +234,7 @@ mod tests {
                     .collect(),
             },
             Message::Result {
+                details: None,
                 id: "a".into(),
                 text: "picture".into(),
                 images: vec![url.into()],
@@ -242,6 +268,27 @@ mod tests {
     }
 
     #[test]
+    fn responses_sends_selected_items_in_saved_order() -> Result<()> {
+        let url = "data:image/gif;base64,R0lGODlh";
+        let message = serde_json::from_value(json!({"Result":{
+            "id":"c","text":"before\nafter","images":[url],"details":{"type":"codemode",
+            "elapsedMs":10,"success":true,"images":[{"offset":6,"label":".panda/selected.gif"}],
+            "items":[{"type":"text","start":0,"end":6},{"type":"image","index":0},{"type":"text","start":7,"end":12}]}
+        }}))?;
+        let body = responses_body("m", "s", &[message], &[]);
+        assert_eq!(
+            body["input"][0]["output"],
+            json!([
+                {"type":"input_text","text":"Saved images: .panda/selected.gif"},
+                {"type":"input_text","text":"before"},
+                {"type":"input_image","image_url":url},
+                {"type":"input_text","text":"after"}
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn resumed_tool_history_uses_matching_ids() {
         let history = [
             Message::Assistant {
@@ -253,6 +300,7 @@ mod tests {
                 }],
             },
             Message::Result {
+                details: None,
                 id: "call1|fc1".into(),
                 text: "missing".into(),
                 images: vec![],

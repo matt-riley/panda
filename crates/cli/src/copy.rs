@@ -62,7 +62,7 @@ mod tests {
                     }
                     1 => Message::BranchSummary(text),
                     2 => Message::Reasoning(text),
-                    3 => Message::Result {id: "call".into(), text, images: vec![], is_error: false, nested_reads: vec![]},
+                    3 => Message::Result {details: None, id: "call".into(), text, images: vec![], is_error: false, nested_reads: vec![]},
                     4 => Message::Assistant {text, calls: vec![panda_core::Call { id:"call".into(), name:"read".into(), args: serde_json::Value::Null }]},
                     5 => Message::Assistant {text: " \n".into(), calls: vec![]},
                     _ => Message::User(text),

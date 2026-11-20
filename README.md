@@ -40,7 +40,9 @@ The interactive UI fills the terminal. Assistant replies render Markdown as they
 
 ## Prompt, tools and sessions
 
-In plan and code mode, `read` accepts UTF-8 text files and images. PNG, JPEG and WebP images can be up to 8 MiB each. Panda recognizes images by their contents and sends the original bytes to the model. Use `offset` and `limit` for text line ranges. In Codemode, `tools.read({path: "diagram.png"})` returns a short description to the script and attaches the image when the script succeeds.
+Edit results retain the numbered text diff. JSON events and saved sessions also expose `firstChangedLine` (one-based, null for a no-op) and an ordered `patch` of replacement strings and half-open UTF-8 byte ranges in the original file.
+
+In plan and code mode, `read` accepts UTF-8 text files and images. PNG, JPEG, GIF and WebP images can be up to 8 MiB each. Panda recognizes images by their contents and sends the original bytes to the model. Use `offset` and `limit` for text line ranges. In Codemode, `tools.read({path: "diagram.png"})` returns an image block with `type`, `mimeType`, base64 `data` and a short `note`. Call `image(block)` between `text(...)` calls to select and position the image. Explicit images are saved under `.panda/` and their paths appear in the result. Scripts that omit `image()` retain automatic read attachments. The encoded image budget is 12 MiB per script.
 
 In code mode, `shell` accepts an optional whole-number `timeout` from 1 to 600 seconds and defaults to 120 seconds. A timeout stops the shell and its process group. When combined stdout and stderr exceed 64 KiB, the result includes the exit status, the last 64 KiB and the workspace-relative path to a full log under `.panda/`. The log stays in the workspace after Panda exits. Use `read` or Codemode’s `tools.read` with `offset` and `limit` to inspect earlier lines.
 
@@ -49,7 +51,7 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | To do this | In Panda |
 |---|---|
 | Attach a workspace file | Type `@src/main.rs`, or `@"path with spaces"`. Press Tab in Insert mode for completions. For large files, ask Panda to read a range of lines. |
-| Send an image | Attach a PNG, JPEG or WebP by path, or use Ctrl-V in Insert mode or `:paste` for a macOS clipboard image. `:detach` clears the pending clipboard image. Select a model that accepts images. |
+| Send an image | Attach a PNG, JPEG, GIF or WebP by path, or use Ctrl-V in Insert mode or `:paste` for a macOS clipboard image. `:detach` clears the pending clipboard image. Select a model that accepts images. |
 | Edit a longer prompt | Press Ctrl-G in Insert mode. Panda opens the draft in `$VISUAL`, `$EDITOR` or `vi`. Save and close the editor to return. |
 | Recover from a temporary provider failure | Panda retries the current model request up to three times before any response is shown. The countdown appears above the prompt. Ctrl-C cancels it. Completed tools are never replayed by the retry. |
 | Redirect an active turn | Type a correction and press Enter. Panda delivers it after the current batch of tools finishes. Alt-Enter queues a follow-up after the answer. Alt-Up brings queued text back into the draft. |

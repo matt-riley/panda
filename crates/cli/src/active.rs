@@ -37,7 +37,12 @@ impl Drop for Raw {
     }
 }
 
-pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
+#[derive(Default)]
+pub struct PendingTool {
+    call: Option<Call>,
+    details: Option<ToolDetails>,
+}
+pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
     match event {
         Event::Truncated { text, retrying } => {
             if screen.active {
@@ -73,6 +78,7 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
             }
         }
         Event::Text(s) => screen.stream(&s),
+        Event::ResultDetails { details, .. } => pending.details = Some(details),
         Event::NestedRead(_) => {}
         Event::NestedCall { call, .. } => {
             let line = format!("  {}", ui::header(&call));
@@ -89,20 +95,23 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut Option<Call>) {
         }
         Event::Calling(call) if screen.active => {
             screen.line(Tone::Tool, &ui::header(&call));
-            *pending = Some(call);
+            pending.call = Some(call);
         }
-        Event::Result(text) if screen.active => screen.tool_result(
-            pending.take().as_ref(),
-            &text,
-            text.starts_with("tool error: "),
-        ),
+        Event::Result(text) => {
+            let error = text.starts_with("tool error: ");
+            let display = result_text(&text, pending.details.take().as_ref());
+            if screen.active {
+                screen.tool_result(pending.call.take().as_ref(), &display, error);
+            } else {
+                println!("{}", safe(&display));
+            }
+        }
         Event::Calling(c) => println!(
             "\n[{} {}] {}",
             safe(&c.name),
             safe(&c.id),
             safe(&c.args.to_string())
         ),
-        Event::Result(s) => println!("{}", safe(&s)),
         Event::Usage(u) => {
             let input = u["input_tokens"].as_u64().or(u["prompt_tokens"].as_u64());
             let output = u["output_tokens"]
@@ -126,7 +135,7 @@ pub fn run(
 ) -> Result<()> {
     screen.retry = None;
     screen.end_reply();
-    let mut pending = None;
+    let mut pending = PendingTool::default();
     if !screen.active {
         turn_message(
             p,
@@ -267,6 +276,57 @@ pub fn run(
     }
     std::io::stdout().flush()?;
     result
+}
+
+pub(super) fn result_text<'a>(
+    text: &'a str,
+    details: Option<&ToolDetails>,
+) -> std::borrow::Cow<'a, str> {
+    let Some(ToolDetails::Codemode {
+        elapsed_ms,
+        success,
+        images,
+        items,
+    }) = details
+    else {
+        return text.into();
+    };
+    let status = if *success { "completed" } else { "failed" };
+    let mut lines = vec![format!("Codemode {status} in {elapsed_ms} ms")];
+    let count = items
+        .iter()
+        .filter(|item| matches!(item, OutputItem::Text { .. }))
+        .count();
+    let mut number = 0;
+    if items.is_empty() {
+        lines.push(text.to_owned());
+        lines.extend(
+            images
+                .iter()
+                .map(|i| format!("Image · {}", ui::inline(&i.label, 180))),
+        );
+    } else {
+        for item in items {
+            match item {
+                OutputItem::Text { start, end } | OutputItem::Console { start, end } => {
+                    let Some(chunk) = text.get(*start..*end) else {
+                        return text.into();
+                    };
+                    if matches!(item, OutputItem::Text { .. }) && count > 1 {
+                        number += 1;
+                        lines.push(format!("==> text {number}/{count} <=="));
+                    }
+                    lines.push(chunk.to_owned());
+                }
+                OutputItem::Image { index } => {
+                    if let Some(image) = images.get(*index) {
+                        lines.push(format!("Image · {}", ui::inline(&image.label, 180)));
+                    }
+                }
+            }
+        }
+    }
+    lines.join("\n").into()
 }
 
 #[cfg(test)]

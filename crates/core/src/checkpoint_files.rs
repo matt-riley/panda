@@ -125,7 +125,7 @@ mod tests {
                     calls: vec![Call { id: "reused".into(), name: name.into(), args: serde_json::json!({"path": path}) }],
                 });
                 session.history.push(Message::Result {
-                    id: "reused".into(), text: String::new(), images: vec![], nested_reads: vec![], is_error: !success,
+                    details: None, id: "reused".into(), text: String::new(), images: vec![], nested_reads: vec![], is_error: !success,
                 });
                 if success {
                     match name {

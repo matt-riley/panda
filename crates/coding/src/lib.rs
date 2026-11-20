@@ -183,7 +183,7 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
         (
             "read",
-            "Read a workspace file as UTF-8 text or a PNG, JPEG or WebP image. Text accepts a one-based offset (first line) and limit (line count).",
+            "Read a workspace file as UTF-8 text or a PNG, JPEG, GIF or WebP image. Text accepts a one-based offset (first line) and limit (line count).",
             &["path"],
             false,
         ),
@@ -266,6 +266,8 @@ pub fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
         Some("image/png")
     } else if bytes.starts_with(&[255, 216, 255]) {
         Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         Some("image/webp")
     } else {

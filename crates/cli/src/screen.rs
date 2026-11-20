@@ -772,11 +772,11 @@ mod tests {
             &mut |event| {
                 if matches!(event, Event::AssistantComplete(_)) {
                     let before = live.body();
-                    display(event, &mut live, &mut None);
+                    display(event, &mut live, &mut Default::default());
                     assert_eq!(live.body(), before);
                     completed += 1;
                 } else {
-                    display(event, &mut live, &mut None);
+                    display(event, &mut live, &mut Default::default());
                     live.reflow(37);
                 }
             },
