@@ -133,6 +133,22 @@ pub fn visible(session: &Session, end: usize) -> Vec<Segment> {
                     } else {
                         push(Role::User, text, None, None, false);
                     }
+                    if let Message::Images { urls, .. } = msg
+                        && !urls.is_empty()
+                    {
+                        let role = if text.trim().is_empty() {
+                            Role::User
+                        } else {
+                            Role::Attachment
+                        };
+                        push(
+                            role,
+                            &format!("[{} attached image(s)]", urls.len()),
+                            None,
+                            None,
+                            false,
+                        );
+                    }
                 }
                 Message::Assistant { text, calls: batch } => {
                     push(Role::Assistant, text, None, None, false);
@@ -154,14 +170,24 @@ pub fn visible(session: &Session, end: usize) -> Vec<Segment> {
                     }
                 }
                 Message::Result {
-                    id, text, is_error, ..
-                } => push(
-                    Role::Tool,
+                    id,
                     text,
-                    calls.get(id.as_str()).copied(),
-                    Some(id),
-                    *is_error,
-                ),
+                    images,
+                    is_error,
+                    ..
+                } => {
+                    let call = calls.get(id.as_str()).copied();
+                    push(Role::Tool, text, call, Some(id), *is_error);
+                    if !images.is_empty() {
+                        push(
+                            Role::Attachment,
+                            &format!("[{} tool image(s)]", images.len()),
+                            call,
+                            Some(id),
+                            *is_error,
+                        );
+                    }
+                }
                 Message::BranchSummary(text) => push(Role::Branch, text, None, None, false),
                 Message::Truncated(_) | Message::CodemodeStore(_) | Message::Reasoning(_) => {}
             }

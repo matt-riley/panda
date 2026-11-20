@@ -173,7 +173,23 @@ fn active_projection_hides_siblings_binary_reasoning_store_and_preserves_tool_pa
     for absent in ["HIDDEN", "SECRET_BINARY", "request 0"] {
         assert!(!serialized.contains(absent));
     }
-    assert!(serialized.contains("image caption 🐼"));
+    assert!(
+        serialized.contains("image caption 🐼")
+            && serialized.contains("1 attached image(s)")
+            && serialized.contains("1 tool image(s)")
+    );
+    let image_only = Session {
+        history: vec![Message::Images {
+            text: String::new(),
+            urls: vec!["HIDDEN_IMAGE".into()],
+        }],
+        ..Default::default()
+    };
+    let placeholder = visible(&image_only, 1);
+    assert_eq!(
+        (placeholder[0].role, placeholder[0].text.as_str()),
+        (Role::User, "[1 attached image(s)]")
+    );
     assert_ne!(seg[0].source, visible(&old, old.history.len())[0].source);
     assert_eq!(seg[0].source, visible(&s, s.history.len())[0].source);
     let file = seg.iter().find(|s| s.role == Role::Tool).unwrap();
