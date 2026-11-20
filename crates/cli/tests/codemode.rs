@@ -104,7 +104,7 @@ fn selected_tools_restrict_direct_and_nested_dispatch() -> Result<()> {
     fs::write(root.path().join("note"), "original")?;
     let base = coding(root.path())?;
     let read_only = panda_coding::SelectedTools::new(&base, ["read".to_owned()].into())?;
-    let enabled = Codemode::new(&read_only, EXE.as_ref());
+    let enabled = Codemode::new(&read_only, EXE.as_ref(), &base.workspace.root);
     let run = |name, args| enabled.run(Mode::Code, &call(name, args), &Cancel::default());
     let schema = enabled.schemas(Mode::Code);
     assert_eq!(
@@ -171,7 +171,7 @@ fn paginated_todo_ranking() -> Result<()> {
         )?;
     }
     let base = coding(root.path())?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let mut metrics = Vec::new();
     for (codemode, tools) in [
         (false, &base as &dyn Toolset),
@@ -230,7 +230,7 @@ fn plan_search_patterns_work_directly_and_in_codemode() -> Result<()> {
     fs::write(root.path().join("src/lib.rs"), "fn one() {}\nfn two() {}")?;
     fs::write(root.path().join("notes.txt"), "fn three() {}")?;
     let base = coding(root.path())?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let schemas = enabled.schemas(Mode::Plan);
     for (name, args, expected) in [
         ("repo_map", json!({"glob":"**/*.rs"}), json!(["src/lib.rs"])),
@@ -295,7 +295,7 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
     }
 
     let base = coding(dir)?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     for (name, mut args) in [
         ("search", json!({"query":"match"})),
         ("repo_map", json!({"glob":"**/*.rs"})),
@@ -367,7 +367,7 @@ fn search_context_pages_count_only_hits_in_plan_and_codemode() -> Result<()> {
         })
         .collect();
     let base = coding(root.path())?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let mut args = json!({"query":"todo","ignoreCase":true,"context":2});
     let code = format!(
         "const args = {args}; const first = tools.search(args); text([first, tools.search({{...args, offset:first.next_offset}})]);"
@@ -419,7 +419,7 @@ fn ls_pages_match_in_plan_and_codemode() -> Result<()> {
     entries.push(json!({"name":"sub","type":"directory"}));
 
     let base = coding(dir)?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let direct = |args| base.run(Mode::Plan, &call("ls", args), &Cancel::default());
     let nested = |code: &str| {
         enabled.run(
@@ -469,7 +469,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
     let root = tempfile::tempdir()?;
     fs::write(root.path().join("note"), "hello")?;
     let base = coding(root.path())?;
-    let enabled = Codemode::new(&base, EXE.as_ref());
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let run = |code: &str| {
         enabled.run(
             Mode::Code,
@@ -495,12 +495,20 @@ fn reads_limits_and_cancellation() -> Result<()> {
     );
     assert!(run("tools.write({path:'note', text:'bad'})").is_err());
     assert_eq!(fs::read_to_string(root.path().join("note"))?, "hello");
-    assert!(
-        run("text('x'.repeat(16385))")
-            .unwrap_err()
-            .to_string()
-            .contains("16 KiB")
-    );
+    assert_eq!(run("text('x'.repeat(16384))")?, "x".repeat(16384));
+    assert!(!root.path().join(".panda").exists());
+    let capped = run("text('x'.repeat(1048575)); try { text('x'); } catch {}");
+    assert!(capped.unwrap_err().to_string().contains("1 MiB"));
+    assert!(!root.path().join(".panda").exists());
+    // Even worst-case JSON escaping must fit in the worker protocol frame.
+    let exact = run(r#"text("\u0001".repeat(1048576))"#)?;
+    let path = exact
+        .lines()
+        .last()
+        .unwrap()
+        .strip_prefix("Full output: ")
+        .unwrap();
+    assert_eq!(fs::read(root.path().join(path))?, vec![1; 1048576]);
     assert!(run("text(new Uint8Array(128*1024*1024).length)").is_err());
     let script = "while(true){}";
     let start = Instant::now();
@@ -543,7 +551,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
 fn noisy_shell_failure_can_be_read_in_plan_and_codemode() -> Result<()> {
     let root = tempfile::tempdir()?;
     let tools = coding(root.path())?;
-    let nested = Codemode::new(&tools, EXE.as_ref());
+    let nested = Codemode::new(&tools, EXE.as_ref(), &tools.workspace.root);
     let cancel = Cancel::default();
     let command = "echo EARLY_MARKER; awk 'BEGIN { for (i=0;i<100000;i++) print \"long-output-line\" }'; echo final-stdout; echo FINAL_FAILURE >&2; exit 7";
     let failure = tools
@@ -663,7 +671,7 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
     let mut offsets = vec![];
     let mut run = |db: &mut Disk, script: &str| -> Result<String> {
         let base = coding(root.path())?;
-        let tools = Codemode::new(&base, EXE.as_ref());
+        let tools = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
         turn(
             &mut Script(script),
             db,
@@ -692,10 +700,48 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
     "#;
     let mut db = Disk::open(state.path(), root.path(), None)?;
     let sid = db.id();
-    assert_eq!(run(&mut db, page)?, "50");
-    let common = node(&mut db, "50")?;
+    let report = r#"text("HEAD"); text("🦀".repeat(2400)); text("MIDDLE"); text("é".repeat(4800)); text("TAIL");"#;
+    let preview = run(&mut db, &format!("{page}\n{report}"))?;
+    assert!(preview.starts_with("50\nHEAD\n"), "{preview:.100}");
+    assert!(preview.contains("\nTAIL\n"));
+    assert!(!preview.contains("MIDDLE"));
+    assert!(preview.len() <= 16 * 1024);
+    let path = preview
+        .lines()
+        .last()
+        .unwrap()
+        .strip_prefix("Full output: ")
+        .unwrap();
+    assert!(path.starts_with(".panda/codemode-"));
+    assert_eq!(
+        fs::read_to_string(root.path().join(path))?,
+        format!(
+            "50\nHEAD\n{}\nMIDDLE\n{}\nTAIL",
+            "🦀".repeat(2400),
+            "é".repeat(4800)
+        )
+    );
+    let common = db
+        .tree()?
+        .into_iter()
+        .find(|entry| entry.current)
+        .unwrap()
+        .id;
     drop(db);
     let mut db = Disk::open(state.path(), root.path(), Some(sid))?;
+    let base = coding(root.path())?;
+    let tools = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
+    let args = json!({"path":path,"offset":4,"limit":1});
+    let nested = call(
+        "codemode",
+        json!({"code":format!("text(tools.read({args}))")}),
+    );
+    for read in [call("read", args), nested] {
+        assert_eq!(
+            tools.run(Mode::Plan, &read, &Cancel::default())?,
+            "MIDDLE\n"
+        );
+    }
     let ranking = r#"[["a.rs",34],["b.rs",17]]"#;
     assert_eq!(run(&mut db, page)?, ranking);
     db.navigate(common)?;
@@ -708,10 +754,17 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
     assert!(
         run(
             &mut db,
-            r#"store("rank", {cursor:999}); throw Error("abandoned")"#
+            &format!(r#"store("rank", {{cursor:999}}); {report} throw Error("abandoned")"#)
         )?
         .contains("abandoned")
     );
+    assert_eq!(fs::read_dir(root.path().join(".panda"))?.count(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
+        cursor
+    );
+    let over_cap = r#"store("rank", {cursor:999}); try { text("x".repeat(1048577)); } catch {}"#;
+    assert!(run(&mut db, over_cap)?.contains("1 MiB"));
     assert_eq!(
         serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
         cursor

@@ -19,7 +19,9 @@ pub use vm::worker;
 
 const TIME_LIMIT: Duration = Duration::from_secs(10);
 const SCRIPT_BYTES: usize = 64 * 1024;
-const OUTPUT_BYTES: usize = 16 * 1024;
+const PREVIEW_BYTES: usize = 16 * 1024;
+const MAX_OUTPUT_BYTES: usize = crate::MAX_TOOL_RESULT_BYTES;
+const OUTPUT_LIMIT_ERROR: &str = "Codemode text output exceeds 1 MiB";
 const ARG_BYTES: usize = 16 * 1024;
 const MAX_CALLS: usize = 64;
 // Bound the total retained across nested calls, including base64 expansion.
@@ -46,6 +48,28 @@ const HELPERS: &[(&str, &str)] = &[
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 1024;
 const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 1024;
 const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
+// Finished messages must also fit when every output byte needs JSON escaping.
+const _: () = assert!(WORKER_FRAME >= 6 * MAX_OUTPUT_BYTES + 64);
+
+fn finish_output(root: &std::fs::File, text: String) -> Result<String> {
+    ensure!(text.len() <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
+    if text.len() <= PREVIEW_BYTES {
+        return Ok(text);
+    }
+    let (path, _) =
+        crate::output_log::create_log(root, "codemode", |file| file.write_all(text.as_bytes()))
+            .context("could not save full Codemode output")?;
+    let middle = "\n[Output truncated]\n";
+    let footer = format!("\nFull output: {path}");
+    let budget = PREVIEW_BYTES - middle.len() - footer.len();
+    let head = text.floor_char_boundary(budget / 2);
+    let tail = text.ceil_char_boundary(text.len() - budget.div_ceil(2));
+    Ok(format!(
+        "{}{middle}{}{footer}",
+        &text[..head],
+        &text[tail..]
+    ))
+}
 
 #[derive(Serialize, Deserialize)]
 enum WorkerMessage {
@@ -101,11 +125,20 @@ fn watch(
 pub struct Codemode<'a> {
     inner: &'a (dyn Toolset + Sync),
     executable: &'a Path,
+    workspace_root: &'a Path,
 }
 
 impl<'a> Codemode<'a> {
-    pub fn new(inner: &'a (dyn Toolset + Sync), executable: &'a Path) -> Self {
-        Self { inner, executable }
+    pub fn new(
+        inner: &'a (dyn Toolset + Sync),
+        executable: &'a Path,
+        workspace_root: &'a Path,
+    ) -> Self {
+        Self {
+            inner,
+            executable,
+            workspace_root,
+        }
     }
 
     fn helpers(
@@ -134,6 +167,7 @@ impl<'a> Codemode<'a> {
             "Codemode script exceeds 64 KiB"
         );
         let executable = self.executable.canonicalize()?;
+        let root = crate::output_log::open_root(self.workspace_root)?;
         let literal =
             serde_json::to_string(executable.to_str().context("non UTF-8 executable path")?)?;
         let profile = format!(
@@ -158,7 +192,7 @@ impl<'a> Codemode<'a> {
         // One watchdog covers compilation, JS, blocked IPC and a nested file worker.
         // The nested token is private so a timeout doesn't cancel the whole turn.
         let nested = Cancel::default();
-        std::thread::scope(|scope| {
+        let (mut result, writes) = std::thread::scope(|scope| {
             let (finished, done) = mpsc::channel::<()>();
             let nested_cancel = nested.clone();
             let watchdog = scope.spawn(move || watch(child, done, cancel, &nested_cancel));
@@ -181,7 +215,6 @@ impl<'a> Codemode<'a> {
                         }
                         WorkerMessage::Finished(result) => {
                             let text = result.map_err(anyhow::Error::msg)?;
-                            ensure!(text.len() <= OUTPUT_BYTES, "Codemode output exceeds 16 KiB");
                             return Ok((ToolOutput { text, images }, store.writes));
                         }
                         WorkerMessage::Invoke { name, args } => {
@@ -240,7 +273,10 @@ impl<'a> Codemode<'a> {
             drop(finished);
             watchdog.join().expect("Codemode watchdog panicked")?;
             result
-        })
+        })?;
+        cancel.check()?;
+        result.text = finish_output(&root, result.text)?;
+        Ok((result, writes))
     }
     pub fn append_guidance(&self, prompt: &mut String) {
         if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|(name, _)| *name == "search") {
@@ -296,7 +332,7 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 16 KiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. Use text(value) to emit selected output. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
@@ -317,6 +353,41 @@ impl Toolset for Codemode<'_> {
                 .map(|(output, _)| output)
         } else {
             self.inner.run_stream(mode, call, cancel, emit)
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn utf8_preview_and_log_preserve_the_emitted_bytes(
+            pattern in prop::collection::vec(any::<char>(), 1..32),
+            byte_target in PREVIEW_BYTES - 8..PREVIEW_BYTES + 256,
+        ) {
+            let dir = tempfile::tempdir()?;
+            let root = std::fs::File::open(dir.path())?;
+            let mut text = String::new();
+            for ch in pattern.into_iter().cycle() {
+                text.push(ch);
+                if text.len() >= byte_target { break; }
+            }
+            let result = finish_output(&root, text.clone()).unwrap();
+            if text.len() <= PREVIEW_BYTES {
+                prop_assert_eq!(result, text);
+                prop_assert!(!dir.path().join(".panda").exists());
+            } else {
+                let (preview, path) = result.rsplit_once("\nFull output: ").unwrap();
+                let (head, tail) = preview.split_once("\n[Output truncated]\n").unwrap();
+                prop_assert!(text.starts_with(head) && text.ends_with(tail));
+                prop_assert!(head.len().abs_diff(tail.len()) <= 4);
+                // Rounding each cut to a UTF-8 boundary costs at most three bytes.
+                prop_assert!((PREVIEW_BYTES - 6..=PREVIEW_BYTES).contains(&result.len()));
+                prop_assert_eq!(std::fs::read(dir.path().join(path))?, text.as_bytes());
+            }
         }
     }
 }
