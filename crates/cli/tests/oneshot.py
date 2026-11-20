@@ -376,7 +376,9 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert not requests
     run(["--print", "--session", str(sid), "continue selected branch"], "")
     assert len(requests) == 1
-    messages = requests.pop()[1]["messages"][1:]
+    request = requests.pop()[1]
+    assert "Archived Pi system prompt" not in json.dumps(request)
+    messages = request["messages"][1:]
     assert [m["content"] for m in messages] == [
         "Earlier conversation summary:\nunique summary", "kept prompt", "",
         "unique tool output", "active answer", "continue selected branch",
@@ -391,6 +393,10 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert records[1:-2] == original[1:]
     assert records[-2]["parentId"] == "a-answer" and records[-1]["parentId"] == records[-2]["id"]
     assert records[-1]["message"]["content"][0]["text"] == "reviewed"
+    # Imported model metadata survives, but a native reply currently exports
+    # without responder identity. Keep this portability limit visible.
+    assert records[-1]["message"]["provider"] == "panda"
+    assert records[-1]["message"]["model"] == "unknown"
     saved = exported.read_bytes()
     run(["--export-session", str(sid), str(exported)], "", error="creating export")
     assert exported.read_bytes() == saved

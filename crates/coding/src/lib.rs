@@ -248,6 +248,7 @@ fn catalog(mode: Mode) -> Vec<Value> {
                 props.insert("offset".into(), json!({"type":"integer","minimum":0}));
             }
             if matches!(*name, "search" | "repo_map") {
+                props.insert("path".into(), json!({"type":"string","description":"Limit discovery to a workspace-relative directory or file. Defaults to the workspace root."}));
                 props.insert("glob".into(), json!({"type":"string","description":"Match workspace-relative paths. Use *.rs at the root or **/*.rs at any depth."}));
             }
             if *name == "search" {

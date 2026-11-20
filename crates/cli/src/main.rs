@@ -1135,7 +1135,11 @@ fn run(
                 }
                 ":help" => screen.line(Tone::Dim, HELP),
                 ":skills" => {
-                    for (name, path, desc) in coding.skills.ranked(line[first.len()..].trim())? {
+                    let matches = coding.skills.ranked(line[first.len()..].trim())?;
+                    if matches.is_empty() {
+                        screen.line(Tone::Dim, "No matching skills. Try :skills to list all, or add a skill directory to PANDA_SKILL_ROOTS and restart.");
+                    }
+                    for (name, path, desc) in matches {
                         screen.line(Tone::Dim, &format!("{name}  {desc}  {}", path.display()));
                     }
                 }
