@@ -51,10 +51,11 @@ const HELPERS: &[(&str, &str, &str)] = &[
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
 // Include the descriptions and declarations of the permitted workspace helpers.
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 16 * 1024;
-const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 1024;
+const MAX_ERROR_CHARS: usize = 1024;
+const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 6 * MAX_ERROR_CHARS + 1024;
 const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
 // Finished messages must also fit when every output byte needs JSON escaping.
-const _: () = assert!(WORKER_FRAME >= 6 * MAX_OUTPUT_BYTES + 64);
+const _: () = assert!(WORKER_FRAME >= 6 * (MAX_OUTPUT_BYTES + MAX_ERROR_CHARS) + 64);
 
 fn finish_output(root: &std::fs::File, text: String) -> Result<String> {
     ensure!(text.len() <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
@@ -132,11 +133,17 @@ impl NestedHelper<'_> {
 }
 
 #[derive(Serialize, Deserialize)]
+struct ScriptOutput {
+    text: String,
+    error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
 enum WorkerMessage {
     Invoke { name: String, args: Value },
     Load { key: String },
     Store { key: String, json: Option<String> },
-    Finished(Result<String, String>),
+    Finished(ScriptOutput),
 }
 
 fn send(out: &mut impl Write, value: &impl Serialize) -> Result<()> {
@@ -260,7 +267,7 @@ impl<'a> Codemode<'a> {
         // One watchdog covers compilation, JS, blocked IPC and a nested file worker.
         // The nested token is private so a timeout doesn't cancel the whole turn.
         let nested = Cancel::default();
-        let (mut result, writes) = std::thread::scope(|scope| {
+        let (result, images) = std::thread::scope(|scope| {
             let (finished, done) = mpsc::channel::<()>();
             let nested_cancel = nested.clone();
             let watchdog = scope.spawn(move || watch(child, done, cancel, &nested_cancel));
@@ -282,8 +289,7 @@ impl<'a> Codemode<'a> {
                             send(&mut output, &reply)?;
                         }
                         WorkerMessage::Finished(result) => {
-                            let text = result.map_err(anyhow::Error::msg)?;
-                            return Ok((ToolOutput { text, images }, store.writes));
+                            return Ok((result, images));
                         }
                         WorkerMessage::Invoke { name, args } => {
                             cancel.check()?;
@@ -343,8 +349,21 @@ impl<'a> Codemode<'a> {
             result
         })?;
         cancel.check()?;
-        result.text = finish_output(&root, result.text)?;
-        Ok((result, writes))
+        let preview = finish_output(&root, result.text);
+        if let Some(error) = result.error {
+            let text = preview.unwrap_or_else(|log_error| log_error.to_string());
+            if text.is_empty() {
+                anyhow::bail!("{error}");
+            }
+            anyhow::bail!("{text}\nScript error: {error}");
+        }
+        Ok((
+            ToolOutput {
+                text: preview?,
+                images,
+            },
+            store.writes,
+        ))
     }
     pub fn append_guidance(&self, prompt: &mut String) {
         if !Self::helpers(&self.inner.schemas(Mode::Plan)).any(|helper| helper.name == "search") {
@@ -400,7 +419,7 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit output in order. A top-level return adds its resolved value as the last output unless it is undefined. exit() finishes immediately with the output and stored values so far. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit output in order. A top-level return adds its resolved value as the last output unless it is undefined. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas

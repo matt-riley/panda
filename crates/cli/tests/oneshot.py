@@ -556,6 +556,39 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
     (ranking_repo / "version.txt").write_text("1.2.3")
 
+    for interface in (["--print"], ["--mode", "json"]):
+        flags = ["--codemode-only", "--tools", "search"]
+        seed = 'store("cursor", tools.search({query:"TODO"}).next_offset)'
+        next_calls.append(("codemode", {"code": seed}))
+        sid = done(run(["--mode", "json", *flags, "Save page one"], "", cwd=ranking_repo))["session_id"]
+        requests.clear()
+        resume = [*interface, *flags, "--session", str(sid)]
+        script = """
+            const page = tools.search({query:"TODO", offset:load("cursor")});
+            for (const hit of page.items) text([hit.path, hit.line, hit.text]);
+            store("cursor", page.next_offset);
+            throw Error(["page", "failed"].join("-"));
+        """
+        next_calls.append(("codemode", {"code": script}))
+        output = run([*resume, "Try page two"], "", cwd=ranking_repo)
+        (_, before), (_, after) = requests
+        _, result = after["messages"][len(before["messages"]):]
+        assert result["role"] == "tool"
+        content = result["content"]
+        hit = '["b.rs",17,"TODO"]'
+        assert content.count(hit) == content.count("page-failed") == 1, content
+        assert content.index(hit) < content.index("page-failed"), content
+        if interface == ["--mode", "json"]:
+            events = [json.loads(line) for line in output if line.startswith("{")]
+            calls = [e["event"]["data"]["call"] for e in events
+                     if e["type"] == "event" and e["event"]["type"] == "nested_call"]
+            assert [(c["name"], c["args"]) for c in calls] == [("search", {"query":"TODO", "offset":50})]
+        requests.clear()
+        next_calls.append(("codemode", {"code": 'return load("cursor")'}))
+        run([*resume, "Inspect saved cursor"], "", cwd=ranking_repo)
+        assert requests[-1][1]["messages"][-1]["content"] == "50"
+        requests.clear()
+
     def exercise_tools(interface, flags, declared, call, prompt):
         next_calls.append(call)
         output = run([*interface, "--no-session", *flags, prompt], "", cwd=ranking_repo)
