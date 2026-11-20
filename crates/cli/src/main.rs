@@ -9,8 +9,10 @@ mod picker;
 mod renderer;
 mod screen;
 mod settings;
+mod terminal_config;
 mod ui;
 mod vim;
+mod workspaces;
 use anyhow::{Context, Result, bail, ensure};
 use automation::CodemodeExposure;
 use panda_coding::{Coding, Workspace};
@@ -28,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -394,6 +396,16 @@ fn transfer_session(args: &[String]) -> Result<()> {
         _ => (args, state_dir()?),
     };
     match args {
+        [flag, id, pointer] if flag == "--recover-transcript" => {
+            let disk = Disk::open(
+                &dir,
+                &root,
+                Some(id.parse().context("expected numeric session ID")?),
+            )?;
+            io::stdout()
+                .lock()
+                .write_all(disk.recover_transcript(pointer)?.as_bytes())?;
+        }
         [flag, file] if flag == "--import-session" => {
             let input = std::io::BufReader::new(std::fs::File::open(file)?);
             let disk = Disk::import_pi(&dir, &root, input)?;
@@ -467,14 +479,16 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
-    if args
-        .first()
-        .is_some_and(|a| matches!(a.as_str(), "--import-session" | "--export-session"))
-    {
+    if args.first().is_some_and(|a| {
+        matches!(
+            a.as_str(),
+            "--import-session" | "--export-session" | "--recover-transcript"
+        )
+    }) {
         return transfer_session(&args);
     }
     let interactive_terminal = io::stdin().is_terminal()
@@ -484,6 +498,31 @@ fn run(
     let mut options = automation::Options::parse(&args, interactive_terminal)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
+    if options.interface == automation::Interface::Terminal {
+        terminal_config::load(&state)?;
+    }
+    let (root, selected_disk) = if let Some(choice) = options.workspace {
+        let launch_workspace = Native::new(&root, &std::env::current_exe()?)?;
+        let dir = match &options.session_dir {
+            Some(dir) => launch_workspace.session_dir(dir)?,
+            None => state.clone(),
+        };
+        let Some((chosen, db)) = workspaces::select(
+            choice,
+            &root,
+            &dir,
+            interactive_terminal && options.interface == automation::Interface::Terminal,
+        )?
+        else {
+            return Ok(());
+        };
+        if chosen != root {
+            options.trust_project = false;
+        }
+        (chosen, Some(db))
+    } else {
+        (root, None)
+    };
     let project = panda_local::resources::project_root(&root);
     let mut settings = settings::Settings::read(&state, project)?;
     let cli_recent = options.recent_override;
@@ -581,7 +620,7 @@ fn run(
         String::new()
     });
     let replacement = match &options.system_prompt {
-        Some(value) => Some(automation::prompt_text(value)?),
+        Some(value) => Some(automation::prompt_text_at(&root, value)?),
         None => settings::system_file(&state, project, options.trust_project, "SYSTEM.md")?,
     };
     let appended =
@@ -609,7 +648,7 @@ fn run(
         }
         for value in &options.append_system_prompt {
             prompt.push_str("\n\n");
-            prompt.push_str(&automation::prompt_text(value)?);
+            prompt.push_str(&automation::prompt_text_at(&root, value)?);
         }
         Some(prompt)
     } else {
@@ -622,10 +661,10 @@ fn run(
     };
     let tools = &prompted as &(dyn Toolset + Sync);
     let selected = state.join("model.json");
-    let mut disk = options
+    let mut disk = selected_disk.or(options
         .session_id
         .map(|id| Disk::open(&sessions, &root, Some(id)))
-        .transpose()?;
+        .transpose()?);
     let (mut p, mut model) = initial_model(&selected, &options)?;
     if !subscription(&p) && key_env(&p).is_err() {
         let warning = "Saved provider is unavailable; choose a supported provider with :model PROVIDER MODEL.";
@@ -980,6 +1019,16 @@ fn run(
                         }
                     }
                 }
+                ":transcript" => {
+                    let current = db.load()?.checkpoint.and_then(|c| c.recovery);
+                    let pointer = words
+                        .next()
+                        .or(current.as_deref())
+                        .context("this checkpoint has no private transcript")?;
+                    for row in db.recover_transcript(pointer)?.lines() {
+                        screen.line(Tone::Dim, &safe(row));
+                    }
+                }
                 ":context" | ":compact" => {
                     if first == ":compact" {
                         cancel.reset();
@@ -1007,9 +1056,12 @@ fn run(
                             s.estimated_tokens(&tools.system()?, &tools.schemas(s.mode)),
                             s.token_budget(),
                             s.context_budget.map_or_else(|| "unset".into(), |n| n.to_string()),
-                            s.checkpoint.map_or(0, |c| c.through)
+                            s.checkpoint.as_ref().map_or(0, |c| c.through)
                         ),
                     );
+                    if let Some(pointer) = s.checkpoint.and_then(|c| c.recovery) {
+                        screen.line(Tone::Dim, &format!("Private transcript · {pointer}"));
+                    }
                 }
                 ":ack" => acknowledge(&mut db)?,
                 ":resume" => {
@@ -1221,7 +1273,19 @@ fn run(
                     }
                     screen.clipboard = None;
                 }
-                ":help" => screen.line(Tone::Dim, HELP),
+                ":help" | ":keys" => {
+                    if first == ":help" {
+                        screen.line(Tone::Dim, HELP);
+                    }
+                    screen.line(
+                        Tone::Dim,
+                        &format!("Picker keys · {}", terminal_config::help()),
+                    );
+                }
+                ":theme" => {
+                    let name = terminal_config::theme(&state, words.next())?;
+                    screen.line(Tone::Dim, &format!("Theme · {name}"));
+                }
                 ":skills" => {
                     for diagnostic in coding.skills.diagnostics()? {
                         screen.line(Tone::Dim, &safe(&diagnostic));

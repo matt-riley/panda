@@ -1,10 +1,13 @@
 mod pi;
+mod transcript;
 mod tree;
+mod workspaces;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs, path::Path};
 pub use tree::{EntryKind, TreeEntry};
+pub use workspaces::SessionLocation;
 pub struct SessionPreview {
     pub id: i64,
     pub name: String,
@@ -82,6 +85,24 @@ impl Disk {
     }
 
     fn create_fork(&self, dir: &Path, repo: &Path, mut s: Session, name: &str) -> Result<Self> {
+        // A retained checkpoint can predate the fork tip. Preserve only its original
+        // transcript prefix shared with the chosen branch, including retained messages.
+        let inherited =
+            if let Some(pointer) = s.checkpoint.as_mut().and_then(|cp| cp.recovery.take()) {
+                let mut prefix = Vec::new();
+                if let Some(jsonl) = self.transcript_if_present(&pointer)? {
+                    for (line, message) in jsonl.lines().zip(&s.history) {
+                        if serde_json::to_string(message)? != line {
+                            break;
+                        }
+                        prefix.extend_from_slice(line.as_bytes());
+                        prefix.push(b'\n');
+                    }
+                }
+                (!prefix.is_empty()).then_some(prefix)
+            } else {
+                None
+            };
         if !s.context_edits.is_empty() {
             // A fork starts a new tree with the visible path as its seed.
             let mut boundaries = vec![0];
@@ -107,6 +128,11 @@ impl Disk {
         s.name = name.into();
         s.parent = Some(self.id);
         s.revision = 0;
+        if let Some(bytes) = inherited {
+            return Self::open_initialized(dir, repo, None, &s, |tx, id| {
+                transcript::seed_fork(tx, id, &s, &bytes)
+            });
+        }
         Self::open_seed(dir, repo, None, &s)
     }
     pub fn catalogue(&self, repo: &Path) -> Result<Vec<(i64, String, Option<i64>)>> {
@@ -225,6 +251,12 @@ impl Disk {
                 [self.id],
             )?;
         }
+        if tx.table_exists(None, "recovery_transcripts")? {
+            tx.execute(
+                "DELETE FROM recovery_transcripts WHERE session=?",
+                [self.id],
+            )?;
+        }
         for table in ["pi_headers", "tree_heads", "tree_nodes"] {
             tx.execute(&format!("DELETE FROM {table} WHERE session=?"), [self.id])?;
         }
@@ -260,6 +292,9 @@ impl Store for Disk {
     }
     fn save(&mut self, s: &mut Session) -> Result<()> {
         save_snapshot(&self.conn, self.id, s)
+    }
+    fn save_checkpoint(&mut self, s: &mut Session) -> Result<()> {
+        self.commit_with_transcript(s)
     }
 }
 fn save_snapshot(conn: &Connection, id: i64, s: &mut Session) -> Result<()> {

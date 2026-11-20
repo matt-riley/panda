@@ -158,6 +158,8 @@ pub struct Session {
 }
 #[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
     pub through: usize,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,6 +340,7 @@ fn checkpoint(
         emit,
     )?;
     s.checkpoint = Some(Checkpoint {
+        recovery: None,
         through: end,
         summary,
         files: Some(s.files_through(end)),
@@ -439,16 +442,12 @@ pub fn compact_with_instructions(
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
     let end = s.compact_through(s.history.len(), 0);
-    if s.invocation_keep_recent_tokens
-        .or(s.keep_recent_tokens)
-        .is_some()
-        && end <= s.checkpoint.as_ref().map_or(0, |c| c.through)
-    {
+    if end <= s.checkpoint.as_ref().map_or(0, |c| c.through) {
         return Ok(());
     }
     let prompt = summary_prompt(COMPACTION_PROMPT, instructions);
     checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {})?;
-    store.save(&mut s)
+    store.save_checkpoint(&mut s)
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -491,6 +490,9 @@ pub trait Provider {
 pub trait Store {
     fn load(&self) -> Result<Session>;
     fn save(&mut self, s: &mut Session) -> Result<()>;
+    fn save_checkpoint(&mut self, s: &mut Session) -> Result<()> {
+        self.save(s)
+    }
 }
 pub trait Toolset {
     /// The caller commits any returned branch-local writes atomically with the tool result.
@@ -586,7 +588,7 @@ pub fn turn_message(
             && end > previous
         {
             checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-            store.save(&mut s)?;
+            store.save_checkpoint(&mut s)?;
             compacted = true;
         }
         let (text, calls, thought, reading) = loop {
@@ -641,7 +643,7 @@ pub fn turn_message(
                     let end = s.compact_through(turn_start, 0);
                     if !compacted && end > previous {
                         checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-                        store.save(&mut s)?;
+                        store.save_checkpoint(&mut s)?;
                         compacted = true;
                     }
                 }
@@ -656,7 +658,7 @@ pub fn turn_message(
                         return Err(e);
                     }
                     checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-                    store.save(&mut s)?;
+                    store.save_checkpoint(&mut s)?;
                     compacted = true;
                 }
                 Err(e) => return Err(e),

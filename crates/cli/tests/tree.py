@@ -19,11 +19,13 @@ from pathlib import Path
 
 
 @contextmanager
-def panda(repo, state, released=None, slow=False, startup=None, args=None, one_shot=False):
+def panda(repo, state, released=None, slow=False, startup=None, args=None, one_shot=False, before_editor=None, color=False):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(repo)
         os.environ.update(TERM="xterm-256color", PANDA_HOME=str(state), PANDA_TREE_FIXTURE="1")
+        if color:
+            os.environ.pop("NO_COLOR", None)
         if args is not None:
             os.environ["PANDA_TREE_ARGS"] = json.dumps(args)
             os.environ["PANDA_TEST_REQUEST_LOG"] = str(state / "requests.jsonl")
@@ -53,6 +55,8 @@ def panda(repo, state, released=None, slow=False, startup=None, args=None, one_s
             yield lambda s: os.write(fd, s.encode()), expect
             expect("test result: ok.")
             return
+        if before_editor:
+            before_editor(lambda s: os.write(fd, s.encode()), expect)
         if startup:
             expect(startup)
         expect("deepseek-flash")
@@ -204,7 +208,7 @@ def test_manual_compaction(repo, state):
         expect("deepseek-flash")
     saved = saved_session(state)
     assert saved["context_budget"] == 16384 and saved["history"] == raw
-    assert saved["checkpoint"] == {"summary": "Checkpoint answer", "through": 2, "files": {"readFiles": [], "modifiedFiles": []}}
+    assert saved["checkpoint"] == {"recovery": saved["checkpoint"]["recovery"], "summary": "Checkpoint answer", "through": 2, "files": {"readFiles": [], "modifiedFiles": []}}
     first, guided = request_log(state)
     assert guided["system"].count(instructions) == 1
     assert instructions not in str(guided["history"]) and instructions not in str(first)
@@ -234,6 +238,55 @@ def test_manual_compaction(repo, state):
     assert final["context_budget"] == 16384 and final["checkpoint"]["through"] == 4
 
 
+def test_workspace_picker(repo, state):
+    origin = repo.parent / "vanishing"
+    origin.mkdir()
+    with panda(origin, state, args=["Original prompt"], startup="First answer"):
+        pass
+    origin.rmdir()
+    # Each option is driven before the normal editor opens. Cancellation must
+    # leave both the ID and the original directory untouched.
+    def choose(send, expect, action):
+        expect("Sessions across workspaces")
+        send("vanishing\r")
+        expect("Original workspace unavailable")
+        send(action + "\r")
+    with panda(repo, state, args=["--all-sessions"], one_shot=True) as (send, expect):
+        choose(send, expect, "Cancel")
+    with sqlite3.connect(state / "sessions.sqlite3") as db:
+        assert db.execute("SELECT id,repo FROM sessions").fetchall() == [(1,str(origin.resolve()))]
+    for action, sid in [("Fork", 2), ("Continue", 1)]:
+        with panda(repo, state, args=["--all-sessions"],
+                   before_editor=lambda send, expect: choose(send, expect, action)) as (send, expect):
+            send(":session\r")
+            expect("deepseek-flash")
+        with sqlite3.connect(state / "sessions.sqlite3") as db:
+            owner, = db.execute("SELECT repo FROM sessions WHERE id=?", (sid,)).fetchone()
+            assert owner == str(repo.resolve())
+
+
+def test_terminal_config(repo, state):
+    state.mkdir(mode=0o700)
+    (state / "themes").mkdir()
+    (state / "themes" / "plum.json").write_text('{"accent":"#aabbcc","muted":"#334455"}')
+    (state / "keybindings.json").write_text('{"select":"Ctrl-G"}')
+    with panda(repo, state, args=["Config target"], startup="First answer"):
+        pass
+    with panda(repo, state, args=[], color=True) as (send, expect):
+        send(":theme plum\r")
+        expect("Theme")
+        expect("deepseek-flash")
+        send(":keys\r")
+        expect("Ctrl-G select")
+        expect("deepseek-flash")
+        send(":resume\r")
+        expect("170;187;204")
+        send("Config target\x07")
+        expect("First answer")
+        expect("deepseek-flash")
+    assert json.loads((state / "theme.json").read_text()) == "plum"
+
+
 def read_copy():
     script = """ObjC.import('AppKit'); function run(args){
         const b=$.NSPasteboard.pasteboardWithName(args[0]);
@@ -249,6 +302,8 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    test_workspace_picker(repo, Path(tmp) / "workspaces")
+    test_terminal_config(repo, Path(tmp) / "terminal-config")
     test_manage_picker(repo, Path(tmp) / "manage")
     test_guided_branch_summary(repo, Path(tmp) / "guided")
     test_manual_compaction(repo, Path(tmp) / "compact")

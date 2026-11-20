@@ -33,6 +33,23 @@ pub enum Tone {
 }
 impl Tone {
     fn paint(self, text: &str, color: bool) -> String {
+        if color {
+            let role = match self {
+                Self::Dim | Self::Thought => Some("muted"),
+                Self::User => Some("accent"),
+                _ => None,
+            };
+            if let Some(ratatui::style::Color::Rgb(r, g, b)) =
+                role.and_then(crate::terminal_config::color)
+            {
+                let prefix = match self {
+                    Self::User => "1;",
+                    Self::Thought => "3;",
+                    _ => "",
+                };
+                return format!("\x1b[{prefix}38;2;{r};{g};{b}m{text}\x1b[0m");
+            }
+        }
         let code = match self {
             Self::Text => "0",
             Self::Dim => "90",

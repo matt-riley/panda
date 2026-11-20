@@ -185,6 +185,7 @@ fn import_entry(
             .map(CheckpointFiles::summary_suffix)
             .unwrap_or_default();
         Some(Checkpoint {
+            recovery: None,
             through,
             summary: summary.strip_suffix(&suffix).unwrap_or(summary).into(),
             files,
