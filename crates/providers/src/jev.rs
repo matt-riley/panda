@@ -72,9 +72,7 @@ impl Jev {
         })
     }
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("TYPESAFE_API_KEY")
-            .or_else(|_| std::env::var("LORE_TYPESAFE_API_KEY"))
-            .unwrap_or_default();
+        let key = std::env::var("TYPESAFE_API_KEY").unwrap_or_default();
         let secrets = std::env::vars()
             .filter(|(k, v)| {
                 v.len() >= 8
@@ -127,6 +125,9 @@ fn digest(data: &[u8]) -> [u8; 32] {
         .unwrap()
 }
 impl Judge for Jev {
+    fn available(&self) -> bool {
+        !self.key.is_empty()
+    }
     fn mask(&self, text: &str) -> String {
         let mut text = text.to_owned();
         for literal in std::iter::once(&self.key)

@@ -65,6 +65,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         env = dict(os.environ, PANDA_HOME=str(state), HOME=str(root),
                    PANDA_ONESHOT_ARGS=json.dumps(args),
                    PANDA_ONESHOT_SERVER=f"http://127.0.0.1:{server.server_port}")
+        env.pop("TYPESAFE_API_KEY", None)
+        env.pop("LORE_TYPESAFE_API_KEY", None)
         result = subprocess.run([sys.argv[1], "--exact", "automation::tests::oneshot_fixture", "--nocapture"],
                                 cwd=cwd, env=env, input=stdin, text=True,
                                 capture_output=True, timeout=20)

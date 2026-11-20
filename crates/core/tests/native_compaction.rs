@@ -416,7 +416,8 @@ fn hybrid_pressure_observes_cache_clock_growth_and_clean_moments() {
             false,
             &Thresholds {
                 soft: 0.5,
-                hard: 1.0
+                hard: 1.0,
+                ..Default::default()
             },
             &mut j,
             &time,

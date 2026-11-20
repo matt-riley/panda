@@ -146,6 +146,16 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
             .ok_or_else(|| anyhow::anyhow!("tool {} unavailable in {mode:?} mode", c.name))?;
         def.validate(&c.args)?;
         let output = match c.name.as_str() {
+            "view_context" => Ok(panda_core::native_compaction::context_info(
+                session,
+                &self.system()?,
+                &self.schemas_for(session),
+            )
+            .to_string()
+            .into()),
+            "self_compact" => Ok("Compaction requested at the next safe boundary."
+                .to_string()
+                .into()),
             "skill_search" => self.skills.search(field(&c.args, "query")?).map(Into::into),
             "skill_load" => self.skills.load(field(&c.args, "path")?).map(Into::into),
             _ => self.workspace.invoke_stream(&c.name, &c.args, k, emit),
@@ -178,6 +188,18 @@ pub fn shell_timeout(args: &Value) -> Result<std::time::Duration> {
 
 fn native_definitions() -> Vec<ToolDefinition> {
     let specs: &[(&str, &str, &[&str], bool)] = &[
+        (
+            "self_compact",
+            "Request a checkpoint after this turn. Optional note is model-authored reference material.",
+            &[],
+            false,
+        ),
+        (
+            "view_context",
+            "Inspect context usage, cache state, compaction thresholds, prompt sections and visible tool declarations.",
+            &[],
+            false,
+        ),
         (
             "instructions",
             "Read applicable AGENTS.md files for a workspace file, from outermost to nearest.",
@@ -256,6 +278,7 @@ fn native_definitions() -> Vec<ToolDefinition> {
                     "type":"object","properties":pair,"required":["old","new"],"additionalProperties":false
                 }}));
             }
+            if *name=="self_compact" {props.insert("note".into(),json!({"type":"string","maxLength":4000}));}
             if *name == "read" {
                 for field in ["offset", "limit"] {
                     props.insert(field.into(), json!({"type":"integer","minimum":1}));
@@ -286,7 +309,7 @@ fn native_definitions() -> Vec<ToolDefinition> {
             let output = match *name {
                 "read"=>OutputKind::File, "repo_map"|"ls"|"search"=>OutputKind::Json, _=>OutputKind::Text
             };
-            ToolDefinition{schema,access:if *mutates{Access::Mutate}else{Access::Read},output,
+            ToolDefinition{schema,access:if *name=="self_compact"{Access::Stateful}else if *mutates{Access::Mutate}else{Access::Read},output,
                 namespace:matches!(output,OutputKind::File|OutputKind::Json).then(||"workspace".into())}
         })
         .collect()

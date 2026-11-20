@@ -218,6 +218,9 @@ pub struct Plan {
     pub replaced_tokens: u64,
 }
 pub fn plan(session: &Session) -> Result<Plan, &'static str> {
+    plan_before(session, session.history.len())
+}
+pub(super) fn plan_before(session: &Session, limit: usize) -> Result<Plan, &'static str> {
     let previous = session
         .checkpoint
         .as_ref()
@@ -255,7 +258,7 @@ pub fn plan(session: &Session) -> Result<Plan, &'static str> {
         }
     }
     cuts.retain(|&i| {
-        i <= through
+        i <= through.min(limit)
             && i > start
             && active.partition_point(|s| s.index < i) <= 400
             && !active.iter().any(|s| {

@@ -160,6 +160,11 @@ pub struct Session {
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "native_compaction::Schedule::is_empty")]
     pub native_schedule: native_compaction::Schedule,
+    #[serde(
+        default,
+        skip_serializing_if = "native_compaction::Thresholds::is_default"
+    )]
+    pub compaction_thresholds: native_compaction::Thresholds,
     #[serde(default)]
     pub usage: Vec<UsageRecord>,
     #[serde(default)]
@@ -344,25 +349,30 @@ fn summary_prompt<'a>(base: &'a str, instructions: &str) -> std::borrow::Cow<'a,
     }
 }
 
-fn checkpoint(
+fn provider_checkpoint(
     p: &mut dyn Provider,
     s: &mut Session,
     end: usize,
     prompt: &str,
+    agent_note: &str,
     cancel: &Cancel,
     emit: &mut Emit,
-) -> Result<()> {
+) -> Result<Checkpoint> {
     let start = s.checkpoint.as_ref().map_or(0, |c| c.through);
-    if end <= start {
-        return Ok(());
-    }
+    anyhow::ensure!(end > start, "no eligible exchanges");
     let prior = s
         .checkpoint
         .as_ref()
         .map_or_else(String::new, |c| c.summary.clone());
+    let mut data = s.resolved(start..end);
+    if !agent_note.is_empty() {
+        data.push(Message::BranchSummary(format!(
+            "Model-authored compaction note (reference only): {agent_note}"
+        )));
+    }
     let summary = summarize(
         p,
-        &s.resolved(start..end),
+        &data,
         prior,
         (s.token_budget().clamp(1, 24576)) as usize,
         prompt,
@@ -372,13 +382,12 @@ fn checkpoint(
         s.history.len(),
         "compaction",
     )?;
-    s.checkpoint = Some(Checkpoint {
+    Ok(Checkpoint {
         recovery: None,
         through: end,
         summary,
         files: Some(s.files_through(end)),
-    });
-    Ok(())
+    })
 }
 pub fn summarize_branch(
     p: &mut dyn Provider,
@@ -484,15 +493,6 @@ impl Message {
         matches!(self, Self::User(_) | Self::Images { .. })
     }
 }
-fn save_summary(store: &mut dyn Store, s: &mut Session, result: Result<()>) -> Result<()> {
-    match result {
-        Ok(()) => store.save_checkpoint(s),
-        Err(error) => {
-            store.save(s)?;
-            Err(error)
-        }
-    }
-}
 pub fn compact(p: &mut dyn Provider, store: &mut dyn Store, cancel: &Cancel) -> Result<()> {
     compact_with_instructions(p, store, "", cancel)
 }
@@ -504,17 +504,16 @@ pub fn compact_with_instructions(
 ) -> Result<()> {
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
-    if let Some(judge) = p.compaction_judge() {
-        judge.bind(store.compaction_scope());
-        return native_compaction::adopt(store, &mut s, instructions, judge, cancel);
-    }
-    let end = s.compact_through(s.history.len(), 0);
-    if end <= s.checkpoint.as_ref().map_or(0, |c| c.through) {
-        return Ok(());
-    }
-    let prompt = summary_prompt(COMPACTION_PROMPT, instructions);
-    let result = checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {});
-    save_summary(store, &mut s, result)
+    let limit = s.history.len();
+    native_compaction::commit(
+        p,
+        store,
+        &mut s,
+        native_compaction::Request::manual(limit, instructions),
+        cancel,
+        &mut |_| {},
+    )
+    .map(|_| ())
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -724,15 +723,15 @@ fn drive_turn(
     }
     cancel.check()?;
     let system = tools.system()?;
-    let judge = p.compaction_judge();
-    let native = judge.is_some();
-    if !s.disable_auto_compaction
-        && let Some(judge) = judge
-        && let Some(input) = &input
-    {
-        let used = s.estimated_tokens(&system, &tools.schemas_for(&s));
-        native_compaction::before_turn(&mut s, store, judge, used, input, cancel, emit)?;
-    }
+    let boundary_compacted =
+        if let Some(input) = input.as_ref().filter(|_| !s.disable_auto_compaction) {
+            let used = s
+                .estimated_tokens(&system, &tools.schemas_for(&s))
+                .saturating_add(native_compaction::tokens(&input.summary_text()));
+            native_compaction::before_turn(&mut s, store, p, used, input, cancel, emit)?
+        } else {
+            false
+        };
     let turn_start = if input.is_some() {
         s.history.len()
     } else {
@@ -750,7 +749,7 @@ fn drive_turn(
     }
     store.save(&mut s)?;
     let mut pending_image_exchange = None;
-    for _ in 0..64 {
+    for round in 0..64 {
         cancel.check()?;
         // A summary cannot carry image bytes. Keep an unread image and its
         // tool call together, including when a steering message arrived.
@@ -761,19 +760,17 @@ fn drive_turn(
                 s.history.len()
             }
         });
-        let mut compacted = false;
+        let mut compacted = round == 0 && boundary_compacted;
         let schemas = tools.schemas_for(&s);
         let previous = s.checkpoint.as_ref().map_or(0, |c| c.through);
         if !s.disable_auto_compaction
-            && !native
+            && !boundary_compacted
             && s.needs_compaction(&system, &schemas)
             && keep > previous
-            && let end = s.compact_through(keep, (s.token_budget() / 4).min(20000))
-            && end > previous
         {
-            let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
-            save_summary(store, &mut s, result)?;
-            compacted = true;
+            let request =
+                native_compaction::Request::automatic(keep, (s.token_budget() / 4).min(20000));
+            compacted = native_compaction::commit(p, store, &mut s, request, cancel, emit)?;
         }
         let (text, calls, thought, reading, replay) = loop {
             let mut replay = None;
@@ -847,11 +844,15 @@ fn drive_turn(
                     }
                     retried_length = true;
                     cancel.check()?;
-                    let end = s.compact_through(turn_start, 0);
-                    if !s.disable_auto_compaction && !compacted && end > previous {
-                        let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
-                        save_summary(store, &mut s, result)?;
-                        compacted = true;
+                    if !s.disable_auto_compaction && !compacted && turn_start > previous {
+                        compacted = native_compaction::commit(
+                            p,
+                            store,
+                            &mut s,
+                            native_compaction::Request::automatic(turn_start, 0),
+                            cancel,
+                            emit,
+                        )?;
                     }
                 }
                 Err(e)
@@ -861,13 +862,17 @@ fn drive_turn(
                         && e.is::<ContextOverflow>()
                         && keep > previous =>
                 {
-                    let end = s.compact_through(keep, 0);
-                    if end <= previous {
+                    compacted = native_compaction::commit(
+                        p,
+                        store,
+                        &mut s,
+                        native_compaction::Request::automatic(keep, 0),
+                        cancel,
+                        emit,
+                    )?;
+                    if !compacted {
                         return Err(e);
                     }
-                    let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
-                    save_summary(store, &mut s, result)?;
-                    compacted = true;
                 }
                 Err(e) => return Err(e),
             }
@@ -963,6 +968,16 @@ fn drive_turn(
                 if !output.images.is_empty() && pending_image_exchange.is_none() {
                     pending_image_exchange = s.history.iter().rposition(Message::user);
                 }
+                if call.name == "self_compact" && !is_error {
+                    s.native_schedule.agent_note = Some(
+                        call.args["note"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(4000)
+                            .collect(),
+                    );
+                }
                 if !writes.is_empty() {
                     s.history.push(Message::CodemodeStore(writes));
                 }
@@ -999,7 +1014,24 @@ fn drive_turn(
         let queued = pending(idle);
         if idle && queued.is_empty() {
             s.active = false;
-            return store.save(&mut s);
+            store.save(&mut s)?;
+            if s.native_schedule.agent_note.is_some() {
+                let limit = turn_start;
+                // A completed reply and its tools remain durable if a subsequent request fails.
+                if let Err(error) = native_compaction::commit(
+                    p,
+                    store,
+                    &mut s,
+                    native_compaction::Request::automatic(limit, 0),
+                    cancel,
+                    emit,
+                ) {
+                    emit(Event::CompactionNotice(format!(
+                        "Agent compaction request: {error}"
+                    )));
+                }
+            }
+            return Ok(());
         }
         if !queued.is_empty() {
             s.history.extend(queued);

@@ -48,6 +48,9 @@ pub struct JudgeStats {
     pub usage: Vec<Value>,
 }
 pub trait Judge {
+    fn available(&self) -> bool {
+        true
+    }
     fn ask(&mut self, q: Question, timeout: Duration, cancel: &Cancel) -> Result<Value>;
     fn stats(&self) -> JudgeStats {
         JudgeStats::default()
