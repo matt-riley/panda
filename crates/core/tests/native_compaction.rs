@@ -84,14 +84,8 @@ impl Judge for Script<'_> {
                 assert_eq!(timeout, Duration::from_secs(8));
             }
             let n = match key.as_str() {
-                "mid_flight" | "needs_history" | "completed" => 0.1,
-                "debugging" => {
-                    if self.debug {
-                        0.9
-                    } else {
-                        0.1
-                    }
-                }
+                "debugging" if self.debug => 0.9,
+                "mid_flight" | "needs_history" | "completed" | "debugging" => 0.1,
                 "switched_gears" => 0.95,
                 "decision" if segment.contains("Selected decision") => 0.95,
                 "unresolved" if segment.contains("unfixed failure") => 0.95,
@@ -459,7 +453,7 @@ impl Toolset for Batch {
     fn system(&self) -> Result<String> {
         Ok("test".into())
     }
-    fn schemas(&self, _: Mode) -> Vec<Value> {
+    fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
         vec![]
     }
     fn run(

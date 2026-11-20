@@ -360,9 +360,6 @@ impl Toolset for PromptedTools<'_> {
         }
         Ok(prompt)
     }
-    fn schemas(&self, mode: Mode) -> Vec<Value> {
-        self.tools.schemas(mode)
-    }
 }
 
 type Connect<'a> = dyn Fn(Option<&ModelId>) -> Result<Box<dyn Provider + Send>> + 'a;

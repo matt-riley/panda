@@ -566,8 +566,9 @@ For per-file results, group the items by their path in the same loop and emit on
 impl Toolset for Codemode<'_> {
     fn definitions(&self, m: Mode) -> Vec<panda_core::ToolDefinition> {
         let mut definitions = self.inner.definitions(m);
+        let schema = codemode_schema(&definitions, &self.inner.schemas(m));
         definitions.push(panda_core::ToolDefinition {
-            schema: self.schemas(m).pop().expect("codemode declaration"),
+            schema,
             access: panda_core::Access::Stateful,
             output: panda_core::OutputKind::Text,
             namespace: None,
@@ -576,7 +577,7 @@ impl Toolset for Codemode<'_> {
     }
     fn schemas_for(&self, s: &Session) -> Vec<Value> {
         let mut schemas = self.inner.schemas_for(s);
-        schemas.push(self.schemas(s.mode).pop().expect("codemode declaration"));
+        schemas.push(codemode_schema(&self.inner.definitions(s.mode), &schemas));
         schemas
     }
     fn run(
@@ -598,43 +599,41 @@ impl Toolset for Codemode<'_> {
         self.append_guidance(&mut prompt);
         Ok(prompt)
     }
-    fn schemas(&self, mode: Mode) -> Vec<Value> {
-        let mut schemas = self.inner.schemas(mode);
-        let definitions = self.inner.definitions(mode);
-        let mut helpers = String::new();
-        for d in definitions.iter().filter(|d| {
-            d.namespace.is_some()
-                && d.access == panda_core::Access::Read
-                && schemas
-                    .iter()
-                    .any(|schema| schema["function"]["name"] == d.name())
-        }) {
-            let usage = HELPERS
+}
+
+fn codemode_schema(definitions: &[panda_core::ToolDefinition], schemas: &[Value]) -> Value {
+    let mut helpers = String::new();
+    for d in definitions.iter().filter(|d| {
+        d.namespace.is_some()
+            && d.access == panda_core::Access::Read
+            && schemas
                 .iter()
-                .find(|(name, _, _)| *name == d.name())
-                .map(|(_, _, usage)| (*usage).to_owned())
-                .unwrap_or_else(|| {
-                    format!(
-                        "tools.{}: {} ",
-                        d.name(),
-                        d.schema["function"]["description"]
-                            .as_str()
-                            .unwrap_or_default()
-                    )
-                });
-            // The provider can retrieve the full filtered namespace inside the script.
-            if helpers.len() + usage.len() < 3_000 * 4 {
-                helpers.push_str(&usage);
-                helpers.push(' ');
-            }
+                .any(|schema| schema["function"]["name"] == d.name())
+    }) {
+        let usage = HELPERS
+            .iter()
+            .find(|(name, _, _)| *name == d.name())
+            .map(|(_, _, usage)| (*usage).to_owned())
+            .unwrap_or_else(|| {
+                format!(
+                    "tools.{}: {} ",
+                    d.name(),
+                    d.schema["function"]["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                )
+            });
+        // The provider can retrieve the full filtered namespace inside the script.
+        if helpers.len() + usage.len() < 3_000 * 4 {
+            helpers.push_str(&usage);
+            helpers.push(' ');
         }
-        schemas.push(json!({"type":"function","function":{
-            "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
-            "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
-        }}));
-        schemas
     }
+    json!({"type":"function","function":{
+        "name":"codemode",
+        "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+        "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
+    }})
 }
 
 #[cfg(test)]
