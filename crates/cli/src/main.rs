@@ -1305,15 +1305,17 @@ fn run(
                     let command = &line[if private { 2 } else { 1 }..];
                     ensure!(!command.trim().is_empty(), "expected shell command");
                     cancel.reset();
-                    let output = coding.run(
-                        s.mode,
+                    let (output, _) = coding.run(
+                        &s,
                         &Call {
                             id: "user-shell".into(),
                             name: "shell".into(),
                             args: serde_json::json!({"command":command}),
                         },
                         &cancel,
+                        &mut |_| {},
                     )?;
+                    let output = output.text;
                     screen.line(Tone::Tool, &safe(&output));
                     if !private {
                         s.history.push(Message::User(format!(

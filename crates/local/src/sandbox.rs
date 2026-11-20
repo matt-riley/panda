@@ -97,7 +97,7 @@ impl Native {
         if write {
             rules.push_str(&format!("(allow file-write* (subpath {root}))"))
         }
-        for name in [".git", ".panda", ".agents", ".codex"] {
+        for name in [".git", ".panda", ".agents", ".codex", ".pi"] {
             let path = quoted(&self.root.join(name))?;
             rules.push_str(&format!("(deny file-write* (subpath {path}))"))
         }

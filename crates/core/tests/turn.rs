@@ -20,9 +20,15 @@ impl Toolset for Read {
     fn schemas(&self, _: Mode) -> Vec<Value> {
         vec![]
     }
-    fn run(&self, _: Mode, c: &Call, _: &Cancel) -> Result<String> {
+    fn run(
+        &self,
+        _: &Session,
+        c: &Call,
+        _: &Cancel,
+        _: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
         assert_eq!(c.name, "read");
-        Ok("hello".into())
+        Ok(("hello".to_owned().into(), StoreWrites::default()))
     }
 }
 struct Script;
@@ -340,8 +346,14 @@ fn large_tool_result_triggers_compaction_with_small_reported_usage() {
         fn schemas(&self, _: Mode) -> Vec<Value> {
             vec![]
         }
-        fn run(&self, _: Mode, _: &Call, _: &Cancel) -> Result<String> {
-            Ok("passing\n".repeat(800))
+        fn run(
+            &self,
+            _: &Session,
+            _: &Call,
+            _: &Cancel,
+            _: &mut Emit,
+        ) -> Result<(ToolOutput, StoreWrites)> {
+            Ok(("passing\n".repeat(800).into(), StoreWrites::default()))
         }
     }
     struct Build;

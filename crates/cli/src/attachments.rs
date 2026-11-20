@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use panda_core::Message;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs,
     io::Read,
-    os::unix::fs::OpenOptionsExt,
     path::{Component, Path},
     process::Command,
 };

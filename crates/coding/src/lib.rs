@@ -22,26 +22,20 @@ impl<'a> SelectedTools<'a> {
         Ok(Self { inner, names })
     }
 }
-impl SelectedTools<'_> {
-    fn check(&self, call: &Call) -> Result<()> {
-        anyhow::ensure!(
-            self.names.contains(&call.name),
-            "tool {} unavailable for this run",
-            call.name
-        );
-        Ok(())
-    }
-}
 impl Toolset for SelectedTools<'_> {
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<(ToolOutput, StoreWrites)> {
-        self.check(call)?;
-        self.inner.run_in_session(session, call, cancel, emit)
+        anyhow::ensure!(
+            self.names.contains(&call.name),
+            "tool {} unavailable for this run",
+            call.name
+        );
+        self.inner.run(session, call, cancel, emit)
     }
 
     fn system(&self) -> Result<String> {
@@ -57,20 +51,6 @@ impl Toolset for SelectedTools<'_> {
                     .is_some_and(|name| self.names.contains(name))
             })
             .collect()
-    }
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
-        self.run_stream(mode, call, cancel, &mut |_| {})
-            .map(|output| output.text)
-    }
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        emit: &mut Emit,
-    ) -> Result<ToolOutput> {
-        self.check(call)?;
-        self.inner.run_stream(mode, call, cancel, emit)
     }
 }
 pub trait Workspace {
@@ -112,11 +92,14 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         catalog(mode)
     }
-    fn run(&self, mode: Mode, c: &Call, k: &Cancel) -> Result<String> {
-        self.run_stream(mode, c, k, &mut |_| {})
-            .map(|output| output.text)
-    }
-    fn run_stream(&self, mode: Mode, c: &Call, k: &Cancel, emit: &mut Emit) -> Result<ToolOutput> {
+    fn run(
+        &self,
+        session: &Session,
+        c: &Call,
+        k: &Cancel,
+        emit: &mut Emit,
+    ) -> Result<(ToolOutput, StoreWrites)> {
+        let mode = session.mode;
         k.check()?;
         anyhow::ensure!(
             catalog(mode)
@@ -125,11 +108,12 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
             "tool {} unavailable in {mode:?} mode",
             c.name
         );
-        match c.name.as_str() {
+        let output = match c.name.as_str() {
             "skill_search" => self.skills.search(field(&c.args, "query")?).map(Into::into),
             "skill_load" => self.skills.load(field(&c.args, "path")?).map(Into::into),
             _ => self.workspace.invoke_stream(&c.name, &c.args, k, emit),
-        }
+        }?;
+        Ok((output, StoreWrites::default()))
     }
 }
 pub fn field<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -383,13 +367,17 @@ mod tests {
         for name in ["shell", "edit", "write", "invented"] {
             assert!(
                 c.run(
-                    Mode::Plan,
+                    &Session {
+                        mode: Mode::Plan,
+                        ..Session::default()
+                    },
                     &Call {
                         name: name.into(),
                         id: "x".into(),
                         args: json!({})
                     },
-                    &Cancel::default()
+                    &Cancel::default(),
+                    &mut |_| {},
                 )
                 .is_err(),
                 "{name} was dispatched"

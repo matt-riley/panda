@@ -496,32 +496,16 @@ pub trait Store {
 }
 pub trait Toolset {
     /// The caller commits any returned branch-local writes atomically with the tool result.
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<(ToolOutput, StoreWrites)> {
-        Ok((
-            self.run_stream(session.mode, call, cancel, emit)?,
-            StoreWrites::default(),
-        ))
-    }
-
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        _emit: &mut Emit,
-    ) -> Result<ToolOutput> {
-        self.run(mode, call, cancel).map(Into::into)
-    }
+    ) -> Result<(ToolOutput, StoreWrites)>;
 
     fn system(&self) -> Result<String>;
     fn schemas(&self, mode: Mode) -> Vec<Value>;
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String>;
 }
 
 pub fn turn(
@@ -692,7 +676,7 @@ pub fn turn_message(
             emit(Event::Calling(call.clone()));
             let mut nested_reads = std::collections::BTreeSet::new();
             let started = std::time::Instant::now();
-            let result = tools.run_in_session(&s, &call, cancel, &mut |event| match event {
+            let result = tools.run(&s, &call, cancel, &mut |event| match event {
                 Event::NestedRead(path) => {
                     nested_reads.insert(path);
                 }

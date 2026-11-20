@@ -299,11 +299,10 @@ impl<'a> Codemode<'a> {
 
     fn execute(
         &self,
-        mode: Mode,
+        session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-        mut store: ScriptStore,
     ) -> Result<(ToolOutput, StoreWrites)> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
@@ -312,9 +311,10 @@ impl<'a> Codemode<'a> {
             "Codemode script exceeds 64 KiB"
         );
         let options = ScriptOptions::parse(script)?;
+        let mut store = ScriptStore::from_history(&session.history);
         let started = Instant::now();
         let deadline = started + Duration::from_millis(options.timeout_ms);
-        let catalog: Vec<_> = Self::helpers(&self.inner.schemas(mode))
+        let catalog: Vec<_> = Self::helpers(&self.inner.schemas(session.mode))
             .map(|helper| helper.entry())
             .collect();
         let executable = self.executable.canonicalize()?;
@@ -398,8 +398,9 @@ impl<'a> Codemode<'a> {
                             cancel.check()?;
                             let reply = self
                                 .inner
-                                .run_stream(mode, &child_call, &nested, &mut |_| {})
-                                .and_then(|result| {
+                                .run(session, &child_call, &nested, &mut |_| {})
+                                .and_then(|(result, writes)| {
+                                    ensure!(writes.is_empty(), "read-only nested tool returned store writes");
                                     ensure!(
                                         result.text.len() <= crate::MAX_TOOL_RESULT_BYTES,
                                         "nested result exceeds 1 MiB"
@@ -487,7 +488,7 @@ For per-file results, group the items by their path in the same loop and emit on
 }
 
 impl Toolset for Codemode<'_> {
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
@@ -495,15 +496,9 @@ impl Toolset for Codemode<'_> {
         emit: &mut Emit,
     ) -> Result<(ToolOutput, StoreWrites)> {
         if call.name == "codemode" {
-            self.execute(
-                session.mode,
-                call,
-                cancel,
-                emit,
-                ScriptStore::from_history(&session.history),
-            )
+            self.execute(session, call, cancel, emit)
         } else {
-            self.inner.run_in_session(session, call, cancel, emit)
+            self.inner.run(session, call, cancel, emit)
         }
     }
 
@@ -524,24 +519,6 @@ impl Toolset for Codemode<'_> {
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
-    }
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
-        self.run_stream(mode, call, cancel, &mut |_| {})
-            .map(|output| output.text)
-    }
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        emit: &mut Emit,
-    ) -> Result<ToolOutput> {
-        if call.name == "codemode" {
-            self.execute(mode, call, cancel, emit, ScriptStore::default())
-                .map(|(output, _)| output)
-        } else {
-            self.inner.run_stream(mode, call, cancel, emit)
-        }
     }
 }
 
