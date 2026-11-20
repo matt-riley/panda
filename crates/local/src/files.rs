@@ -235,7 +235,10 @@ fn directory_rules(dir: &Path) -> Option<Gitignore> {
     builder.build().ok()
 }
 
-fn workspace_entries(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+fn workspace_entries<'a>(
+    root: &'a Path,
+    start: &'a Path,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     let mut rules: Vec<Option<Gitignore>> = Vec::new();
     WalkDir::new(root)
         .sort_by_file_name()
@@ -243,6 +246,10 @@ fn workspace_entries(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdi
         .filter_entry(move |entry| {
             // The walk is depth-first. Keep only the current directory's ancestors.
             rules.truncate(entry.depth());
+            // Visit the ancestors for their ignore rules, then only the requested subtree.
+            if !start.starts_with(entry.path()) && !entry.path().starts_with(start) {
+                return false;
+            }
             let is_dir = entry.file_type().is_dir();
             if entry.depth() > 0
                 && matches!(
@@ -388,7 +395,20 @@ fn page(root: &Path, name: &str, args: &Value, offset: u64) -> Result<String> {
         _ => 0,
     };
     let mut page = Page::default();
-    'files: for entry in workspace_entries(root) {
+    let start = if args.get("path").is_some() {
+        let requested = root.join(relative_path(args)?);
+        let target = requested
+            .canonicalize()
+            .context("resolving discovery path")?;
+        root.join(
+            target
+                .strip_prefix(root.canonicalize()?)
+                .context("discovery path outside workspace")?,
+        )
+    } else {
+        root.to_path_buf()
+    };
+    'files: for entry in workspace_entries(root, &start) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;

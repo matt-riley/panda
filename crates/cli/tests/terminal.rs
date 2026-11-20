@@ -189,3 +189,27 @@ fn html_export_opens_offline_on_active_branch() {
             .success()
     );
 }
+
+#[test]
+fn skill_search_explains_an_empty_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_panda"))
+        .current_dir(repo)
+        .env("PANDA_HOME", temp.path().join("state"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b":skills no-such-roadmap-skill\n:q\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let transcript = String::from_utf8(output.stdout).unwrap();
+    assert!(transcript.contains("No matching skills") && transcript.contains("PANDA_SKILL_ROOTS"));
+}

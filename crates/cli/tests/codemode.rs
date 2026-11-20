@@ -294,14 +294,28 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
         fs::write(dir.join(path), "match")?;
     }
 
+    fs::create_dir(dir.join("sibling"))?;
+    fs::create_dir(dir.join("empty"))?;
+    fs::write(dir.join("sibling/match.rs"), "match")?;
+    std::os::unix::fs::symlink(dir.parent().unwrap(), dir.join("outside"))?;
+    for i in 48..50 {
+        let path = format!("src/{i:02}.rs");
+        fs::write(dir.join(&path), "match")?;
+        paths.push(path);
+    }
+    paths.push("sibling/match.rs".into());
+    paths.sort();
     let base = coding(dir)?;
     let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     for (name, mut args) in [
         ("search", json!({"query":"match"})),
         ("repo_map", json!({"glob":"**/*.rs"})),
+        ("search", json!({"query":"match","path":"src"})),
+        ("repo_map", json!({"glob":"**/*.rs","path":"src"})),
     ] {
         let expected: Vec<_> = paths
             .iter()
+            .filter(|p| args["path"].is_null() || p.starts_with("src/"))
             .map(|path| match name {
                 "search" => json!({"path":path,"line":1,"text":"match"}),
                 _ => json!(path),
@@ -335,6 +349,26 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
         );
         assert_eq!(serde_json::from_str::<Value>(&nested)?, pages, "{name}");
     }
+    let query = |path: &str| {
+        base.run(
+            Mode::Plan,
+            &call("search", json!({"path":path,"query":"match"})),
+            &Cancel::default(),
+        )
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&query("src/00.rs")?)?["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&query("empty")?)?["items"],
+        json!([])
+    );
+    assert!(query("missing").is_err());
+    assert!(query("outside").is_err());
     Ok(())
 }
 
@@ -867,5 +901,85 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         json!({"cursor":null,"counts":{"a.rs":34,"b.rs":17}})
     );
     assert_eq!(offsets, [0, 50]);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
+    struct PendingRead;
+    impl Toolset for PendingRead {
+        fn system(&self) -> Result<String> {
+            Ok(String::new())
+        }
+        fn schemas(&self, _: Mode) -> Vec<Value> {
+            vec![json!({"function":{"name":"read","description":"Test read","parameters":{}}})]
+        }
+        fn run(&self, _: Mode, _: &Call, cancel: &Cancel) -> Result<String> {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                cancel.check()?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            anyhow::bail!("nested call did not receive cancellation")
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().canonicalize()?;
+    let enabled = Codemode::new(&PendingRead, EXE.as_ref(), &workspace);
+    let cancel = Cancel::default();
+    let script = |code: &str| call("codemode", json!({"code":code}));
+    let run = |code: &str| enabled.run(Mode::Plan, &script(code), &cancel);
+    let preview = run("// @options: {\"max_output_tokens\":64}\nreturn '海'.repeat(300)")?;
+    assert!(preview.len() <= 256 && preview.starts_with('海'));
+    let (_, path) = preview.rsplit_once("\nFull output: ").unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join(path))?,
+        "海".repeat(300)
+    );
+    assert_eq!(run("return '海'.repeat(300)")?, "海".repeat(300));
+
+    let mut calls = 0;
+    let mut seen = |event| {
+        if matches!(event, Event::NestedCall { .. }) {
+            calls += 1;
+        }
+    };
+    for invalid in [
+        "tools.read({});\n// @options: {}",
+        "// @options: oops\ntools.read({})",
+        "// @options: []\ntools.read({})",
+        "// @options: {\"timeout_ms\":0}\ntools.read({})",
+        "// @options: {\"max_output_tokens\":4097}\ntools.read({})",
+        "// @options: {\"unknown\":1}\ntools.read({})",
+    ] {
+        assert!(
+            enabled
+                .run_stream(Mode::Plan, &script(invalid), &cancel, &mut seen)
+                .is_err()
+        );
+    }
+    assert_eq!(calls, 0);
+
+    let mut session = panda_core::Session::default();
+    let (_, writes) = enabled.run_in_session(
+        &session,
+        &script("store('cursor',50)"),
+        &cancel,
+        &mut |_| {},
+    )?;
+    session.history.push(Message::CodemodeStore(writes));
+    let start = Instant::now();
+    let err = enabled.run_in_session(&session, &script("// @options: {\"timeout_ms\":1500}\nstore('cursor',null);tools.read({path:'pending'})"),
+        &cancel, &mut |e| if matches!(e, Event::NestedCall { .. }) { calls += 1; }).unwrap_err();
+    assert!(err.to_string().contains("time limit") && start.elapsed() < Duration::from_secs(4));
+    assert_eq!(calls, 1);
+    let (reopened, _) = enabled.run_in_session(
+        &session,
+        &script("return load('cursor')"),
+        &cancel,
+        &mut |_| {},
+    )?;
+    assert_eq!(reopened.text, "50");
     Ok(())
 }

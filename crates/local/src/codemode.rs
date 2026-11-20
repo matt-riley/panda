@@ -35,12 +35,12 @@ const HELPERS: &[(&str, &str, &str)] = &[
     (
         "search",
         "{items: {path: string, line: number, text: string, before?: string[], after?: string[]}[], next_offset: number | null}",
-        "tools.search({query,regex?,ignoreCase?,context?,glob?,offset?}) returns {items,next_offset} with path,line,text per hit. Search defaults to case-sensitive literal matching. Set regex:true for a Rust regex and ignoreCase:true to ignore case. Positive context adds before and after arrays in file order. Only matches count toward offsets. Search respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
+        "tools.search({query,path?,regex?,ignoreCase?,context?,glob?,offset?}) returns {items,next_offset} with path,line,text per hit. Search defaults to case-sensitive literal matching. Set regex:true for a Rust regex and ignoreCase:true to ignore case. Positive context adds before and after arrays in file order. Only matches count toward offsets. Search respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
     ),
     (
         "repo_map",
         "{items: string[], next_offset: number | null}",
-        "tools.repo_map({glob?,offset?}) returns {items,next_offset} with workspace paths. It respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
+        "tools.repo_map({path?,glob?,offset?}) returns {items,next_offset} with workspace paths. It respects .gitignore and accepts workspace-relative globs such as **/*.rs.",
     ),
     (
         "read",
@@ -57,9 +57,58 @@ const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
 // Finished messages must also fit when every output byte needs JSON escaping.
 const _: () = assert!(WORKER_FRAME >= 6 * (MAX_OUTPUT_BYTES + MAX_ERROR_CHARS) + 64);
 
-fn finish_output(root: &std::fs::File, text: String) -> Result<String> {
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ScriptOptions {
+    max_output_tokens: usize,
+    timeout_ms: u64,
+}
+
+impl Default for ScriptOptions {
+    fn default() -> Self {
+        Self {
+            max_output_tokens: PREVIEW_BYTES / 4,
+            timeout_ms: TIME_LIMIT.as_millis() as u64,
+        }
+    }
+}
+
+impl ScriptOptions {
+    fn parse(script: &str) -> Result<Self> {
+        let mut options = Self::default();
+        for (index, line) in script.lines().enumerate() {
+            let Some(comment) = line.trim_start().strip_prefix("//") else {
+                continue;
+            };
+            let Some(body) = comment.trim_start().strip_prefix("@options") else {
+                continue;
+            };
+            ensure!(index == 0, "Codemode @options must be on the first line");
+            let json = body
+                .trim_start()
+                .strip_prefix(':')
+                .context("expected // @options: { ... }")?;
+            ensure!(
+                json.trim_start().starts_with('{'),
+                "Codemode @options must be a JSON object"
+            );
+            options = serde_json::from_str(json).context("invalid Codemode @options")?;
+            ensure!(
+                (1..=PREVIEW_BYTES / 4).contains(&options.max_output_tokens),
+                "max_output_tokens must be between 1 and 4096"
+            );
+            ensure!(
+                (1..=10_000).contains(&options.timeout_ms),
+                "timeout_ms must be between 1 and 10000"
+            );
+        }
+        Ok(options)
+    }
+}
+
+fn finish_output(root: &std::fs::File, text: String, preview_bytes: usize) -> Result<String> {
     ensure!(text.len() <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
-    if text.len() <= PREVIEW_BYTES {
+    if text.len() <= preview_bytes {
         return Ok(text);
     }
     let (path, _) =
@@ -67,7 +116,7 @@ fn finish_output(root: &std::fs::File, text: String) -> Result<String> {
             .context("could not save full Codemode output")?;
     let middle = "\n[Output truncated]\n";
     let footer = format!("\nFull output: {path}");
-    let budget = PREVIEW_BYTES - middle.len() - footer.len();
+    let budget = preview_bytes.saturating_sub(middle.len() + footer.len());
     let head = text.floor_char_boundary(budget / 2);
     let tail = text.ceil_char_boundary(text.len() - budget.div_ceil(2));
     Ok(format!(
@@ -168,18 +217,22 @@ fn watch(
     done: mpsc::Receiver<()>,
     cancel: &Cancel,
     nested_cancel: &Cancel,
+    deadline: Instant,
 ) -> Result<()> {
-    let start = Instant::now();
     let outcome = loop {
         if let Err(err) = cancel.check() {
             break Err(err);
         }
-        if start.elapsed() >= TIME_LIMIT {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             break Err(anyhow::anyhow!("Codemode time limit exceeded"));
         }
         if let Err(mpsc::RecvTimeoutError::Disconnected) =
-            done.recv_timeout(Duration::from_millis(10))
+            done.recv_timeout(remaining.min(Duration::from_millis(10)))
         {
+            if Instant::now() >= deadline {
+                break Err(anyhow::anyhow!("Codemode time limit exceeded"));
+            }
             break Ok(());
         }
     };
@@ -233,14 +286,15 @@ impl<'a> Codemode<'a> {
     ) -> Result<(ToolOutput, StoreWrites)> {
         cancel.check()?;
         let script = panda_coding::field(&call.args, "code")?;
-        let schemas = self.inner.schemas(mode);
-        let catalog: Vec<_> = Self::helpers(&schemas)
-            .map(|helper| helper.entry())
-            .collect();
         ensure!(
             script.len() <= SCRIPT_BYTES,
             "Codemode script exceeds 64 KiB"
         );
+        let options = ScriptOptions::parse(script)?;
+        let deadline = Instant::now() + Duration::from_millis(options.timeout_ms);
+        let catalog: Vec<_> = Self::helpers(&self.inner.schemas(mode))
+            .map(|helper| helper.entry())
+            .collect();
         let executable = self.executable.canonicalize()?;
         let root = crate::output_log::open_root(self.workspace_root)?;
         let literal =
@@ -270,7 +324,8 @@ impl<'a> Codemode<'a> {
         let (result, images) = std::thread::scope(|scope| {
             let (finished, done) = mpsc::channel::<()>();
             let nested_cancel = nested.clone();
-            let watchdog = scope.spawn(move || watch(child, done, cancel, &nested_cancel));
+            let watchdog =
+                scope.spawn(move || watch(child, done, cancel, &nested_cancel, deadline));
             let result = (|| {
                 send(&mut output, &(script, &catalog))?;
                 let mut count = 0;
@@ -349,7 +404,7 @@ impl<'a> Codemode<'a> {
             result
         })?;
         cancel.check()?;
-        let preview = finish_output(&root, result.text);
+        let preview = finish_output(&root, result.text, options.max_output_tokens * 4);
         if let Some(error) = result.error {
             let text = preview.unwrap_or_else(|log_error| log_error.to_string());
             if text.is_empty() {
@@ -419,7 +474,7 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit output in order. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. Above 16 KiB the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit output in order. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
@@ -462,7 +517,7 @@ mod output_tests {
                 text.push(ch);
                 if text.len() >= byte_target { break; }
             }
-            let result = finish_output(&root, text.clone()).unwrap();
+            let result = finish_output(&root, text.clone(), PREVIEW_BYTES).unwrap();
             if text.len() <= PREVIEW_BYTES {
                 prop_assert_eq!(result, text);
                 prop_assert!(!dir.path().join(".panda").exists());
