@@ -1,4 +1,6 @@
+mod exposure;
 use anyhow::Result;
+pub use exposure::Exposure;
 use panda_core::*;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -23,6 +25,24 @@ impl<'a> SelectedTools<'a> {
     }
 }
 impl Toolset for SelectedTools<'_> {
+    fn schemas_for(&self, session: &Session) -> Vec<Value> {
+        self.inner
+            .schemas_for(session)
+            .into_iter()
+            .filter(|schema| {
+                schema["function"]["name"]
+                    .as_str()
+                    .is_some_and(|name| self.names.contains(name))
+            })
+            .collect()
+    }
+    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
+        self.inner
+            .definitions(mode)
+            .into_iter()
+            .filter(|d| self.names.contains(d.name()))
+            .collect()
+    }
     fn run(
         &self,
         session: &Session,
@@ -53,7 +73,11 @@ impl Toolset for SelectedTools<'_> {
             .collect()
     }
 }
-pub trait Workspace {
+pub trait Workspace: Sync {
+    /// Additional local handlers implemented by invoke_stream. Native tool names are reserved.
+    fn registered_tools(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
     fn invoke_stream(
         &self,
         name: &str,
@@ -66,7 +90,7 @@ pub trait Workspace {
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String>;
     fn instructions(&self) -> Result<Vec<(String, String)>>;
 }
-pub trait Skills {
+pub trait Skills: Sync {
     fn search(&self, query: &str) -> Result<String>;
     fn load(&self, path: &str) -> Result<String>;
 }
@@ -90,7 +114,21 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
         )
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
-        catalog(mode)
+        self.definitions(mode)
+            .into_iter()
+            .map(|d| d.schema)
+            .collect()
+    }
+    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
+        let mut defs = native_definitions();
+        for definition in self.workspace.registered_tools() {
+            if !definition.name().is_empty() && !defs.iter().any(|d| d.name() == definition.name())
+            {
+                defs.push(definition);
+            }
+        }
+        defs.retain(|d| d.allowed(mode));
+        defs
     }
     fn run(
         &self,
@@ -101,13 +139,12 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
     ) -> Result<(ToolOutput, StoreWrites)> {
         let mode = session.mode;
         k.check()?;
-        anyhow::ensure!(
-            catalog(mode)
-                .iter()
-                .any(|t| t["function"]["name"] == c.name),
-            "tool {} unavailable in {mode:?} mode",
-            c.name
-        );
+        let def = self
+            .definitions(mode)
+            .into_iter()
+            .find(|d| d.name() == c.name)
+            .ok_or_else(|| anyhow::anyhow!("tool {} unavailable in {mode:?} mode", c.name))?;
+        def.validate(&c.args)?;
         let output = match c.name.as_str() {
             "skill_search" => self.skills.search(field(&c.args, "query")?).map(Into::into),
             "skill_load" => self.skills.load(field(&c.args, "path")?).map(Into::into),
@@ -139,7 +176,7 @@ pub fn shell_timeout(args: &Value) -> Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs(seconds))
 }
 
-fn catalog(mode: Mode) -> Vec<Value> {
+fn native_definitions() -> Vec<ToolDefinition> {
     let specs: &[(&str, &str, &[&str], bool)] = &[
         (
             "instructions",
@@ -203,8 +240,7 @@ fn catalog(mode: Mode) -> Vec<Value> {
         ),
     ];
     specs.iter()
-        .filter(|(_, _, _, mutates)| mode == Mode::Code || !mutates)
-        .map(|(name, desc, fields, _)| {
+        .map(|(name, desc, fields, mutates)| {
             let mut props = serde_json::Map::new();
             for key in *fields {
                 props.insert(key.to_string(), json!({"type":"string"}));
@@ -240,7 +276,18 @@ fn catalog(mode: Mode) -> Vec<Value> {
                 props.insert("ignoreCase".into(), json!({"type":"boolean","description":"Case-insensitive matching for literal or regex queries. Defaults to false."}));
                 props.insert("context".into(), json!({"type":"integer","minimum":0,"description":"Lines on each side of a hit. Positive values add before and after arrays of text in file order. Only hits count toward the offset. Defaults to 0."}));
             }
-            json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}})
+            let mut schema = json!({"type":"function","function":{"name":name,"description":desc,"parameters":{"type":"object","properties":props,"required":fields,"additionalProperties":false}}});
+            if *name == "edit" {
+                schema["function"]["parameters"]["oneOf"] = json!([
+                    {"type":"object","required":["old","new"],"properties":{"path":{},"old":{},"new":{}},"additionalProperties":false},
+                    {"type":"object","required":["edits"],"properties":{"path":{},"edits":{}},"additionalProperties":false}
+                ]);
+            }
+            let output = match *name {
+                "read"=>OutputKind::File, "repo_map"|"ls"|"search"=>OutputKind::Json, _=>OutputKind::Text
+            };
+            ToolDefinition{schema,access:if *mutates{Access::Mutate}else{Access::Read},output,
+                namespace:matches!(output,OutputKind::File|OutputKind::Json).then(||"workspace".into())}
         })
         .collect()
 }
@@ -321,8 +368,9 @@ mod tests {
     }
     #[test]
     fn shell_timeout_matches_its_schema() {
-        let schema = catalog(Mode::Code)
+        let schema = native_definitions()
             .into_iter()
+            .map(|d| d.schema)
             .find(|s| s["function"]["name"] == "shell")
             .unwrap();
         let timeout = &schema["function"]["parameters"]["properties"]["timeout"];

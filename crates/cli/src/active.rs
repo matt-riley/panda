@@ -15,18 +15,32 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, Default)]
+pub struct Delivery {
+    pub single_steer: bool,
+    pub single_follow: bool,
+}
 #[derive(Default)]
-struct Queue {
-    steer: Vec<String>,
-    follow: Vec<String>,
+pub struct Queue {
+    pub steer: Vec<String>,
+    pub follow: Vec<String>,
+    pub delivery: Delivery,
 }
 impl Queue {
-    fn take(&mut self, idle: bool) -> Vec<String> {
-        let mut messages = std::mem::take(&mut self.steer);
-        if idle && messages.is_empty() {
-            messages.append(&mut self.follow);
-        }
-        messages
+    pub fn take(&mut self, idle: bool) -> Vec<String> {
+        let (queue, single) = if !self.steer.is_empty() {
+            (&mut self.steer, self.delivery.single_steer)
+        } else if idle {
+            (&mut self.follow, self.delivery.single_follow)
+        } else {
+            return Vec::new();
+        };
+        let count = if single {
+            1.min(queue.len())
+        } else {
+            queue.len()
+        };
+        queue.drain(..count).collect()
     }
 }
 struct Raw;
@@ -39,7 +53,7 @@ impl Drop for Raw {
 
 #[derive(Default)]
 pub struct PendingTool {
-    call: Option<Call>,
+    calls: std::collections::VecDeque<Call>,
     details: Option<ToolDetails>,
 }
 pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
@@ -95,13 +109,13 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
         }
         Event::Calling(call) if screen.active => {
             screen.line(Tone::Tool, &ui::header(&call));
-            pending.call = Some(call);
+            pending.calls.push_back(call);
         }
         Event::Result(text) => {
             let error = text.starts_with("tool error: ");
             let display = result_text(&text, pending.details.take().as_ref());
             if screen.active {
-                screen.tool_result(pending.call.take().as_ref(), &display, error);
+                screen.tool_result(pending.calls.pop_front().as_ref(), &display, error);
             } else {
                 println!("{}", safe(&display));
             }
@@ -128,7 +142,7 @@ pub fn run(
     p: &mut (dyn Provider + Send),
     db: &mut (dyn Store + Send),
     tools: &(dyn Toolset + Sync),
-    input: Message,
+    (input, delivery): (Message, Delivery),
     cancel: &Cancel,
     screen: &mut Screen,
     editor: Option<&mut reedline::Reedline>,
@@ -157,7 +171,10 @@ pub fn run(
     let _raw = Raw;
     crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
     let mut terminal = crate::renderer::terminal()?;
-    let queue = Mutex::new(Queue::default());
+    let queue = Mutex::new(Queue {
+        delivery,
+        ..Queue::default()
+    });
     let (tx, rx) = mpsc::channel();
     let result = std::thread::scope(|scope| {
         let queue = &queue;
@@ -239,7 +256,7 @@ pub fn run(
                             }
                             (KeyCode::Up, KeyModifiers::ALT) => {
                                 let mut q = queue.lock().unwrap();
-                                let mut messages = q.take(false);
+                                let mut messages = std::mem::take(&mut q.steer);
                                 messages.append(&mut q.follow);
                                 messages.push(draft.to_owned());
                                 prompt.replace(messages.join("\n").trim_end().into());
@@ -268,7 +285,7 @@ pub fn run(
         ui_result.and(done)
     });
     let mut q = queue.into_inner().unwrap();
-    let mut held = q.take(false);
+    let mut held = std::mem::take(&mut q.steer);
     held.append(&mut q.follow);
     if !held.is_empty() {
         held.push(prompt.editor.current_buffer_contents().to_owned());
@@ -398,7 +415,7 @@ mod tests {
             &mut Script,
             &mut store,
             &coding,
-            Message::User("begin".into()),
+            (Message::User("begin".into()), Delivery::default()),
             &Cancel::default(),
             &mut screen,
             Some(&mut editor),
@@ -408,5 +425,33 @@ mod tests {
         assert!(
             matches!(store.load().unwrap().history.as_slice(), [Message::User(_),Message::Assistant{..},Message::Result{..},Message::User(c),Message::Assistant{..},Message::User(n),Message::Assistant{..}] if c=="correction" && n=="next")
         );
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    #[test]
+    fn each_delivery_mode_drains_inputs_exactly_once_and_preserves_pending_input() {
+        for single in [true, false] {
+            let mut queue = Queue {
+                steer: vec!["a".into(), "b".into()],
+                follow: vec!["c".into(), "d".into()],
+                delivery: Delivery {
+                    single_steer: single,
+                    single_follow: single,
+                },
+            };
+            let first = queue.take(false);
+            assert_eq!(first.len(), if single { 1 } else { 2 });
+            let second = queue.take(false);
+            assert_eq!([first, second].concat(), ["a", "b"]);
+            assert!(queue.take(false).is_empty());
+            let follow = queue.take(true);
+            assert_eq!(follow.len(), if single { 1 } else { 2 });
+            let mut held = queue.steer;
+            held.extend(queue.follow);
+            assert_eq!([follow, held].concat(), ["c", "d"]);
+        }
     }
 }

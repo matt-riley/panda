@@ -1,4 +1,4 @@
-((invoke, emit, catalog, read, write, emitImage) => {
+((invoke, batch, asyncMode, emit, catalog, read, write, emitImage) => {
     const stringify = JSON.stringify, parse = JSON.parse;
     globalThis.load = key => {
         if (typeof key !== "string") throw new TypeError("load() key must be a string");
@@ -11,20 +11,43 @@
         if (json === undefined && value !== undefined) throw new TypeError("store() requires a JSON value");
         write(key, json);
     };
-    const call = (name, args) => invoke(name, stringify(args));
-    const helpers = {
-        ls: (args = {}) => parse(call("ls", args)),
-        search: args => parse(call("search", args)),
-        repo_map: (args = {}) => parse(call("repo_map", args)),
-        read: args => {
-            const {text, image} = parse(call("read", args));
-            if (!image) return text;
-            const comma = image.indexOf(",");
-            return Object.freeze({type: "image", mimeType: image.slice(5, image.indexOf(";")), data: image.slice(comma + 1), note: text});
-        }
-    };
     const entries = Object.freeze(catalog.map(entry => Object.freeze(entry)));
-    globalThis.tools = Object.freeze(Object.fromEntries(entries.map(({name}) => [name, helpers[name]])));
+    const decode = (entry, value) => {
+        const kind = entry.output ?? (entry.name === "read" ? "file" : "json");
+        if (kind === "text") return value;
+        if (kind === "json") return parse(value);
+        const {text, image} = parse(value);
+        if (!image) return text;
+        return Object.freeze({type: "image", mimeType: image.slice(5, image.indexOf(";")), data: image.slice(image.indexOf(",")+1), note:text});
+    };
+    const pending = [];
+    const makeTools = asynchronous => Object.freeze(Object.fromEntries(entries.map(entry => [entry.name,
+        (args = {}) => asynchronous ? new Promise((resolve,reject) => {
+            if (pending.length >= 64) throw Error("Codemode nested call limit exceeded");
+            // Snapshot arguments before yielding to script code.
+            pending.push({entry,args:parse(stringify(args)),resolve,reject});
+        }) : decode(entry,invoke(entry.name,stringify(args)))
+    ])));
+    globalThis.asyncTools = makeTools(true);
+    globalThis.tools = asyncMode ? globalThis.asyncTools : makeTools(false);
+    globalThis.__flushTools = () => {
+        if (!pending.length) return false;
+        const group = pending.splice(0,4);
+        const replies = parse(batch(stringify(group.map(({entry,args}) => [entry.name,args]))));
+        group.forEach(({entry,resolve,reject},i) => {
+            try {
+                const result = replies[i];
+                if ("Err" in result) throw Error(result.Err);
+                resolve(decode(entry,result.Ok));
+            } catch (error) { reject(error); }
+        });
+        return true;
+    };
+    globalThis.describeNamespace = name => {
+        if (typeof name !== "string") throw new TypeError("describeNamespace() expects a string");
+        const members = entries.filter(e => (e.namespace ?? "workspace") === name);
+        return members.length ? members : undefined;
+    };
     globalThis.ALL_TOOLS = entries;
     const descriptions = new Map(entries.map(({name, description}) => [name, description]));
     globalThis.describeTool = name => {
@@ -46,7 +69,7 @@
         if (!Number.isInteger(limit) || limit <= 0) throw new TypeError("limit must be a positive integer");
         const namespace = options?.namespace;
         if (namespace != null && typeof namespace !== "string") throw new TypeError("namespace must be a string");
-        if (namespace) return []; // The native workspace helpers have no namespace.
+
 
         const terms = new Map();
         for (const term of new Set(words(query))) {
@@ -56,6 +79,7 @@
         const exactName = query.trim().toLowerCase();
         const matches = [];
         for (const {entry, names, counts, length} of documents) {
+            if (namespace && (entry.namespace ?? "workspace") !== namespace) continue;
             let covered = 0, score = 0;
             // BM25 length normalization, with extra weight for terms in the tool name.
             const norm = 1.2 * (0.25 + 0.75 * length / average);
@@ -92,7 +116,9 @@
     }
     const log = (...args) => emit(args.map(formatArgument).join(" "), true);
     globalThis.console = Object.freeze({ log, info: log, warn: log, error: log, debug: log });
-})(globalThis.__invoke, globalThis.__emit, globalThis.__catalog, globalThis.__load, globalThis.__store, globalThis.__image);
+})(globalThis.__invoke, globalThis.__batch, globalThis.__asyncMode, globalThis.__emit, globalThis.__catalog, globalThis.__load, globalThis.__store, globalThis.__image);
+delete globalThis.__batch;
+delete globalThis.__asyncMode;
 delete globalThis.__image;
 delete globalThis.__load;
 delete globalThis.__store;
