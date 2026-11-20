@@ -308,15 +308,11 @@ impl<'a> Codemode<'a> {
 
     fn execute(
         &self,
-        mode: Mode,
+        session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-        session: Option<&Session>,
     ) -> Result<(ToolOutput, StoreWrites)> {
-        let mut store = session.map_or_else(ScriptStore::default, |s| {
-            ScriptStore::from_history(&s.history)
-        });
         cancel.check()?;
         panda_core::validate_tool_args(
             &json!({"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}),
@@ -329,9 +325,10 @@ impl<'a> Codemode<'a> {
             "Codemode script exceeds 64 KiB"
         );
         let options = ScriptOptions::parse(script)?;
+        let mut store = ScriptStore::from_history(&session.history);
         let started = Instant::now();
         let deadline = started + Duration::from_millis(options.timeout_ms);
-        let definitions = self.inner.nested_definitions(mode, session);
+        let definitions = self.inner.nested_definitions(session);
         let schemas: Vec<_> = definitions.iter().map(|d| d.schema.clone()).collect();
         let mut catalog: Vec<_> = Self::helpers(&schemas)
             .filter(|h| {
@@ -465,7 +462,9 @@ impl<'a> Codemode<'a> {
                                     .map(|c| {
                                         scope.spawn(|| {
                                             nested.check().and_then(|()| {
-                                                self.inner.run_nested(mode, session, c, &nested)
+                                                panda_core::run_nested(
+                                                    self.inner, session, c, &nested,
+                                                )
                                             })
                                         })
                                     })
@@ -580,7 +579,7 @@ impl Toolset for Codemode<'_> {
         schemas.push(self.schemas(s.mode).pop().expect("codemode declaration"));
         schemas
     }
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
@@ -588,9 +587,9 @@ impl Toolset for Codemode<'_> {
         emit: &mut Emit,
     ) -> Result<(ToolOutput, StoreWrites)> {
         if call.name == "codemode" {
-            self.execute(session.mode, call, cancel, emit, Some(session))
+            self.execute(session, call, cancel, emit)
         } else {
-            self.inner.run_in_session(session, call, cancel, emit)
+            self.inner.run(session, call, cancel, emit)
         }
     }
 
@@ -635,24 +634,6 @@ impl Toolset for Codemode<'_> {
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
-    }
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
-        self.run_stream(mode, call, cancel, &mut |_| {})
-            .map(|output| output.text)
-    }
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        emit: &mut Emit,
-    ) -> Result<ToolOutput> {
-        if call.name == "codemode" {
-            self.execute(mode, call, cancel, emit, None)
-                .map(|(output, _)| output)
-        } else {
-            self.inner.run_stream(mode, call, cancel, emit)
-        }
     }
 }
 

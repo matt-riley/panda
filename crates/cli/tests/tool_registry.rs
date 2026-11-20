@@ -124,42 +124,44 @@ fn discoveries_follow_the_selected_branch_across_restart() -> Result<()> {
     let mut db = Disk::open(state.path(), root.path(), Some(id))?;
     let saved = db.load()?;
     let probe = call("fixture", json!({"value":0}));
-    let output = tools
-        .run_in_session(&saved, &probe, &cancel, &mut |_| {})?
-        .0;
+    let output = tools.run(&saved, &probe, &cancel, &mut |_| {})?.0;
     assert_eq!(
         serde_json::from_str::<Value>(&output.text)?,
         json!({"value":0})
     );
     assert_eq!(
-        tools
-            .run_nested(saved.mode, Some(&saved), &probe, &cancel)?
-            .text,
+        run_nested(&tools, &saved, &probe, &cancel)?.text,
         output.text
     );
-    assert!(tools.run_nested(saved.mode, None, &probe, &cancel).is_err());
+    assert!(
+        run_nested(
+            &tools,
+            &Session {
+                mode: saved.mode,
+                ..Default::default()
+            },
+            &probe,
+            &cancel
+        )
+        .is_err()
+    );
     db.navigate(common)?;
     assert!(
         tools
-            .run_in_session(&db.load()?, &probe, &cancel, &mut |_| {})
+            .run(&db.load()?, &probe, &cancel, &mut |_| {})
             .is_err()
     );
     let sibling = db.load()?;
-    assert!(
-        tools
-            .run_nested(sibling.mode, Some(&sibling), &probe, &cancel)
-            .is_err()
-    );
+    assert!(run_nested(&tools, &sibling, &probe, &cancel).is_err());
     for session in [&saved, &sibling] {
         assert!(
-            tools
-                .run_nested(
-                    session.mode,
-                    Some(session),
-                    &call("secret", json!({"value":0})),
-                    &cancel
-                )
-                .is_err()
+            run_nested(
+                &tools,
+                session,
+                &call("secret", json!({"value":0})),
+                &cancel
+            )
+            .is_err()
         );
     }
     Ok(())
@@ -173,7 +175,15 @@ fn validated_registry_tools_and_async_batches_use_the_same_handlers() -> Result<
     let canonical = root.path().canonicalize()?;
     let runner = Codemode::new(&tools, env!("CARGO_BIN_EXE_panda").as_ref(), &canonical);
     let cancel = Cancel::default();
-    let run = |name, args| runner.run(Mode::Plan, &call(name, args), &cancel);
+    let session = Session {
+        mode: Mode::Plan,
+        ..Default::default()
+    };
+    let run = |name, args| {
+        runner
+            .run(&session, &call(name, args), &cancel, &mut |_| {})
+            .map(|(output, _)| output.text)
+    };
     for (name, args) in [
         ("fixture", json!({"value":"bad"})),
         ("change", json!({"value":0})),

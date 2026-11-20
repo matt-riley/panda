@@ -6,7 +6,7 @@ use serde_json::json;
 #[ignore = "requires native macOS Seatbelt"]
 fn batch_edit_is_available_only_in_code_mode() -> anyhow::Result<()> {
     use panda_coding::Coding;
-    use panda_core::{Call, Mode, Toolset};
+    use panda_core::{Call, Mode, Session, Toolset};
 
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("source");
@@ -27,7 +27,15 @@ fn batch_edit_is_available_only_in_code_mode() -> anyhow::Result<()> {
             .all(|s| s["function"]["name"] != "edit")
     );
     let error = coding
-        .run(Mode::Plan, &batch, &Cancel::default())
+        .run(
+            &Session {
+                mode: Mode::Plan,
+                ..Session::default()
+            },
+            &batch,
+            &Cancel::default(),
+            &mut |_| {},
+        )
         .unwrap_err();
     assert!(error.to_string().contains("unavailable in Plan"));
     assert_eq!(std::fs::read(&file)?, b"ab");
@@ -44,7 +52,10 @@ fn batch_edit_is_available_only_in_code_mode() -> anyhow::Result<()> {
         json!(["old", "new"])
     );
     assert_eq!(
-        coding.run(Mode::Code, &batch, &Cancel::default())?,
+        coding
+            .run(&Session::default(), &batch, &Cancel::default(), &mut |_| {})?
+            .0
+            .text,
         "saved\n− 1  ab\n+ 1  ba"
     );
     assert_eq!(std::fs::read(file)?, b"ba");
@@ -75,6 +86,21 @@ fn native_workspace_enforces_policy() {
     assert!(run("shell", json!({"command":"cat link"})).is_err());
     assert!(run("read", json!({"path":"link"})).is_err());
     assert!(run("shell", json!({"command":"sh -c 'echo bad > link'"})).is_err());
+    for dir in [".git", ".panda", ".agents", ".codex", ".pi"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+        let path = format!("{dir}/marker");
+        assert!(
+            run("write", json!({"path":path,"text":"changed"})).is_err(),
+            "{path}"
+        );
+        assert!(
+            run("shell", json!({"command":format!("touch {path}")})).is_err(),
+            "{path}"
+        );
+        assert!(!root.join(&path).exists(), "{path}");
+    }
+    assert!(run("shell", json!({"command":"ln ../private hard-link"})).is_err());
+    assert!(!root.join("hard-link").exists());
     assert_eq!(std::fs::read_to_string(private).unwrap(), "sentinel");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     assert!(run("shell",json!({"command":format!("/usr/bin/nc -z 127.0.0.1 {}",listener.local_addr().unwrap().port())})).is_err());
