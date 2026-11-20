@@ -94,7 +94,7 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
         }
         Event::Text(s) => screen.stream(&s),
         Event::ResultDetails { details, .. } => pending.details = Some(details),
-        Event::NestedRead(_) | Event::Responder(_) => {}
+        Event::NestedRead(_) | Event::Responder(_) | Event::BackingModel(_) | Event::Replay(_) => {}
         Event::NestedCall { call, .. } => {
             let line = format!("  {}", ui::header(&call));
             if screen.active {

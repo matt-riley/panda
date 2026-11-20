@@ -9,6 +9,7 @@ mod model_catalog;
 use model_catalog::{Catalog, available_models, scope_effort};
 mod picker;
 mod renderer;
+mod routing;
 mod screen;
 mod settings;
 mod terminal_config;
@@ -51,6 +52,9 @@ fn key_env(provider: &str) -> Result<&'static str> {
     match provider {
         "deepseek" => Ok("DEEPSEEK_API_KEY"),
         "openrouter" => Ok("OPENROUTER_API_KEY"),
+        "anthropic" => Ok("ANTHROPIC_API_KEY"),
+        "openai-api" => Ok("OPENAI_API_KEY"),
+        "google" => Ok("GEMINI_API_KEY"),
         _ => bail!("unknown API-key provider"),
     }
 }
@@ -66,7 +70,9 @@ fn provider_id(input: &str) -> Result<&str> {
 
 fn canonical_model<'a>(id: &'a str, model: &'a str) -> (&'a str, &'a str) {
     let name = model.rsplit('/').next().unwrap_or(model);
-    if PROVIDERS.contains(&id) && name.to_ascii_lowercase().starts_with("gpt-") {
+    if matches!(id, "deepseek" | "openrouter" | "openai-codex")
+        && name.to_ascii_lowercase().starts_with("gpt-")
+    {
         ("openai-codex", name)
     } else {
         (id, model)
@@ -99,10 +105,20 @@ enum Picker {
     Select,
 }
 
-const PROVIDERS: [&str; 3] = ["openai-codex", "deepseek", "openrouter"];
+const PROVIDERS: [&str; 6] = [
+    "openai-codex",
+    "deepseek",
+    "openrouter",
+    "anthropic",
+    "openai-api",
+    "google",
+];
 fn configured(state: &Path, id: &str) -> Result<bool> {
     if model_catalog::logged_out(state, id)? {
         return Ok(false);
+    }
+    if id == "router" {
+        return Ok(!Catalog::read(state)?.routes.is_empty());
     }
     if let Some(ep) = Catalog::read(state)?.providers.get(id) {
         return Ok(ep.key(state, id).is_ok());
@@ -116,6 +132,14 @@ fn configured(state: &Path, id: &str) -> Result<bool> {
     )
 }
 fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Option<u64>)>> {
+    if id == "router" {
+        let catalog = Catalog::read(state)?;
+        return Ok(catalog
+            .routes
+            .iter()
+            .map(|(name, r)| (name.clone(), r.window(&catalog)))
+            .collect());
+    }
     if let Some(ep) = Catalog::read(state)?.providers.get(id) {
         return Ok(ep
             .models
@@ -131,11 +155,11 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
     {
         return Ok(rows);
     }
-    let key = if id == "deepseek" {
+    let key = if matches!(id, "deepseek" | "anthropic" | "openai-api" | "google") {
         Some(
             std::env::var(key_env(id)?)
-                .or_else(|_| fs::read_to_string(state.join("deepseek.key")))
-                .context("use :login deepseek first")?,
+                .or_else(|_| fs::read_to_string(state.join(format!("{id}.key"))))
+                .with_context(|| format!("use :login {id} first"))?,
         )
     } else {
         None
@@ -271,6 +295,19 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     );
     if let Some(ep) = Catalog::read(state)?.providers.get(p) {
         let model = ep.model(m)?;
+        if let Some(api) = ep.api.as_deref().filter(|api| *api != "openai-completions") {
+            return Ok(Box::new(panda_providers::native::NativeApi {
+                family: panda_providers::native::Family::parse(api)?,
+                provider: p.into(),
+                api: Api {
+                    model: m.into(),
+                    endpoint: ep.base_url.clone(),
+                    key: ep.key(state, p)?,
+                },
+                max_tokens: model.max_tokens,
+                images: model.input.iter().any(|s| s == "image"),
+            }));
+        }
         return Ok(Box::new(
             Api {
                 key: ep.key(state, p)?,
@@ -294,6 +331,19 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     let key = std::env::var(var)
         .or_else(|_| fs::read_to_string(state.join(format!("{p}.key"))))
         .with_context(|| format!("set {var} or use :login {p}"))?;
+    if let Some((family, base)) = panda_providers::native::builtin(p) {
+        return Ok(Box::new(panda_providers::native::NativeApi {
+            family,
+            provider: p.into(),
+            api: Api {
+                key: key.trim().into(),
+                model: m.into(),
+                endpoint: base.into(),
+            },
+            max_tokens: 4096,
+            images: true,
+        }));
+    }
     let endpoint = match p {
         "deepseek" => "https://api.deepseek.com/chat/completions",
         _ => "https://openrouter.ai/api/v1/chat/completions",
@@ -396,9 +446,15 @@ fn configure_context(
     let keep_recent_tokens = settings.retention(id, model);
     let path = state.join(format!("catalog-{id}.json"));
     let catalog = Catalog::read(state)?;
-    let window = if let Some(ep) = catalog.providers.get(id) {
+    let window = if id == "router" {
+        catalog
+            .routes
+            .get(model)
+            .context("unknown virtual model")?
+            .window(&catalog)
+    } else if let Some(ep) = catalog.providers.get(id) {
         Some(ep.model(model)?.context_window)
-    } else if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
+    } else if PROVIDERS.contains(&id) && path.try_exists()? {
         let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
         rows.iter().find(|(m, _)| m == model).and_then(|r| r.1)
     } else {
@@ -417,9 +473,9 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     screen.footer.effort = s.reasoning.clone();
     screen.line(Tone::Dim, &format!("session {} ({:?})", db.id(), s.mode));
     let mut calls_by_id = std::collections::HashMap::new();
-    for m in &s.history {
+    for (index, m) in s.history.iter().enumerate() {
         match m {
-            Message::CodemodeStore(_) => continue,
+            Message::CodemodeStore(_) | Message::Replay(_) => continue,
             Message::Truncated(partial) => {
                 screen.line(Tone::Dim, "Partial reply (output length limit)");
                 if !partial.reasoning.is_empty() {
@@ -437,6 +493,14 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
             ),
             Message::User(t) => screen.line(Tone::User, &format!("you> {}", safe(t))),
             Message::Assistant { text, calls } => {
+                if s.model.as_ref().is_some_and(|id| id.provider == "router")
+                    && let Some(actual) = s.responders.get(&index)
+                {
+                    screen.line(
+                        Tone::Dim,
+                        &format!("Responder · {}/{}", actual.provider, actual.model),
+                    );
+                }
                 screen.finish_reply(text);
                 for c in calls {
                     if screen.active {
@@ -872,24 +936,35 @@ fn run(
     let persist_default = options.model.is_none();
     let make_provider = |state: &Path, p: &str, m: &str| -> Result<Box<dyn Provider + Send>> {
         let configured = Catalog::read(state)?;
-        let prices = if let Some(ep) = configured.providers.get(p) {
-            ep.model(m)?.cost.clone()
-        } else if p == "openrouter" && state.join("catalog-openrouter-prices.json").try_exists()? {
-            let mut rows: std::collections::BTreeMap<String, TokenPrices> =
-                serde_json::from_slice(&fs::read(state.join("catalog-openrouter-prices.json"))?)?;
-            rows.remove(m)
-        } else {
-            None
+        let id = ModelId {
+            provider: p.into(),
+            model: m.into(),
         };
-        let inner = Box::new(IdentifiedProvider {
-            persist_default,
-            inner: provider(state, p, m)?,
-            id: ModelId {
-                provider: p.into(),
-                model: m.into(),
-            },
-            prices,
-        });
+        let inner: Box<dyn Provider + Send> = if p == "router" {
+            ensure!(
+                !model_catalog::logged_out(state, p)?,
+                "router is logged out"
+            );
+            Box::new(routing::Router {
+                id,
+                state: state.into(),
+                route: configured
+                    .routes
+                    .get(m)
+                    .context("unknown virtual model")?
+                    .clone(),
+                connect: provider,
+                persist: persist_default,
+                last_price: None,
+            })
+        } else {
+            Box::new(IdentifiedProvider {
+                persist_default,
+                inner: provider(state, p, m)?,
+                id,
+                prices: routing::prices(state, &configured, p, m)?,
+            })
+        };
         if std::env::var("PANDA_NATIVE_COMPACTION").as_deref() == Ok("1") {
             Ok(Box::new(panda_providers::jev::NativeProvider {
                 inner,
@@ -1349,7 +1424,7 @@ fn run(
                     } else {
                         "Choose a model provider"
                     };
-                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (:cancel to close)."));
+                    screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter · anthropic · openai-api · google. Enter a number or name (:cancel to close)."));
                 }
                 ":usage" => {
                     let s = db.load()?;
@@ -1401,6 +1476,7 @@ fn run(
                     for id in ids {
                         ensure!(catalog.ids().contains(&id), "unknown provider {id}");
                         if first == ":logout" {
+                            ensure!(id != "router", "manage credentials on the backing provider");
                             fs::write(state.join(format!("{id}.logged-out")), b"")?;
                             model_catalog::remove(&state.join(format!("{id}.key")))?;
                             if subscription(id) {
@@ -1535,6 +1611,9 @@ fn run(
                         };
                         let (id, m) = canonical_model(id, m);
                         ensure!(catalog.ids().contains(&id), "unknown provider");
+                        if id == "router" {
+                            ensure!(catalog.routes.contains_key(m), "unknown virtual model {m}");
+                        }
                         if let Some(ep) = catalog.providers.get(id) {
                             ep.model(m)?;
                         }
@@ -1693,7 +1772,16 @@ fn run(
                         &mut screen,
                         editor.as_mut(),
                     )?;
-                    screen.footer.usage = usage(&db.load()?);
+                    let session = db.load()?;
+                    if p == "router"
+                        && let Some((_, actual)) = session.responders.last_key_value()
+                    {
+                        screen.line(
+                            Tone::Dim,
+                            &format!("Responder · {}/{}", actual.provider, actual.model),
+                        );
+                    }
+                    screen.footer.usage = usage(&session);
                 }
             }
             Ok(())

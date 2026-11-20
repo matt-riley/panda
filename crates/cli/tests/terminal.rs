@@ -228,3 +228,18 @@ fn custom_model_routes_branches_scopes_and_usage() {
             .success()
     );
 }
+
+#[test]
+fn native_families_and_routed_responders() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/native_models.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

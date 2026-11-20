@@ -21,6 +21,8 @@ panda
 
 For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `:model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `:login deepseek` or `:login openrouter`.
 
+Panda supports native Anthropic Messages, OpenAI Responses and Gemini alongside Codex subscriptions. Use a virtual model to route individual requests to the configured physical providers. [Provider and routing guide](docs/native-providers.md)
+
 Register OpenAI-compatible endpoints in `$PANDA_HOME/models.json` (the default state directory is `~/.panda`). Each model sets its context window, output ceiling and accepted inputs. Prices are US dollars per million tokens. Omitting a price leaves the corresponding cost unknown. For example:
 
 ```json

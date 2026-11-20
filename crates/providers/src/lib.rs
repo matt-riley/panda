@@ -163,7 +163,7 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     let mut history = history.iter().peekable();
     while let Some(msg) = history.next() {
         let message = match msg {
-            Message::Truncated(_) | Message::CodemodeStore(_) => continue,
+            Message::Truncated(_) | Message::CodemodeStore(_) | Message::Replay(_) => continue,
             Message::BranchSummary(s) => {
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")})
             }
@@ -492,4 +492,5 @@ mod tests {
     }
 }
 mod auth;
+pub mod native;
 pub mod wire;

@@ -10,15 +10,18 @@ use std::{
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
+    #[serde(default)]
     pub providers: BTreeMap<String, Endpoint>,
+    #[serde(default, rename = "virtualModels")]
+    pub routes: BTreeMap<String, crate::routing::Route>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
-    base_url: String,
+    pub base_url: String,
     pub api_key: Option<String>,
-    api: Option<String>,
+    pub api: Option<String>,
     pub models: Vec<Model>,
 }
 
@@ -56,7 +59,7 @@ impl Catalog {
             serde_json::from_slice(&fs::read(&path)?).context("invalid models.json")?;
         for (id, ep) in &result.providers {
             ensure!(
-                valid_provider(id) && !matches!(id.as_str(), "openai" | "codex"),
+                valid_provider(id) && !matches!(id.as_str(), "openai" | "codex" | "router"),
                 "invalid models.json provider id {id}"
             );
             let url = panda_providers::endpoint_url(&ep.base_url)
@@ -65,7 +68,8 @@ impl Catalog {
             ensure!(
                 ep.api
                     .as_deref()
-                    .is_none_or(|api| api == "openai-completions"),
+                    .is_none_or(|api| api == "openai-completions"
+                        || panda_providers::native::Family::parse(api).is_ok()),
                 "unsupported API for {id} in models.json"
             );
             if let Some(key) = &ep.api_key {
@@ -101,6 +105,27 @@ impl Catalog {
                 );
             }
         }
+        for (name, route) in &result.routes {
+            ensure!(
+                !name.is_empty() && !name.chars().any(char::is_whitespace),
+                "invalid virtual model ID"
+            );
+            for target in route.targets() {
+                ensure!(
+                    target.provider != "router" && !target.model.is_empty(),
+                    "virtual model {name} must target a physical model"
+                );
+                if let Some(ep) = result.providers.get(&target.provider) {
+                    ep.model(&target.model)?;
+                } else {
+                    ensure!(
+                        crate::PROVIDERS.contains(&target.provider.as_str()),
+                        "unknown backing provider {}",
+                        target.provider
+                    );
+                }
+            }
+        }
         Ok(result)
     }
 
@@ -114,6 +139,7 @@ impl Catalog {
                     .map(String::as_str)
                     .filter(|id| !crate::PROVIDERS.contains(id)),
             )
+            .chain((!self.routes.is_empty()).then_some("router"))
             .collect()
     }
 }

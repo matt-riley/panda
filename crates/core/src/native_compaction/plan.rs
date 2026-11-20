@@ -189,7 +189,10 @@ pub fn visible(session: &Session, end: usize) -> Vec<Segment> {
                     }
                 }
                 Message::BranchSummary(text) => push(Role::Branch, text, None, None, false),
-                Message::Truncated(_) | Message::CodemodeStore(_) | Message::Reasoning(_) => {}
+                Message::Truncated(_)
+                | Message::CodemodeStore(_)
+                | Message::Reasoning(_)
+                | Message::Replay(_) => {}
             }
         }
     }

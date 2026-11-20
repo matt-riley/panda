@@ -62,6 +62,8 @@ impl From<String> for ToolOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    /// Provider-signed reasoning metadata belongs only to the originating backend.
+    Replay(ProviderReplay),
     CodemodeStore(StoreWrites),
     Truncated(LengthStop),
     BranchSummary(String),
@@ -87,6 +89,14 @@ pub enum Message {
         #[serde(default, rename = "nestedReads", skip_serializing_if = "Vec::is_empty")]
         nested_reads: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderReplay {
+    pub provider: String,
+    pub model: String,
+    pub family: String,
+    pub blocks: Vec<Value>,
 }
 
 /// Pi's branch-local codemode-store custom entry. Applied in delete-then-set order.
@@ -413,7 +423,7 @@ fn summarize(
             Ok(())
         };
     for message in messages {
-        if matches!(message, Message::CodemodeStore(_)) {
+        if matches!(message, Message::CodemodeStore(_) | Message::Replay(_)) {
             continue;
         }
         for ch in message.summary_text().chars().chain(std::iter::once('\n')) {
@@ -482,6 +492,8 @@ pub enum Event {
     Truncated { text: String, retrying: bool },
     Retry { attempt: u32, seconds: u64 },
     Responder(String),
+    BackingModel(ModelId),
+    Replay(ProviderReplay),
     Reasoning(String),
     ToolOutput(String),
     CompactionNotice(String),
@@ -691,10 +703,15 @@ pub fn turn_message(
             save_summary(store, &mut s, result)?;
             compacted = true;
         }
-        let (text, calls, thought, reading) = loop {
+        let (text, calls, thought, reading, replay) = loop {
+            let mut replay = None;
             let mut reading = None;
             let mut thought = String::new();
             let mut relay = |e| {
+                if let Event::Replay(data) = e {
+                    replay = Some(data);
+                    return;
+                }
                 if let Event::Usage(u) = &e {
                     reading = UsageRecord::from_event(u);
                 }
@@ -727,7 +744,7 @@ pub fn turn_message(
                 store.save(&mut s)?;
             }
             match reply {
-                Ok((text, calls)) => break (text, calls, thought, reading),
+                Ok((text, calls)) => break (text, calls, thought, reading, replay),
                 Err(e) if e.is::<LengthStop>() => {
                     let mut partial = e.downcast::<LengthStop>()?;
                     partial.reasoning = thought;
@@ -788,6 +805,9 @@ pub fn turn_message(
             calls.iter().all(|c| !c.id.is_empty() && ids.insert(&c.id)),
             "duplicate or missing tool ID"
         );
+        if let Some(replay) = replay {
+            s.history.push(Message::Replay(replay));
+        }
         if !thought.is_empty() {
             s.history.push(Message::Reasoning(thought));
         }
@@ -945,7 +965,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                 break;
             }
             Message::Result { id, .. } => completed.push(id.clone()),
-            Message::Reasoning(_) | Message::CodemodeStore(_) => {}
+            Message::Reasoning(_) | Message::CodemodeStore(_) | Message::Replay(_) => {}
             Message::BranchSummary(_) | Message::Truncated(_) => break,
             Message::User(_) | Message::Images { .. } => break,
         }

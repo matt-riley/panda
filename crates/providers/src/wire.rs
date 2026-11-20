@@ -4,12 +4,16 @@ use panda_core::{Call, Emit, Event, LengthStop, Message};
 use serde_json::{Value, json};
 
 #[derive(Default)]
-struct Lines {
-    partial: Vec<u8>,
+pub(super) struct Lines {
+    pub(super) partial: Vec<u8>,
     total: usize,
 }
 impl Lines {
-    fn feed(&mut self, bytes: &[u8], mut consume: impl FnMut(Value) -> Result<()>) -> Result<()> {
+    pub(super) fn feed(
+        &mut self,
+        bytes: &[u8],
+        mut consume: impl FnMut(Value) -> Result<()>,
+    ) -> Result<()> {
         self.total = self.total.saturating_add(bytes.len());
         ensure!(self.total <= 16 * 1024 * 1024, "response size limit");
         for &b in bytes {
@@ -39,6 +43,8 @@ pub struct Responses {
     lines: Lines,
     text: String,
     calls: Vec<Value>,
+    pending: std::collections::BTreeMap<String, (Value, String)>,
+    pub(super) replay: Vec<Value>,
     complete: bool,
     cutoff: Option<(Option<u64>, Option<u64>)>,
 }
@@ -60,8 +66,62 @@ impl Responses {
                     self.text += t;
                     emit(Event::Text(t.into()))
                 }
+                "response.output_item.added" if v["item"]["type"] == "function_call" => {
+                    let item = &v["item"];
+                    let id = string(item, "id")?.to_owned();
+                    ensure!(
+                        self.pending.len() < 128
+                            && self
+                                .pending
+                                .insert(
+                                    id,
+                                    (
+                                        item.clone(),
+                                        item["arguments"].as_str().unwrap_or("").to_owned()
+                                    )
+                                )
+                                .is_none(),
+                        "duplicate or excessive function call"
+                    );
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some((_, args)) = v["item_id"]
+                        .as_str()
+                        .and_then(|id| self.pending.get_mut(id))
+                    {
+                        args.push_str(v["delta"].as_str().context("invalid argument delta")?);
+                    }
+                }
+                "response.function_call_arguments.done" => {
+                    if let Some((_, args)) = v["item_id"]
+                        .as_str()
+                        .and_then(|id| self.pending.get_mut(id))
+                        && let Some(full) = v["arguments"].as_str()
+                    {
+                        *args = full.to_owned();
+                    }
+                }
+                "response.output_item.done"
+                    if v["item"]["type"] == "reasoning"
+                        && v["item"]["encrypted_content"].is_string() =>
+                {
+                    self.replay.push(v["item"].clone());
+                }
                 "response.output_item.done" if v["item"]["type"] == "function_call" => {
-                    self.calls.push(v["item"].clone());
+                    let mut item = v["item"].clone();
+                    if let Some((start, args)) =
+                        item["id"].as_str().and_then(|id| self.pending.remove(id))
+                    {
+                        for key in ["call_id", "name"] {
+                            if item[key].is_null() {
+                                item[key] = start[key].clone();
+                            }
+                        }
+                        if item["arguments"].as_str().is_none_or(str::is_empty) {
+                            item["arguments"] = json!(args);
+                        }
+                    }
+                    self.calls.push(item);
                 }
                 "response.incomplete"
                     if v["response"]["incomplete_details"]["reason"] == "max_output_tokens" =>
@@ -97,12 +157,17 @@ impl Responses {
             Ok(())
         })
     }
-    pub fn finish(self) -> Result<(String, Vec<Call>)> {
+    pub fn finish(mut self) -> Result<(String, Vec<Call>)> {
         ensure!(
             self.complete && self.lines.partial.is_empty(),
             "incomplete Responses stream"
         );
         if let Some((output_tokens, output_limit)) = self.cutoff {
+            for (_, (mut item, args)) in self.pending {
+                item["arguments"] = json!(args);
+                self.calls.push(item);
+            }
+
             return Err(LengthStop {
                 text: self.text,
                 tool_fragments: self.calls,
@@ -112,6 +177,10 @@ impl Responses {
             }
             .into());
         }
+        ensure!(
+            self.pending.is_empty(),
+            "unfinished Responses function call"
+        );
         let calls = self
             .calls
             .iter()
@@ -139,10 +208,32 @@ pub(crate) fn responses_body(
     history: &[Message],
     tools: &[Value],
 ) -> Value {
+    responses_history(model, system, history, tools, None)
+}
+pub(super) fn responses_history(
+    model: &str,
+    system: &str,
+    history: &[Message],
+    tools: &[Value],
+    provider: Option<&str>,
+) -> Value {
     let mut input = Vec::new();
     for m in history {
         match m {
-            Message::Truncated(_) | Message::CodemodeStore(_) => continue,
+            Message::Replay(state)
+                if Some(state.provider.as_str()) == provider
+                    && state.model == model
+                    && state.family == "openai-responses" =>
+            {
+                input.extend(
+                    state
+                        .blocks
+                        .iter()
+                        .filter(|b| b["type"] == "reasoning" && b["encrypted_content"].is_string())
+                        .cloned(),
+                );
+            }
+            Message::Truncated(_) | Message::CodemodeStore(_) | Message::Replay(_) => continue,
             Message::BranchSummary(s) => input.push(
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")}),
             ),

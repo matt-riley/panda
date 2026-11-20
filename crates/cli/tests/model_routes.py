@@ -69,7 +69,7 @@ def exercise(port, root):
     repo.mkdir()
     state.mkdir(mode=0o700)
     env = {k: v for k, v in os.environ.items()
-           if k not in {"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"}}
+           if k not in {"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"}}
     env.update(PANDA_HOME=str(state), HOME=str(root), TERM="xterm-256color",
                MODELS_A_KEY="key-a", MODELS_B_KEY="key-b")
     repo.joinpath("test.png").write_bytes(base64.b64decode(
