@@ -98,3 +98,19 @@ def check(root, state, run, requests, saved_session):
     assert saved_session(sid).get("keepRecentTokens") != 555
     requests.clear()
 
+
+    secret = "credential-in-session-97bb"
+    (state / "secret-fixture.key").write_text(secret)
+    cli(["--print"], secret)
+    requests.clear()
+    lines = cli(["--continue"], ":diagnostics\n:bug-report\n:changelog 0.1.20\n:q\n")
+    assert any("allowlist-aware tool discovery" in line for line in lines)
+    for prefix in ["diagnostics-", "bug-report-"]:
+        bundle, = state.glob(prefix + "*.json")
+        contents = bundle.read_text()
+        report = json.loads(contents)
+        assert report["session"]["messages"] >= 2
+        assert secret not in contents and str(root) not in contents and "secret-fixture" not in contents
+        assert bundle.stat().st_mode & 0o077 == 0
+        assert ("reproduction" in report) == (prefix == "bug-report-")
+    assert requests == []

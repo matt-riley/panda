@@ -188,3 +188,9 @@ At each directory from the Git root to the launch directory, Panda selects the f
 Markdown prompt files in `$PANDA_HOME/prompts/` become commands such as `/review "API compatibility"`. With `--trust-project`, Panda also discovers `.pi/prompts/` at the project root. User templates win name collisions and built-in terminal commands keep their names. Use `:prompts` to list templates. As in Pi, templates support positional arguments, all arguments, defaults and slices.
 
 Panda discovers ancestor `.agents/skills` and `.pi/skills` directories up to the Git root. The nearest definition wins duplicate names, followed by user and additional skill roots. `:skills` reports invalid frontmatter and lists both paths for name collisions. A skill declaring `disable-model-invocation: true` can still be invoked with `:skill:NAME`; model search, loading and the startup index omit it.
+
+## Offline diagnostics
+
+Use `:diagnostics` to save a private JSON file under Panda’s state directory. It records the build, platform, session ID, revision, mode, message count and checkpoint status. `:bug-report` also includes fields you can fill in locally with reproduction steps and expected and observed behavior. `:changelog` displays the latest bundled release, and `:changelog 0.1.20` selects a release offline.
+
+External transcript sharing is excluded from these commands. To share a conversation yourself, export the specific session with `--export-session ID FILE`, inspect the file and choose its recipient.
