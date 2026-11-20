@@ -89,11 +89,15 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
 | Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
+The opt-in native compactor (set `PANDA_NATIVE_COMPACTION=1`) builds an extractive handoff at a clean turn boundary or with `:compact`. Its planner retains recent whole exchanges, using a 20,000-token default. The optional Jev judge uses `TYPESAFE_API_KEY` and masks credentials in outgoing requests. Without a key, it makes no judge requests and preserves unscored source material. `:context` shows the latest native compaction outcome.
+
 To keep recent exchanges verbatim during manual and automatic compaction, set an estimated token budget in `$PANDA_HOME/settings.json` and restart Panda. This example keeps up to 20,000 estimated tokens.
 
 ```json
-{"compaction": {"keepRecentTokens": 20000}}
+{"compaction": {"keepRecentTokens": 20000, "modelOverrides": {"deepseek/deepseek-chat": {"keepRecentTokens": 8000}}}}
 ```
+
+The active provider/model override takes precedence over the global setting, including an explicit zero. An invocation-level `--keep-recent-tokens` overrides both.
 
 Panda keeps the newest whole user exchanges that fit, including their tool calls and results, and summarizes the older messages. When all eligible messages fit, compaction skips the summary request. A budget of `0` summarizes all eligible messages. With the setting omitted, manual compaction covers the full history and automatic threshold compaction uses its model-based retention budget.
 

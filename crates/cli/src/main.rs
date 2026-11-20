@@ -391,8 +391,9 @@ fn configure_context(
     state: &Path,
     id: &str,
     model: &str,
-    keep_recent_tokens: Option<u64>,
+    settings: &settings::Settings,
 ) -> Result<()> {
+    let keep_recent_tokens = settings.retention(id, model);
     let path = state.join(format!("catalog-{id}.json"));
     let catalog = Catalog::read(state)?;
     let window = if let Some(ep) = catalog.providers.get(id) {
@@ -880,7 +881,7 @@ fn run(
         } else {
             None
         };
-        Ok(Box::new(IdentifiedProvider {
+        let inner = Box::new(IdentifiedProvider {
             persist_default,
             inner: provider(state, p, m)?,
             id: ModelId {
@@ -888,9 +889,17 @@ fn run(
                 model: m.into(),
             },
             prices,
-        }))
+        });
+        if std::env::var("PANDA_NATIVE_COMPACTION").as_deref() == Ok("1") {
+            Ok(Box::new(panda_providers::jev::NativeProvider {
+                inner,
+                judge: panda_providers::jev::Jev::from_env()?,
+            }))
+        } else {
+            Ok(inner)
+        }
     };
-    configure_context(store, &state, &p, &model, settings.keep)?;
+    configure_context(store, &state, &p, &model, &settings)?;
     let cancel = Cancel::default();
     let signal = cancel.clone();
     ctrlc::set_handler(move || signal.stop())?;
@@ -1084,7 +1093,7 @@ fn run(
                         [] => {}
                         ["reload"] => {
                             let next = settings::Settings::read(&state, project)?;
-                            configure_context(&mut db, &state, &p, &model, next.keep)?;
+                            configure_context(&mut db, &state, &p, &model, &next)?;
                             *index.write().unwrap() = if next.skill_index {
                                 coding.skills.startup_index()?
                             } else {
@@ -1094,7 +1103,7 @@ fn run(
                         }
                         _ => bail!("use :settings or :settings reload"),
                     }
-                    for row in settings.describe(cli_recent).lines() {
+                    for row in settings.describe(cli_recent, &p, &model).lines() {
                         screen.line(Tone::Dim, row);
                     }
                 }
@@ -1136,7 +1145,7 @@ fn run(
                     screen.clear();
                     screen.footer.usage.clear();
                     (p, model) = restore_model(&mut db)?;
-                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
+                    configure_context(&mut db, &state, &p, &model, &settings)?;
                     mode = show(&db, &mut screen)?;
                 }
                 ":tree" if interactive => {
@@ -1209,7 +1218,7 @@ fn run(
                     };
                     screen.clear();
                     (p, model) = restore_model(&mut db)?;
-                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
+                    configure_context(&mut db, &state, &p, &model, &settings)?;
                     mode = show(&db, &mut screen)?;
                     let text = match draft {
                         Some(Message::User(text)) => {
@@ -1269,6 +1278,9 @@ fn run(
                         )?;
                     }
                     let mut s = db.load()?;
+                    if let Some(outcome) = &s.native_schedule.last_outcome {
+                        screen.line(Tone::Dim, outcome);
+                    }
                     if first == ":context"
                         && let Some(arg) = words.next()
                     {
@@ -1325,7 +1337,7 @@ fn run(
                         screen.clear();
                         screen.footer.usage.clear();
                         (p, model) = restore_model(&mut db)?;
-                        configure_context(&mut db, &state, &p, &model, settings.keep)?;
+                        configure_context(&mut db, &state, &p, &model, &settings)?;
                         mode = show(&db, &mut screen)?
                     }
                 }
@@ -1449,7 +1461,7 @@ fn run(
                     let id = provider_id(words.next().unwrap_or(&p))?;
                     let filter = words.next().unwrap_or("").to_lowercase();
                     let entries = model_entries(&state, id, false)?;
-                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
+                    configure_context(&mut db, &state, &p, &model, &settings)?;
                     catalogue = entries
                         .into_iter()
                         .map(|(m, _)| m)
@@ -1545,7 +1557,7 @@ fn run(
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
                         (p, model) = (id.into(), m.into());
-                        configure_context(&mut db, &state, &p, &model, settings.keep)?;
+                        configure_context(&mut db, &state, &p, &model, &settings)?;
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))
                 }

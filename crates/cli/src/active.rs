@@ -86,6 +86,7 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
                 screen.delta(Tone::Thought, &s);
             }
         }
+        Event::CompactionNotice(s) => screen.line(Tone::Dim, &s),
         Event::ToolOutput(s) => {
             if screen.active {
                 screen.live_chunk(&s);
@@ -453,5 +454,115 @@ mod delivery_tests {
             held.extend(queue.follow);
             assert_eq!([follow, held].concat(), ["c", "d"]);
         }
+    }
+    #[test]
+    fn cancelling_a_live_batch_returns_both_queued_inputs_in_each_mode() -> Result<()> {
+        use serde_json::{Value, json};
+        use std::time::Instant;
+        struct Reads(mpsc::Sender<()>);
+        impl Toolset for Reads {
+            fn system(&self) -> Result<String> {
+                Ok(String::new())
+            }
+            fn schemas(&self, _: Mode) -> Vec<Value> {
+                vec![json!({"function":{"name":"read"}})]
+            }
+            fn run(
+                &self,
+                _: &Session,
+                _: &Call,
+                cancel: &Cancel,
+                _: &mut Emit,
+            ) -> Result<(ToolOutput, StoreWrites)> {
+                self.0.send(())?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    cancel.check()?;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                anyhow::bail!("cancellation did not reach the handler")
+            }
+        }
+        struct Pair;
+        impl Provider for Pair {
+            fn reply(
+                &mut self,
+                _: &str,
+                _: &[Message],
+                _: &[Value],
+                _: &Cancel,
+                _: &mut Emit,
+            ) -> Result<(String, Vec<Call>)> {
+                Ok((
+                    String::new(),
+                    ["a", "b"]
+                        .map(|id| Call {
+                            id: id.into(),
+                            name: "read".into(),
+                            args: json!({"path":id}),
+                        })
+                        .into(),
+                ))
+            }
+        }
+        for single in [false, true] {
+            let queue = Mutex::new(Queue {
+                delivery: Delivery {
+                    single_steer: single,
+                    single_follow: single,
+                },
+                ..Default::default()
+            });
+            let (tx, rx) = mpsc::channel();
+            let tools = Reads(tx);
+            let cancel = Cancel::default();
+            let mut store = panda_memory::MemoryStore::default();
+            std::thread::scope(|scope| -> Result<()> {
+                let worker = scope.spawn(|| {
+                    turn_with_input(
+                        &mut Pair,
+                        &mut store,
+                        &tools,
+                        "run".into(),
+                        &cancel,
+                        &mut |_| {},
+                        &mut |idle| queue.lock().unwrap().take(idle),
+                    )
+                });
+                for text in ["first", "second"] {
+                    rx.recv_timeout(Duration::from_secs(2))?;
+                    queue.lock().unwrap().steer.push(text.into());
+                }
+                cancel.stop();
+                assert!(
+                    worker
+                        .join()
+                        .unwrap()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("cancelled")
+                );
+                Ok(())
+            })?;
+            let mut queue = queue.into_inner().unwrap();
+            let first = queue.take(false);
+            assert_eq!(first.len(), if single { 1 } else { 2 });
+            assert_eq!([first, queue.take(false)].concat(), ["first", "second"]);
+            assert!(queue.take(true).is_empty());
+            acknowledge(&mut store)?;
+            let interrupted = store
+                .load()?
+                .history
+                .into_iter()
+                .filter_map(|m| match m {
+                    Message::Result {
+                        id, is_error: true, ..
+                    } => Some(id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(interrupted, ["a", "b"]);
+        }
+        Ok(())
     }
 }

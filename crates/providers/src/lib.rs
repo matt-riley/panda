@@ -1,3 +1,4 @@
+pub mod jev;
 use anyhow::{Context, Result, ensure};
 use panda_core::*;
 use serde_json::{Value, json};

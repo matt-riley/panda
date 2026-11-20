@@ -2,6 +2,7 @@ mod accounting;
 use accounting::tracked;
 pub use accounting::{Attempt, FailedUsage, IdentifiedProvider, ModelId, TokenPrices, UsageRecord};
 mod checkpoint_files;
+pub mod native_compaction;
 mod recovery;
 mod tool_batch;
 mod tool_details;
@@ -137,6 +138,8 @@ pub struct Session {
     pub preferences: std::collections::BTreeMap<usize, (Option<ModelId>, Option<String>)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<Attempt>,
+    #[serde(default, skip_serializing_if = "native_compaction::Schedule::is_empty")]
+    pub native_schedule: native_compaction::Schedule,
     #[serde(default)]
     pub usage: Vec<UsageRecord>,
     #[serde(default)]
@@ -461,6 +464,10 @@ pub fn compact_with_instructions(
 ) -> Result<()> {
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
+    if let Some(judge) = p.compaction_judge() {
+        judge.bind(store.compaction_scope());
+        return native_compaction::adopt(store, &mut s, instructions, judge, cancel);
+    }
     let end = s.compact_through(s.history.len(), 0);
     if end <= s.checkpoint.as_ref().map_or(0, |c| c.through) {
         return Ok(());
@@ -477,6 +484,7 @@ pub enum Event {
     Responder(String),
     Reasoning(String),
     ToolOutput(String),
+    CompactionNotice(String),
     Text(String),
     AssistantComplete(String),
     Usage(Value),
@@ -495,6 +503,9 @@ pub trait Provider {
         None
     }
     fn prices(&self) -> Option<TokenPrices> {
+        None
+    }
+    fn compaction_judge(&mut self) -> Option<&mut dyn native_compaction::Judge> {
         None
     }
     fn reply_with_effort(
@@ -518,6 +529,9 @@ pub trait Provider {
     ) -> Result<(String, Vec<Call>)>;
 }
 pub trait Store {
+    fn compaction_scope(&self) -> Option<String> {
+        None
+    }
     fn load(&self) -> Result<Session>;
     fn save(&mut self, s: &mut Session) -> Result<()>;
     fn save_checkpoint(&mut self, s: &mut Session) -> Result<()> {
@@ -636,6 +650,12 @@ pub fn turn_message(
     );
     cancel.check()?;
     let system = tools.system()?;
+    let judge = p.compaction_judge();
+    let native = judge.is_some();
+    if let Some(judge) = judge {
+        let used = s.estimated_tokens(&system, &tools.schemas_for(&s));
+        native_compaction::before_turn(&mut s, store, judge, used, &input, cancel, emit)?;
+    }
     let turn_start = s.history.len();
     let mut retried_length = false;
     s.active = true;
@@ -661,7 +681,8 @@ pub fn turn_message(
         let mut compacted = false;
         let schemas = tools.schemas_for(&s);
         let previous = s.checkpoint.as_ref().map_or(0, |c| c.through);
-        if s.needs_compaction(&system, &schemas)
+        if !native
+            && s.needs_compaction(&system, &schemas)
             && keep > previous
             && let end = s.compact_through(keep, (s.token_budget() / 4).min(20000))
             && end > previous

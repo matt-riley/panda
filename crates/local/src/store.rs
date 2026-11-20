@@ -306,6 +306,9 @@ impl Disk {
     }
 }
 impl Store for Disk {
+    fn compaction_scope(&self) -> Option<String> {
+        Some(format!("{}:{}", self.conn.path()?, self.id))
+    }
     fn load(&self) -> Result<Session> {
         let mut session: Session = serde_json::from_str(&self.conn.query_row(
             "SELECT data FROM sessions WHERE id=?",

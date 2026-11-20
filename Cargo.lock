@@ -1154,6 +1154,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "proptest",
+ "regex",
+ "ring",
  "serde",
  "serde_json",
 ]
@@ -1201,6 +1203,7 @@ dependencies = [
  "httpdate",
  "panda-core",
  "proptest",
+ "regex",
  "reqwest",
  "ring",
  "rusqlite",

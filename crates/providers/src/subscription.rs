@@ -66,7 +66,7 @@ impl Subscription {
         auth::store_login(&self.state, &self.provider, &token)
     }
 }
-async fn cancellable<T>(
+pub(crate) async fn cancellable<T>(
     cancel: &Cancel,
     work: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
