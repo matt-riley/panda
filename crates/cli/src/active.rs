@@ -15,34 +15,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Copy, Default)]
-pub struct Delivery {
-    pub single_steer: bool,
-    pub single_follow: bool,
-}
-#[derive(Default)]
-pub struct Queue {
-    pub steer: Vec<String>,
-    pub follow: Vec<String>,
-    pub delivery: Delivery,
-}
-impl Queue {
-    pub fn take(&mut self, idle: bool) -> Vec<String> {
-        let (queue, single) = if !self.steer.is_empty() {
-            (&mut self.steer, self.delivery.single_steer)
-        } else if idle {
-            (&mut self.follow, self.delivery.single_follow)
-        } else {
-            return Vec::new();
-        };
-        let count = if single {
-            1.min(queue.len())
-        } else {
-            queue.len()
-        };
-        queue.drain(..count).collect()
-    }
-}
+pub use panda_core::sdk::{Delivery, Queue};
 struct Raw;
 impl Drop for Raw {
     fn drop(&mut self) {
@@ -141,7 +114,7 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
 
 pub fn run(
     p: &mut (dyn Provider + Send),
-    db: &mut (dyn Store + Send),
+    db: &mut dyn panda_core::sdk::SessionHost,
     tools: &(dyn Toolset + Sync),
     (input, delivery): (Message, Delivery),
     cancel: &Cancel,
@@ -152,14 +125,13 @@ pub fn run(
     screen.end_reply();
     let mut pending = PendingTool::default();
     if !screen.active {
-        turn_message(
+        panda_core::sdk::SessionSdk { host: db }.prompt(
             p,
-            db,
             tools,
             input,
             cancel,
             &mut |e| display(e, screen, &mut pending),
-            &mut |_| vec![],
+            &Mutex::new(Queue::<String>::default()),
         )?;
         println!();
         return Ok(());
@@ -172,24 +144,23 @@ pub fn run(
     let _raw = Raw;
     crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
     let mut terminal = crate::renderer::terminal()?;
-    let queue = Mutex::new(Queue {
+    let queue = Mutex::new(Queue::<String> {
         delivery,
-        ..Queue::default()
+        ..Queue::<String>::default()
     });
     let (tx, rx) = mpsc::channel();
     let result = std::thread::scope(|scope| {
         let queue = &queue;
         let worker = scope.spawn(move || {
-            turn_message(
+            panda_core::sdk::SessionSdk { host: db }.prompt(
                 p,
-                db,
                 tools,
                 input,
                 cancel,
                 &mut |e| {
                     let _ = tx.send(e);
                 },
-                &mut |idle| queue.lock().unwrap().take(idle),
+                queue,
             )
         });
         let started = std::time::Instant::now();
@@ -435,7 +406,7 @@ mod delivery_tests {
     #[test]
     fn each_delivery_mode_drains_inputs_exactly_once_and_preserves_pending_input() {
         for single in [true, false] {
-            let mut queue = Queue {
+            let mut queue = Queue::<String> {
                 steer: vec!["a".into(), "b".into()],
                 follow: vec!["c".into(), "d".into()],
                 delivery: Delivery {
@@ -506,7 +477,7 @@ mod delivery_tests {
             }
         }
         for single in [false, true] {
-            let queue = Mutex::new(Queue {
+            let queue = Mutex::new(Queue::<String> {
                 delivery: Delivery {
                     single_steer: single,
                     single_follow: single,

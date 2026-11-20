@@ -1,7 +1,11 @@
 use super::wait_group;
 use crate::output_log::{create_log, open_root};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use panda_core::{Cancel, Emit, Event};
+use panda_core::{
+    ToolDetails, ToolOutput,
+    sdk::{ShellFailure, ShellOutcome},
+};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -48,20 +52,49 @@ impl Capture {
         }
     }
 
-    fn finish(mut self, status: Result<std::process::ExitStatus>) -> Result<String> {
-        let tail = String::from_utf8_lossy(self.tail.make_contiguous());
-        let note = match self.log {
-            None => String::new(),
-            Some(Ok((path, _))) => {
-                format!("\n[Output truncated to the last 64 KiB]\nFull output: {path}")
-            }
-            Some(Err(err)) => format!("\n[Output truncated; could not save full log: {err}]"),
+    fn finish(
+        mut self,
+        status: Result<std::process::ExitStatus>,
+        cancelled: bool,
+    ) -> Result<ToolOutput> {
+        let output = String::from_utf8_lossy(self.tail.make_contiguous()).into_owned();
+        let truncated = self.log.is_some();
+        let (note, full_output_path) = match self.log {
+            None => (String::new(), None),
+            Some(Ok((path, _))) => (
+                format!("\n[Output truncated to the last 64 KiB]\nFull output: {path}"),
+                Some(path),
+            ),
+            Some(Err(e)) => (
+                format!("\n[Output truncated; could not save full log: {e}]"),
+                None,
+            ),
+        };
+        let outcome = ShellOutcome {
+            output,
+            exit_code: status.as_ref().ok().and_then(|s| s.code()),
+            cancelled,
+            truncated,
+            full_output_path,
         };
         match status {
-            Ok(s) if s.success() && note.is_empty() => Ok(tail.into_owned()),
-            Ok(s) if s.success() => Ok(format!("command {s}\n{tail}{note}")),
-            Ok(s) => bail!("command {s}\n{tail}{note}"),
-            Err(err) => bail!("{err}\n{tail}{note}"),
+            Ok(s) if s.success() && !truncated => Ok(outcome.output.into()),
+            Ok(s) if s.success() => Ok(ToolOutput {
+                text: format!("command {s}\n{}{note}", outcome.output),
+                images: vec![],
+                details: Some(ToolDetails::Shell { outcome }),
+            }),
+            Ok(s) => Err(ShellFailure {
+                diagnostic: format!("command {s}\n{}{note}", outcome.output),
+                outcome,
+            }
+            .into()),
+            Err(e) if cancelled => Err(ShellFailure {
+                diagnostic: format!("{e}\n{}{note}", outcome.output),
+                outcome,
+            }
+            .into()),
+            Err(e) => Err(anyhow::anyhow!("{e}\n{}{note}", outcome.output)),
         }
     }
 }
@@ -72,7 +105,7 @@ pub(super) fn run(
     timeout: Duration,
     cancel: &Cancel,
     emit: &mut Emit,
-) -> Result<String> {
+) -> Result<ToolOutput> {
     let root = open_root(root)?;
     // A single pipe preserves the order of stdout/stderr writes in the log.
     let (mut reader, writer) = io::pipe()?;
@@ -112,7 +145,7 @@ pub(super) fn run(
         }
         capture.append(&buf[..n], &root, emit);
     }
-    capture.finish(status)
+    capture.finish(status, cancel.check().is_err())
 }
 
 #[cfg(test)]

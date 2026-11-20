@@ -84,7 +84,7 @@ pub struct UsageRecord {
     pub timestamp: Option<u64>,
 }
 impl UsageRecord {
-    pub(crate) fn from_event(u: &Value) -> Option<Self> {
+    pub fn from_event(u: &Value) -> Option<Self> {
         let read = u
             .pointer("/prompt_tokens_details/cached_tokens")
             .or(u.pointer("/input_tokens_details/cached_tokens"))

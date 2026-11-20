@@ -192,6 +192,12 @@ RPC accepts one JSON object per input line and echoes its `id` on replies and tu
 
 During an RPC turn, send `steer` or `follow_up` with a `text` field, or send `cancel`. The terminal reply for that turn includes any undelivered input. Once the turn ends, send `session` to inspect the saved transcript, or `ack` after inspecting an interrupted tool call.
 
+Select the Pi JSONL adapter with `panda --mode rpc --rpc-version pi-v1`. Send a request such as `{"id":"run-1","type":"prompt","message":"Describe this workspace"}`. Its correlated response carries the prompt disposition. Read the event stream until `agent_settled` to observe completion. While the run is active, clients can query state, steer, queue a follow-up or abort. Clear the queue before aborting to discard pending text.
+
+Pi clients can inspect messages, tree entries and the active leaf, select models and thinking levels, change queue delivery, switch or fork sessions, execute cancellable shell commands, compact or retry. Pass the `sessionFile` value from `get_state` to `switch_session` to reopen a Panda session. The SQLite host also accepts Pi JSONL files for import. Extension UI requests and responses depend on a future Panda extension UI contract.
+
+Embedded Rust hosts use `panda_core::sdk::SessionSdk` with `panda_memory::MemoryStore` or `panda_local::store::Disk`. Supply your provider, toolset, cancellation handle and queue to `prompt` and `retry`. Reuse the queue between turns to preserve its delivery policy. The SDK integration test exercises both stores through the same sequence. [Rust host example](crates/cli/tests/session_sdk.rs)
+
 [Pi behavior and Rust test mapping](docs/pi-feature-map.md)
 
 ## Test and fuzz

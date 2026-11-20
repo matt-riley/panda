@@ -1,4 +1,5 @@
 mod pi;
+pub use pi::encode_message as pi_message;
 mod transcript;
 mod tree;
 mod workspaces;
@@ -15,6 +16,8 @@ pub struct SessionPreview {
     pub messages: Vec<(&'static str, String)>,
 }
 pub struct Disk {
+    directory: std::path::PathBuf,
+    workspace: std::path::PathBuf,
     conn: Connection,
     id: i64,
     _lock: fs::File,
@@ -70,26 +73,7 @@ impl Disk {
         let mut s = self.load()?;
         ensure!(!s.active, "acknowledge interrupted turn before forking");
         if let Some(n) = turn {
-            let end = if n == 0 {
-                0
-            } else {
-                s.history.iter().enumerate().filter(|(_,m)|matches!(m,panda_core::Message::Assistant{calls,..} if calls.is_empty())).nth(n-1).context("unknown completed turn")?.0+1
-            };
-            if end < s.history.len() {
-                s.preferences.retain(|&depth, _| depth <= end);
-                (s.model, s.reasoning) = s
-                    .preferences
-                    .last_key_value()
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default();
-            }
-            s.responders.retain(|&i, _| i < end);
-            s.attempts.retain(|a| a.through <= end);
-            s.history.truncate(end);
-            s.usage.retain(|u| u.through <= end);
-            if s.checkpoint.as_ref().is_some_and(|c| c.through > end) {
-                s.checkpoint = None;
-            }
+            s.truncate_branch(s.after_turn(n)?)?;
         }
         self.create_fork(dir, repo, s, name)
     }
@@ -248,6 +232,8 @@ impl Disk {
         initialize(&tx, id)?;
         tx.commit()?;
         Ok(Self {
+            directory: dir.to_owned(),
+            workspace: repo.to_owned(),
             conn,
             id,
             _lock: lock,
@@ -460,3 +446,5 @@ mod branches {
         assert_eq!(parent.load().unwrap().history.len(), 4);
     }
 }
+
+mod sdk;

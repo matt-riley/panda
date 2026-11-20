@@ -69,6 +69,17 @@ fn turns(api: &NativeApi, h: &[Message]) -> Result<Vec<Value>> {
                 };
                 continue;
             }
+            Message::Bash {
+                command,
+                outcome,
+                exclude,
+            } => {
+                if *exclude {
+                    continue;
+                }
+                parts.push(text(f, &outcome.context(command)));
+                false
+            }
             Message::User(s) => {
                 parts.push(text(f, s));
                 false

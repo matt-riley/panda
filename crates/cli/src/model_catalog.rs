@@ -257,3 +257,63 @@ pub fn available_models(state: &Path, scope: &str) -> Result<(ModelRows, Vec<Str
     }
     Ok((filtered, errors))
 }
+
+/// Return public wire metadata. Keep provider credentials in the connection factory.
+pub fn rpc_model(state: &Path, id: &panda_core::ModelId) -> Result<serde_json::Value> {
+    use serde_json::json;
+    ensure!(valid_provider(&id.provider), "invalid model provider");
+    let configured = Catalog::read(state)?;
+    if let Some(endpoint) = configured.providers.get(&id.provider) {
+        let m = endpoint.model(&id.model)?;
+        let mut value = json!({"id":m.id,"name":m.name.as_ref().unwrap_or(&m.id),"provider":id.provider,
+            "api":endpoint.api.as_deref().unwrap_or("openai-completions"),"baseUrl":endpoint.base_url,"reasoning":true,"input":m.input,"contextWindow":m.context_window,"maxTokens":m.max_tokens});
+        if let Some(cost) = &m.cost {
+            value["cost"] = json!(cost);
+        }
+        return Ok(value);
+    }
+    if id.provider == "router" {
+        let route = configured
+            .routes
+            .get(&id.model)
+            .context("unknown virtual model")?;
+        return Ok(
+            json!({"id":id.model,"name":id.model,"provider":id.provider,"contextWindow":route.window(&configured),
+            "reasoning":!route.efforts.is_empty(),"input":if route.image.is_some(){vec!["text","image"]}else{vec!["text"]}}),
+        );
+    }
+    let (api, url) = match id.provider.as_str() {
+        "deepseek" => ("openai-completions", "https://api.deepseek.com"),
+        "openrouter" => ("openai-completions", "https://openrouter.ai/api/v1"),
+        "openai-codex" => ("openai-codex-responses", "https://chatgpt.com/backend-api"),
+        name if panda_providers::native::builtin(name).is_some() => {
+            let (family, url) = panda_providers::native::builtin(name).unwrap();
+            (family.name(), url)
+        }
+        _ => return Ok(json!({"id":id.model,"name":id.model,"provider":id.provider})),
+    };
+    let mut value = json!({"id":id.model,"name":id.model,"provider":id.provider,"api":api,"baseUrl":url,
+        "reasoning":true,"input":if id.provider=="deepseek"{vec!["text"]}else{vec!["text","image"]}});
+    let path = state.join(format!("catalog-{}.json", id.provider));
+    if path.try_exists()? {
+        let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
+        if let Some(n) = rows
+            .into_iter()
+            .find(|(m, _)| m == &id.model)
+            .and_then(|(_, n)| n)
+        {
+            value["contextWindow"] = json!(n);
+        }
+    }
+    if let Some(n) = crate::output_limit(state, &id.provider, &id.model)? {
+        value["maxTokens"] = json!(n);
+    }
+    if id.provider == "openrouter" && state.join("catalog-openrouter-prices.json").try_exists()? {
+        let prices: BTreeMap<String, panda_core::TokenPrices> =
+            serde_json::from_slice(&fs::read(state.join("catalog-openrouter-prices.json"))?)?;
+        if let Some(cost) = prices.get(&id.model) {
+            value["cost"] = json!(cost);
+        }
+    }
+    Ok(value)
+}

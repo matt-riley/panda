@@ -164,6 +164,16 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
     while let Some(msg) = history.next() {
         let message = match msg {
             Message::Truncated(_) | Message::CodemodeStore(_) | Message::Replay(_) => continue,
+            Message::Bash {
+                command,
+                outcome,
+                exclude,
+            } => {
+                if *exclude {
+                    continue;
+                }
+                json!({"role":"user","content":outcome.context(command)})
+            }
             Message::BranchSummary(s) => {
                 json!({"role":"user","content":format!("Summary from another branch:\n{s}")})
             }

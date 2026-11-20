@@ -1,13 +1,13 @@
+mod rpc;
 use crate::attachments;
 use anyhow::{Context, Result, bail, ensure};
 use panda_core::*;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
-    io::{self, BufRead, IsTerminal, Read},
+    io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
-    sync::{Mutex, mpsc},
-    time::Duration,
+    sync::Mutex,
 };
 
 #[derive(Default, PartialEq)]
@@ -30,6 +30,7 @@ pub enum CodemodeExposure {
 #[derive(Default)]
 pub struct Options {
     pub interface: Interface,
+    pub pi_rpc: bool,
     pub codemode: CodemodeExposure,
     pub tools: Option<BTreeSet<String>>,
     pub deferred: BTreeSet<String>,
@@ -66,6 +67,13 @@ impl Options {
                         out.delivery.single_steer = one
                     } else {
                         out.delivery.single_follow = one
+                    }
+                }
+                "--rpc-version" => {
+                    out.pi_rpc = match it.next().map(String::as_str) {
+                        Some("pi-v1") => true,
+                        Some("panda-v1") => false,
+                        _ => bail!("expected pi-v1 or panda-v1 after --rpc-version"),
                     }
                 }
                 "--trust-project" => out.trust_project = true,
@@ -214,6 +222,10 @@ impl Options {
             out.workspace.is_none() || !(out.resume || out.no_session || out.session_id.is_some()),
             "cross-workspace selection conflicts with --continue, --session and --no-session"
         );
+        ensure!(
+            !out.pi_rpc || out.interface == Interface::Rpc,
+            "--rpc-version pi-v1 requires --mode rpc"
+        );
         let one_shot = out.codemode == CodemodeExposure::Only
             || out.no_session
             || out.session_id.is_some()
@@ -322,21 +334,29 @@ impl Toolset for PromptedTools<'_> {
     }
 }
 
+type Connect<'a> = dyn Fn(Option<&ModelId>) -> Result<Box<dyn Provider + Send>> + 'a;
+pub struct ModelControls<'a> {
+    pub list: &'a dyn Fn() -> Result<Vec<ModelId>>,
+    pub describe: &'a dyn Fn(&ModelId) -> Result<Value>,
+    pub effort: &'a dyn Fn(&ModelId) -> Result<Vec<String>>,
+    pub retention: &'a dyn Fn(&ModelId) -> Option<u64>,
+}
 pub struct Host<'a> {
-    pub db: &'a mut (dyn Store + Send),
+    pub db: &'a mut dyn sdk::SessionHost,
     pub session_id: Option<i64>,
     pub tools: &'a (dyn Toolset + Sync),
-    pub connect: &'a dyn Fn() -> Result<Box<dyn Provider + Send>>,
+    pub connect: &'a Connect<'a>,
+    pub models: ModelControls<'a>,
     pub root: &'a Path,
     pub cancel: &'a Cancel,
 }
 impl Host<'_> {
-    pub fn run(&mut self, options: Options) -> Result<()> {
+    pub fn run(self, options: Options) -> Result<()> {
         if options.interface == Interface::Rpc {
-            return self.rpc(options.delivery);
+            return rpc::serve(self, options.delivery, options.pi_rpc);
         }
         let input = one_shot_input(self.root, &options.prompt)?;
-        let mut p = (self.connect)()?;
+        let mut p = (self.connect)(None)?;
         if let Some(level) = options.thinking {
             p = Box::new(FixedEffort {
                 provider: p,
@@ -344,9 +364,8 @@ impl Host<'_> {
             });
         }
         let structured = options.interface == Interface::Json;
-        turn_message(
+        sdk::SessionSdk { host: self.db }.prompt(
             p.as_mut(),
-            self.db,
             self.tools,
             input,
             self.cancel,
@@ -355,7 +374,7 @@ impl Host<'_> {
                     println!("{}", json!({"type":"event","event":e}));
                 }
             },
-            &mut |_| vec![],
+            &Mutex::new(sdk::Queue::<String>::default()),
         )?;
         let s = self.db.load()?;
         let Some(Message::Assistant { text, .. }) = s.history.last() else {
@@ -368,113 +387,6 @@ impl Host<'_> {
             );
         } else {
             println!("{text}");
-        }
-        Ok(())
-    }
-    fn rpc(&mut self, delivery: crate::active::Delivery) -> Result<()> {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        while let Ok(line) = rx.recv() {
-            let Some(r) = decode(&line) else { continue };
-            let id = &r["id"];
-            let result = (|| -> Result<Value> {
-                Ok(match r["type"].as_str() {
-                    Some("session") => {
-                        json!({"id":id,"type":"session","session_id":self.session_id,"session":self.db.load()?})
-                    }
-                    Some("ack") => {
-                        acknowledge(self.db)?;
-                        json!({"id":id,"type":"ok"})
-                    }
-                    Some("prompt") => {
-                        let text = r["text"].as_str().context("expected text")?;
-                        let input = attachments::prepare(self.root, text, None)?;
-                        let mut p = (self.connect)()?;
-                        let queue = Mutex::new(crate::active::Queue {
-                            delivery,
-                            ..Default::default()
-                        });
-                        let queue_ref = &queue;
-                        let cancel = self.cancel;
-                        cancel.reset();
-                        let db = &mut *self.db;
-                        let tools = self.tools;
-                        let run = std::thread::scope(|scope| -> Result<()> {
-                            let worker = scope.spawn(move || {
-                                turn_message(
-                                    p.as_mut(),
-                                    db,
-                                    tools,
-                                    input,
-                                    cancel,
-                                    &mut |e| {
-                                        println!("{}", json!({"id":id,"type":"event","event":e}))
-                                    },
-                                    &mut |idle| queue_ref.lock().unwrap().take(idle),
-                                )
-                            });
-                            while !worker.is_finished() {
-                                match rx.recv_timeout(Duration::from_millis(20)) {
-                                    Ok(line) => {
-                                        if let Some(cmd) = decode(&line) {
-                                            let cmd_id = &cmd["id"];
-                                            let response = match cmd["type"].as_str() {
-                                                Some("cancel") => {
-                                                    cancel.stop();
-                                                    json!({"id":cmd_id,"type":"ok"})
-                                                }
-                                                Some(kind @ ("steer" | "follow_up"))
-                                                    if cmd["text"].is_string() =>
-                                                {
-                                                    let mut q = queue.lock().unwrap();
-                                                    let dest = if kind == "steer" {
-                                                        &mut q.steer
-                                                    } else {
-                                                        &mut q.follow
-                                                    };
-                                                    dest.push(cmd["text"].as_str().unwrap().into());
-                                                    json!({"id":cmd_id,"type":"queued"})
-                                                }
-                                                _ => {
-                                                    json!({"id":cmd_id,"type":"error","error":"turn active"})
-                                                }
-                                            };
-                                            println!("{response}");
-                                        }
-                                    }
-                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                                }
-                            }
-                            worker
-                                .join()
-                                .map_err(|_| anyhow::anyhow!("turn worker failed"))?
-                        });
-                        let q = queue.into_inner().unwrap();
-                        let undelivered = [q.steer, q.follow].concat();
-                        match run {
-                            Ok(()) => {
-                                json!({"id":id,"type":"done","session_id":self.session_id,"undelivered":undelivered})
-                            }
-                            Err(e) => {
-                                json!({"id":id,"type":"error","error":e.to_string(),"undelivered":undelivered})
-                            }
-                        }
-                    }
-                    _ => bail!("expected session, prompt or ack"),
-                })
-            })();
-            println!(
-                "{}",
-                result.unwrap_or_else(|e| json!({"id":id,"type":"error","error":e.to_string()}))
-            );
         }
         Ok(())
     }
@@ -532,15 +444,6 @@ fn one_shot_input(root: &Path, prompt: &str) -> Result<Message> {
         piped.push('\n');
     }
     attachments::prepare_with_prefix(root, piped, prompt, None)
-}
-fn decode(line: &str) -> Option<Value> {
-    match serde_json::from_str(line) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            println!("{}", json!({"type":"error","error":e.to_string()}));
-            None
-        }
-    }
 }
 
 #[cfg(test)]
@@ -688,7 +591,13 @@ mod tests {
             session_id: Some(db.id()),
             db: &mut db,
             tools: &coding,
-            connect: &|| Ok(Box::new(Reader)),
+            connect: &|_| Ok(Box::new(Reader)),
+            models: ModelControls {
+                list: &|| Ok(vec![]),
+                describe: &|id| Ok(json!({"id":id.model,"provider":id.provider})),
+                effort: &|_| Ok(vec!["off".into()]),
+                retention: &|_| None,
+            },
             root,
             cancel: &Cancel::default(),
         }

@@ -802,3 +802,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert "expects an integer" in outcomes[7] and "tool error" in outcomes[8]
     assert sorted(json.loads(outcomes[9])) == ["ls","read","repo_map"]
     assert (probe / "note").read_text() == "untouched"
+
+    from pi_rpc import check as check_pi_rpc
+    requests.clear()
+    check_pi_rpc(sys.argv[1], root, f"http://127.0.0.1:{server.server_port}", next_calls, requests)

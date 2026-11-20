@@ -18,6 +18,14 @@ impl std::error::Error for TransientFailure {}
 pub(crate) fn request<T>(
     cancel: &Cancel,
     emit: &mut Emit,
+    send: impl FnMut(&mut Emit) -> Result<T>,
+) -> Result<T> {
+    request_if(true, cancel, emit, send)
+}
+pub(crate) fn request_if<T>(
+    enabled: bool,
+    cancel: &Cancel,
+    emit: &mut Emit,
     mut send: impl FnMut(&mut Emit) -> Result<T>,
 ) -> Result<T> {
     for attempt in 0.. {
@@ -31,7 +39,7 @@ pub(crate) fn request<T>(
         let Some(transient) = error.downcast_ref::<TransientFailure>() else {
             return Err(error);
         };
-        if streamed || attempt >= 3 {
+        if !enabled || streamed || attempt >= 3 {
             return Err(error);
         }
         let backoff = Duration::from_secs(2 << attempt);

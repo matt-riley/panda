@@ -33,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -395,37 +395,14 @@ fn safe(s: &str) -> String {
         .collect()
 }
 fn usage(s: &Session) -> String {
-    let accounted: std::collections::BTreeSet<_> = s
-        .attempts
-        .iter()
-        .filter(|a| a.purpose == "turn" && a.usage.is_some())
-        .map(|a| a.through)
-        .collect();
-    let legacy = s.usage.iter().filter(|u| !accounted.contains(&u.through));
-    let readings = legacy
-        .clone()
-        .chain(s.attempts.iter().filter_map(|a| a.usage.as_ref()));
-    let mut input = 0;
-    let mut output = 0;
-    let mut read = 0;
-    let mut write = 0;
-    let cost: f64 = legacy
-        .clone()
-        .filter_map(|u| u.cost)
-        .chain(s.attempts.iter().filter_map(|a| a.cost))
-        .sum();
-    for u in readings {
-        input += u.input;
-        output += u.output;
-        read += u.cache_read.unwrap_or(0);
-        write += u.cache_write.unwrap_or(0);
-    }
-    let unknown = s
-        .attempts
-        .iter()
-        .filter(|a| a.cost_source == "unknown")
-        .count()
-        + legacy.filter(|u| u.cost.is_none()).count();
+    let sdk::UsageTotals {
+        input,
+        output,
+        read,
+        write,
+        cost,
+        unknown,
+    } = sdk::UsageTotals::from(s);
     let mut text =
         format!("↑{input} ↓{output} · cache read {read} write {write} · known ${cost:.6}");
     if unknown > 0 {
@@ -475,6 +452,9 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
     let mut calls_by_id = std::collections::HashMap::new();
     for (index, m) in s.history.iter().enumerate() {
         match m {
+            Message::Bash {
+                command, outcome, ..
+            } => screen.line(Tone::Tool, &safe(&outcome.context(command))),
             Message::CodemodeStore(_) | Message::Replay(_) => continue,
             Message::Truncated(partial) => {
                 screen.line(Tone::Dim, "Partial reply (output length limit)");
@@ -629,7 +609,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
@@ -934,7 +914,7 @@ fn run(
     }
     let session_id = disk.as_ref().map(Disk::id);
     let mut memory = panda_memory::MemoryStore::default();
-    let store: &mut (dyn Store + Send) = match &mut disk {
+    let store: &mut dyn panda_core::sdk::SessionHost = match &mut disk {
         Some(disk) => {
             disk.invocation_keep_recent_tokens = cli_recent;
             disk
@@ -1042,7 +1022,35 @@ fn run(
             db: store,
             session_id,
             tools,
-            connect: &|| make_provider(&state, &p, &model),
+            connect: &|selection| match selection {
+                Some(id) => make_provider(&state, &id.provider, &id.model),
+                None => make_provider(&state, &p, &model),
+            },
+            models: automation::ModelControls {
+                list: &|| {
+                    Ok(available_models(&state, "")?
+                        .0
+                        .into_iter()
+                        .map(|(provider, model)| ModelId { provider, model })
+                        .collect())
+                },
+                describe: &|id| model_catalog::rpc_model(&state, id),
+                effort: &|id| {
+                    let mut levels: Vec<_> = effort_levels(&state, &id.provider, &id.model, true)?
+                        .into_iter()
+                        .map(|level| {
+                            if matches!(level.as_str(), "default" | "none") {
+                                "off".into()
+                            } else {
+                                level
+                            }
+                        })
+                        .collect();
+                    levels.dedup();
+                    Ok(levels)
+                },
+                retention: &|id| settings.retention(&id.provider, &id.model),
+            },
             root: &root,
             cancel: &cancel,
         }
@@ -1270,11 +1278,11 @@ fn run(
                         at = Some(n);
                         rest = rest[word.len()..].trim();
                     }
-                    db = if first == ":new" {
-                        Disk::open(&state, &root, None)?
+                    if first == ":new" {
+                        panda_core::sdk::SessionHost::switch(&mut db, None)?;
                     } else {
-                        db.fork(&state, &root, at, rest)?
-                    };
+                        panda_core::sdk::SessionHost::fork_turn(&mut db, at, rest)?;
+                    }
                     screen.clipboard = None;
                     screen.clear();
                     screen.footer.usage.clear();
@@ -1308,11 +1316,11 @@ fn run(
                                 continue;
                             }
                             picker::TreeAction::Fork => {
-                                let (child, prompt) = db.fork_prompt(&state, &root, node)?;
-                                db = child;
-                                Some(prompt)
+                                Some(sdk::SessionHost::fork_prompt(&mut db, node)?)
                             }
-                            picker::TreeAction::Switch => db.navigate(node)?,
+                            picker::TreeAction::Switch => {
+                                sdk::SessionHost::navigate_entry(&mut db, node)?
+                            }
                             picker::TreeAction::Summarize | picker::TreeAction::GuidedSummary => {
                                 let instructions = if action == picker::TreeAction::GuidedSummary {
                                     let Some(text) = picker::edit_text(
@@ -1404,9 +1412,8 @@ fn run(
                 ":context" | ":compact" => {
                     if first == ":compact" {
                         cancel.reset();
-                        compact_with_instructions(
+                        panda_core::sdk::SessionSdk { host: &mut db }.compact(
                             make_provider(&state, &p, &model)?.as_mut(),
-                            &mut db,
                             &line[first.len()..],
                             &cancel,
                         )?;
@@ -1439,6 +1446,21 @@ fn run(
                     }
                 }
                 ":ack" => acknowledge(&mut db)?,
+                ":retry" => {
+                    cancel.reset();
+                    let mut pending = active::PendingTool::default();
+                    sdk::SessionSdk { host: &mut db }.retry(
+                        make_provider(&state, &p, &model)?.as_mut(),
+                        tools,
+                        &cancel,
+                        &mut |event| active::display(event, &mut screen, &mut pending),
+                        &std::sync::Mutex::new(sdk::Queue::<String> {
+                            delivery: options.delivery,
+                            ..Default::default()
+                        }),
+                    )?;
+                    screen.footer.usage = usage(&db.load()?);
+                }
                 ":resume" => {
                     let selected = if let Some(n) = words.next() {
                         Some(if let Ok(id) = n.parse() {
@@ -1465,9 +1487,7 @@ fn run(
                         None
                     };
                     if let Some(id) = selected {
-                        if id != db.id() {
-                            db = Disk::open(&state, &root, Some(id))?
-                        }
+                        sdk::SessionHost::switch(&mut db, Some(id))?;
                         screen.clear();
                         screen.footer.usage.clear();
                         (p, model) = restore_model(&mut db)?;
@@ -1676,7 +1696,7 @@ fn run(
                         if let Some(ep) = catalog.providers.get(id) {
                             ep.model(m)?;
                         }
-                        let mut session = db.load()?;
+                        let mut selected_effort = None;
                         if let Some(effort) = words.next() {
                             ensure!(
                                 effort_levels(&state, id, m, true)?
@@ -1684,13 +1704,16 @@ fn run(
                                     .any(|v| v == effort),
                                 "unsupported thinking effort {effort}"
                             );
-                            session.reasoning = (effort != "default").then(|| effort.to_owned());
+                            selected_effort =
+                                Some((effort != "default").then(|| effort.to_owned()));
                         }
-                        session.model = Some(ModelId {
-                            provider: id.into(),
-                            model: m.into(),
-                        });
-                        db.save(&mut session)?;
+                        panda_core::sdk::SessionSdk { host: &mut db }.select_model(
+                            ModelId {
+                                provider: id.into(),
+                                model: m.into(),
+                            },
+                            selected_effort,
+                        )?;
                         let mut temp = tempfile::NamedTempFile::new_in(&state)?;
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;

@@ -22,7 +22,7 @@ impl Family {
             _ => bail!("unknown native API family {name}"),
         }
     }
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic-messages",
             Self::Responses => "openai-responses",

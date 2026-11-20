@@ -264,7 +264,7 @@ impl Workspace for Native {
             let timeout = panda_coding::shell_timeout(args)?;
             let proc =
                 self.command(Path::new("/bin/sh"), &["-c", field(args, "command")?], true)?;
-            return shell::run(proc, &self.root, timeout, cancel, emit).map(Into::into);
+            return shell::run(proc, &self.root, timeout, cancel, emit);
         }
         let result = self.exec_file(name, args, cancel)?;
         if matches!(name, "read" | "edit") {
