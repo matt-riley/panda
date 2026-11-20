@@ -548,7 +548,7 @@ fn run(
         Some(selected) => selected,
         None => &coding,
     };
-    let codemode = panda_local::codemode::Codemode::new(base, &executable);
+    let codemode = panda_local::codemode::Codemode::new(base, &executable, &coding.workspace.root);
     let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { base };
     let prompted;
     let tools = if options.system_prompt.is_some() || !options.append_system_prompt.is_empty() {

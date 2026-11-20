@@ -1,7 +1,7 @@
 use super::wait_group;
+use crate::output_log::{create_log, open_root};
 use anyhow::{Result, bail};
 use panda_core::{Cancel, Emit, Event};
-use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -14,31 +14,6 @@ use std::{
 const TAIL_BYTES: usize = 64 * 1024;
 const LIVE_BYTES: usize = 1_100_000;
 
-// The sandbox denies writes to .panda. The host must also avoid following
-// workspace-controlled symlinks while creating a log outside the child.
-fn create_log(root: &File) -> io::Result<(String, File)> {
-    match mkdirat(root, ".panda", Mode::RWXU) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(err) => return Err(err.into()),
-    }
-    let dir = openat(
-        root,
-        ".panda",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    loop {
-        let name = format!("shell-{:016x}.log", fastrand::u64(..));
-        let flags =
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        match openat(&dir, name.as_str(), flags, Mode::RUSR | Mode::WUSR) {
-            Ok(fd) => return Ok((format!(".panda/{name}"), fd.into())),
-            Err(rustix::io::Errno::EXIST) => continue,
-            Err(err) => return Err(err.into()),
-        }
-    }
-}
-
 #[derive(Default)]
 struct Capture {
     tail: VecDeque<u8>,
@@ -50,11 +25,10 @@ impl Capture {
     fn append(&mut self, bytes: &[u8], root: &File, emit: &mut Emit) {
         let excess = (self.tail.len() + bytes.len()).saturating_sub(TAIL_BYTES);
         if excess > 0 && self.log.is_none() {
-            self.log = Some(create_log(root).and_then(|(path, mut file)| {
+            self.log = Some(create_log(root, "shell", |file| {
                 let (first, second) = self.tail.as_slices();
                 file.write_all(first)?;
-                file.write_all(second)?;
-                Ok((path, file))
+                file.write_all(second)
             }));
         }
         if let Some(Ok((_, file))) = &mut self.log
@@ -99,14 +73,7 @@ pub(super) fn run(
     cancel: &Cancel,
     emit: &mut Emit,
 ) -> Result<String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut options = File::options();
-    options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
-    #[cfg(target_os = "macos")]
-    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW_ANY);
-    let root = options.open(root)?;
+    let root = open_root(root)?;
     // A single pipe preserves the order of stdout/stderr writes in the log.
     let (mut reader, writer) = io::pipe()?;
     rustix::io::ioctl_fionbio(&reader, true)?;
@@ -187,7 +154,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         std::os::unix::fs::symlink(outside.path(), root.path().join(".panda"))?;
-        assert!(create_log(&File::open(root.path())?).is_err());
+        assert!(create_log(&File::open(root.path())?, "shell", |_| Ok(())).is_err());
         assert_eq!(outside.path().read_dir()?.count(), 0);
         Ok(())
     }

@@ -22,7 +22,8 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
     let context = JsContext::full(&runtime)?;
-    let output = Rc::new(RefCell::new(String::new()));
+    // None latches an overflow, even if the script catches the text() error.
+    let output = Rc::new(RefCell::new(Some(String::new())));
     let buffer = output.clone();
     context.with(|ctx| -> Result<()> {
         ctx.globals().set("__allowed", allowed)?;
@@ -68,13 +69,14 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
         ctx.globals().set(
             "__text",
             Function::new(ctx.clone(), move |ctx: Ctx<'_>, value: String| {
-                let mut out = buffer.borrow_mut();
+                let mut slot = buffer.borrow_mut();
+                let Some(out) = slot.as_mut() else {
+                    return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
+                };
                 let newline = !out.is_empty();
-                if out.len() + usize::from(newline) + value.len() > OUTPUT_BYTES {
-                    return Err(Exception::throw_message(
-                        &ctx,
-                        "Codemode output exceeds 16 KiB",
-                    ));
+                if out.len() + usize::from(newline) + value.len() > MAX_OUTPUT_BYTES {
+                    *slot = None;
+                    return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
                 }
                 if newline {
                     out.push('\n');
@@ -91,7 +93,7 @@ fn evaluate(code: String, allowed: Vec<String>) -> Result<String> {
                 anyhow::anyhow!("{}", err.to_string().chars().take(1024).collect::<String>())
             })
     })?;
-    Ok(output.take())
+    output.take().context(OUTPUT_LIMIT_ERROR)
 }
 
 pub fn worker() -> Result<()> {

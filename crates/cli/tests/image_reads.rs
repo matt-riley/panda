@@ -22,7 +22,7 @@ fn capture(root: &Path, args: Value, nested: bool) -> Result<Vec<Value>> {
         workspace: Native::new(root, exe)?,
         skills: EmptySkills,
     };
-    let codemode = Codemode::new(&coding, exe);
+    let codemode = Codemode::new(&coding, exe, &coding.workspace.root);
     let server = TcpListener::bind("127.0.0.1:0")?;
     let mut api = Api {
         endpoint: format!("http://{}", server.local_addr()?),
