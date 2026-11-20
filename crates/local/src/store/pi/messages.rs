@@ -208,9 +208,11 @@ pub(super) fn encode(
                     .map(|c| json!({"type":"toolCall","id":c.id,"name":c.name,"arguments":c.args})),
             );
             let (input, output) = usage.map_or((0, 0), |u| (u.input, u.output));
+            let read = usage.and_then(|u| u.cache_read).unwrap_or(0);
+            let write = usage.and_then(|u| u.cache_write).unwrap_or(0);
             json!({"role":"assistant","content":parts,"api":"openai-completions","provider":"panda","model":"unknown",
-                "stopReason":if calls.is_empty() {"stop"} else {"toolUse"},"usage":{"input":input,"output":output,
-                "cacheRead":0,"cacheWrite":0,"totalTokens":input.saturating_add(output),"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":usage.and_then(|u|u.cost).unwrap_or(0.)}}})
+                "stopReason":if calls.is_empty() {"stop"} else {"toolUse"},"usage":{"input":input.saturating_sub(read).saturating_sub(write),"output":output,
+                "cacheRead":read,"cacheWrite":write,"totalTokens":input.saturating_add(output),"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":usage.and_then(|u|u.cost).unwrap_or(0.)}}})
         }
         Message::BranchSummary(_) => bail!("branch summary must be exported as an entry"),
     };

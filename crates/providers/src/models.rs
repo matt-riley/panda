@@ -6,6 +6,7 @@ use std::{path::Path, time::Duration};
 pub struct Catalogue {
     pub models: Vec<(String, Option<u64>)>,
     pub efforts: std::collections::BTreeMap<String, Vec<String>>,
+    pub prices: std::collections::BTreeMap<String, panda_core::TokenPrices>,
     pub output_limits: std::collections::BTreeMap<String, u64>,
 }
 
@@ -40,6 +41,7 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
             };
             let v: Value = checked(request.send().await?).await?.json().await?;
             let mut efforts = std::collections::BTreeMap::new();
+            let mut prices = std::collections::BTreeMap::new();
             let mut output_limits = std::collections::BTreeMap::new();
             let mut ids: Vec<_> = v["data"]
                 .as_array()
@@ -49,6 +51,9 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                 .filter(|m| m["visibility"] != "hide")
                 .filter_map(|m| {
                     let id = m["id"].as_str().or(m["slug"].as_str())?;
+                    if let Some(price) = catalogue_price(&m["pricing"]) {
+                        prices.insert(id.to_owned(), price);
+                    }
                     if let Some(limit) = m["top_provider"]["max_completion_tokens"]
                         .as_u64()
                         .filter(|&n| n > 0)
@@ -78,6 +83,7 @@ pub fn catalogue(provider: &str, state: &Path, key: Option<&str>) -> Result<Cata
                 models: ids,
                 efforts,
                 output_limits,
+                prices,
             })
         })
 }
@@ -94,4 +100,45 @@ pub fn codex_configured(state: &Path) -> Result<bool> {
         [auth::CODEX],
         |r| r.get(0),
     )?)
+}
+
+pub fn logout(state: &Path) -> Result<()> {
+    let path = state.join("subscriptions.sqlite3");
+    if path.try_exists()? {
+        rusqlite::Connection::open(path)?
+            .execute("DELETE FROM credentials WHERE id=?", [auth::CODEX])?;
+    }
+    Ok(())
+}
+
+fn catalogue_price(pricing: &Value) -> Option<panda_core::TokenPrices> {
+    let rate = |key: &str| {
+        let value = &pricing[key];
+        let dollars = value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())?;
+        let million = dollars * 1_000_000.;
+        (million.is_finite() && million >= 0.).then_some(million)
+    };
+    Some(panda_core::TokenPrices {
+        input: rate("prompt")?,
+        output: rate("completion")?,
+        cache_read: rate("input_cache_read"),
+        cache_write: rate("input_cache_write"),
+    })
+}
+
+#[test]
+fn catalogue_prices_convert_per_token_units() {
+    let prices = catalogue_price(&serde_json::json!({"prompt":"0.000002","completion":0.000006,"input_cache_read":"0.000001"})).unwrap();
+    assert_eq!(
+        (
+            prices.input,
+            prices.output,
+            prices.cache_read,
+            prices.cache_write
+        ),
+        (2., 6., Some(1.), None)
+    );
+    assert!(catalogue_price(&serde_json::json!({"prompt":"-1","completion":0})).is_none());
 }

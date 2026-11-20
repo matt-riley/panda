@@ -21,6 +21,31 @@ panda
 
 For DeepSeek or OpenRouter, set `DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY` in the launching shell. Panda defaults to DeepSeek. Select a provider and model with `:model openrouter openai/gpt-4.1-mini`. To retain a configured key for future sessions, use `:login deepseek` or `:login openrouter`.
 
+Register OpenAI-compatible endpoints in `$PANDA_HOME/models.json` (the default state directory is `~/.panda`). Each model sets its context window, output ceiling and accepted inputs. Prices are US dollars per million tokens. Omitting a price leaves the corresponding cost unknown. For example:
+
+```json
+{
+  "providers": {
+    "local": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "models": [{
+        "id": "vision",
+        "name": "Local Vision",
+        "input": ["text", "image"],
+        "contextWindow": 32768,
+        "maxTokens": 4096,
+        "cost": {"input": 1, "output": 3, "cacheRead": 0.1, "cacheWrite": 1.2}
+      }]
+    }
+  }
+}
+```
+
+Set `apiKey` to an uppercase environment variable name for authenticated endpoints. Run `panda --list-models` to inspect the catalogue. Use `panda --models 'local/*,other/fast:high'` or `:scope PATTERNS` to limit the model picker and cycling. Press Ctrl-P or enter `:cycle prev` to cycle. Check `:auth` for credential status. `:logout PROVIDER` removes the saved key and disables that provider until its next login.
+
+Panda resumes each branch with its own provider, model and thinking level. Pi JSONL exports retain the model that answered each turn, including one-shot overrides. `:usage` lists requests, retries and summaries with their reported or catalogue-derived costs. It reports unpriced requests separately.
+
+
 For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `:model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. The direct command `:login openai` also works. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
 
 ## Use a session

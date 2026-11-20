@@ -799,6 +799,7 @@ mod tests {
             },
         )
         .unwrap();
+        live.footer.usage = crate::usage(&db.load().unwrap());
         assert_eq!(completed, 1);
         assert!(
             matches!(db.load().unwrap().history.last(),Some(Message::Assistant{text:raw,..}) if raw==text)

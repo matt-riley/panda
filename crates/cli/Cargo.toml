@@ -21,6 +21,7 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 base64 = "0.22"
 libc = "0.2"
+globset = "0.4"
 walkdir = "2"
 shlex = "2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

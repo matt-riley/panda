@@ -35,14 +35,17 @@ impl Stream {
                 continue;
             }
             let event: Value = serde_json::from_str(data)?;
-            ensure!(
-                event.get("error").is_none(),
-                "provider reported a streaming error"
-            );
+            if let Some(model) = event["model"].as_str() {
+                emit(Event::Responder(model.to_owned()));
+            }
             if let Some(usage) = event.get("usage").filter(|v| !v.is_null()) {
                 self.output_tokens = usage["completion_tokens"].as_u64();
                 emit(Event::Usage(usage.clone()))
             }
+            ensure!(
+                event.get("error").is_none(),
+                "provider reported a streaming error"
+            );
             let Some(choice) = event["choices"].get(0) else {
                 continue;
             };
@@ -124,13 +127,27 @@ pub struct Api {
     pub model: String,
     pub key: String,
 }
+pub fn endpoint_url(raw: &str) -> Result<bool> {
+    let url = reqwest::Url::parse(raw)?;
+    Ok(matches!(url.scheme(), "https" | "http")
+        && url.has_host()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+}
 struct ChatProvider<A> {
+    images: bool,
     api: A,
     max_tokens: Option<u64>,
 }
 impl Api {
     pub fn with_output_limit(self, max_tokens: Option<u64>) -> impl Provider + Send {
+        self.configured(max_tokens, true)
+    }
+    pub fn configured(self, max_tokens: Option<u64>, images: bool) -> impl Provider + Send {
         ChatProvider {
+            images,
             api: self,
             max_tokens,
         }
@@ -239,6 +256,7 @@ impl Provider for Api {
     ) -> Result<(String, Vec<Call>)> {
         ChatProvider {
             api: &*self,
+            images: true,
             max_tokens: None,
         }
         .reply_with_effort(system, h, tools, cancel, emit, effort)
@@ -270,7 +288,24 @@ impl<A: std::borrow::Borrow<Api>> Provider for ChatProvider<A> {
             .enable_all()
             .build()?;
         let request = async {
-            let mut body = json!({"model": api.model, "messages": messages(system,h), "stream": true, "stream_options":{"include_usage":true}});
+            let mut history = messages(system, h);
+            if !self.images {
+                for message in &mut history {
+                    if let Some(parts) = message["content"].as_array() {
+                        let text = parts
+                            .iter()
+                            .map(|part| {
+                                part["text"]
+                                    .as_str()
+                                    .unwrap_or("[image omitted: text-only model]")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        message["content"] = json!(text);
+                    }
+                }
+            }
+            let mut body = json!({"model": api.model, "messages": history, "stream": true, "stream_options":{"include_usage":true}});
             let deepseek = api.endpoint == "https://api.deepseek.com/chat/completions";
             let limit = self.max_tokens.or_else(|| {
                 // Pin the documented DeepSeek default so the length comparison
@@ -299,13 +334,13 @@ impl<A: std::borrow::Borrow<Api>> Provider for ChatProvider<A> {
             if !tools.is_empty() {
                 body["tools"] = tools.into();
             }
-            let response = reqwest::Client::new()
-                .post(&api.endpoint)
-                .bearer_auth(&api.key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(transport_error)?;
+            let request = reqwest::Client::new().post(&api.endpoint);
+            let request = if api.key.is_empty() {
+                request
+            } else {
+                request.bearer_auth(&api.key)
+            };
+            let response = request.json(&body).send().await.map_err(transport_error)?;
             let mut response = checked(response).await?;
             let mut stream = Stream::default();
             while let Some(chunk) = response.chunk().await.map_err(|e| {
@@ -369,6 +404,19 @@ pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Resp
         .and_then(|v| v.to_str().ok())
         .and_then(retry_after);
     let error = response.json::<Value>().await.unwrap_or(Value::Null);
+    let failure = response_error(status, delay, &error);
+    let usage = error.get("usage").or_else(|| error.pointer("/error/usage"));
+    Err(match usage {
+        Some(usage) if usage.is_object() => failure.context(panda_core::FailedUsage(usage.clone())),
+        _ => failure,
+    })
+}
+
+fn response_error(
+    status: reqwest::StatusCode,
+    delay: Option<std::time::Duration>,
+    error: &Value,
+) -> anyhow::Error {
     let code = error["error"]["code"].as_str().unwrap_or_default();
     let message = error["error"]["message"]
         .as_str()
@@ -379,7 +427,7 @@ pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Resp
             && message.contains("context")
             && (message.contains("exceed") || message.contains("maximum")))
     {
-        return Err(panda_core::ContextOverflow.into());
+        return panda_core::ContextOverflow.into();
     }
     if matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504 | 529)
         && !matches!(
@@ -387,13 +435,13 @@ pub(crate) async fn checked(response: reqwest::Response) -> Result<reqwest::Resp
             "insufficient_quota" | "billing_hard_limit_reached" | "usage_limit_reached"
         )
     {
-        return Err(TransientFailure {
+        return TransientFailure {
             reason: format!("provider returned HTTP {status}"),
             retry_after: delay,
         }
-        .into());
+        .into();
     }
-    anyhow::bail!("provider returned HTTP {status} {code}")
+    anyhow::anyhow!("provider returned HTTP {status} {code}")
 }
 
 pub mod models;

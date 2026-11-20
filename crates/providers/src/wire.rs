@@ -46,6 +46,9 @@ impl Responses {
     pub fn push(&mut self, bytes: &[u8], emit: &mut Emit) -> Result<()> {
         self.lines.feed(bytes, |v| {
             ensure!(!self.complete, "event after completion");
+            if let Some(model) = v.pointer("/response/model").and_then(Value::as_str) {
+                emit(Event::Responder(model.to_owned()));
+            }
             match string(&v, "type")? {
                 "response.reasoning_summary_text.delta" => {
                     if let Some(t) = v["delta"].as_str() {
@@ -84,6 +87,9 @@ impl Responses {
                     }
                 }
                 "error" | "response.failed" | "response.incomplete" => {
+                    if let Some(usage) = v.pointer("/response/usage").filter(|u| u.is_object()) {
+                        emit(Event::Usage(usage.clone()));
+                    }
                     bail!("subscription response failed or incomplete")
                 }
                 _ => {}

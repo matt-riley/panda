@@ -75,6 +75,16 @@ impl Disk {
             } else {
                 s.history.iter().enumerate().filter(|(_,m)|matches!(m,panda_core::Message::Assistant{calls,..} if calls.is_empty())).nth(n-1).context("unknown completed turn")?.0+1
             };
+            if end < s.history.len() {
+                s.preferences.retain(|&depth, _| depth <= end);
+                (s.model, s.reasoning) = s
+                    .preferences
+                    .last_key_value()
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+            }
+            s.responders.retain(|&i, _| i < end);
+            s.attempts.retain(|a| a.through <= end);
             s.history.truncate(end);
             s.usage.retain(|u| u.through <= end);
             if s.checkpoint.as_ref().is_some_and(|c| c.through > end) {
@@ -121,6 +131,20 @@ impl Disk {
             for u in &mut s.usage {
                 u.through = boundaries[u.through];
                 u.checkpoint_through = boundaries[u.checkpoint_through];
+            }
+            s.preferences = s
+                .preferences
+                .into_iter()
+                .map(|(i, v)| (boundaries[i], v))
+                .collect();
+            s.responders = s
+                .responders
+                .into_iter()
+                .filter(|(i, _)| boundaries[i + 1] > boundaries[*i])
+                .map(|(i, id)| (boundaries[i], id))
+                .collect();
+            for attempt in &mut s.attempts {
+                attempt.through = boundaries[attempt.through];
             }
             s.history = history;
             s.context_edits.clear();
@@ -239,6 +263,7 @@ impl Disk {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         pi::schema(&tx)?;
         for table in [
+            "tree_models",
             "pi_context_edits",
             "pi_records",
             "pi_export_times",

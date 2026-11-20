@@ -1119,6 +1119,7 @@ dependencies = [
  "base64 0.22.1",
  "crossterm",
  "ctrlc",
+ "globset",
  "libc",
  "panda-coding",
  "panda-core",
