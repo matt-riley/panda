@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.22](https://github.com/matt-riley/panda/compare/v0.1.21...v0.1.22) (2026-11-20)
+
+
+### Features
+
+* add native model protocols and virtual routing ([212cdae](https://github.com/matt-riley/panda/commit/212cdae5b1218e24c129e0d77d46fe03bb55d6ef))
+* add native model protocols and virtual routing ([f0cb03c](https://github.com/matt-riley/panda/commit/f0cb03c2cf34634129bcc7da953f3bd0fc70d395))
+* add offline diagnostics and document Pi product scope ([#71](https://github.com/matt-riley/panda/issues/71)) ([716ead6](https://github.com/matt-riley/panda/commit/716ead66cc8d843c610daf5d1d2eaa1499b45b8d))
+* add source-backed native compaction and scheduling ([33a7050](https://github.com/matt-riley/panda/commit/33a7050289603a0a59b4d42d6defc1a136dde9c1))
+* add source-backed native compaction and scheduling ([5386fac](https://github.com/matt-riley/panda/commit/5386facad132270cee7fdd00e008af012925b9df))
+* add workspace-aware resume, terminal preferences and checkpoint recovery ([c543b83](https://github.com/matt-riley/panda/commit/c543b83e3c45e692a6c048d11c3b798d1dfbc675))
+* add workspace-aware resume, terminal preferences and checkpoint recovery ([530350a](https://github.com/matt-riley/panda/commit/530350a6e8f9acb3209615a487edec4e83b12ecc))
+* bound Codemode runs and scope workspace discovery ([#69](https://github.com/matt-riley/panda/issues/69)) ([ac962d9](https://github.com/matt-riley/panda/commit/ac962d9fc9131e5ca1c3ccb021390f6a99b9f05f))
+* capture console output in Codemode ([#67](https://github.com/matt-riley/panda/issues/67)) ([18fb82e](https://github.com/matt-riley/panda/commit/18fb82e25df15bfd8e150883aea22a580cd1af85))
+* enforce tool visibility and schedule concurrent calls ([61f0564](https://github.com/matt-riley/panda/commit/61f0564ef7c70c1a01b0edfc6f70cb1d4bee3872))
+* enforce tool visibility and schedule concurrent calls ([4c9d9dd](https://github.com/matt-riley/panda/commit/4c9d9dd49628c9a39d2d8bcbd323ab1c6147510a))
+* expose the shared session SDK and Pi RPC adapter ([ff5b0e8](https://github.com/matt-riley/panda/commit/ff5b0e8773e1fa9221c539d00d42c4d0a6c2ee07))
+* expose the shared session SDK and Pi RPC adapter ([e672a87](https://github.com/matt-riley/panda/commit/e672a872fce01a1c46a9cc2879d03f1e5f93273d))
+* make verified compaction the default and qualify handoffs ([93b9da9](https://github.com/matt-riley/panda/commit/93b9da95e104840aef88777076a90adcc663cee4))
+* make verified compaction the default and qualify handoffs ([fc804ad](https://github.com/matt-riley/panda/commit/fc804ad0b392742e55b6de15cebad482cdbd925a))
+* manage saved sessions and filter the session tree ([#72](https://github.com/matt-riley/panda/issues/72)) ([a592818](https://github.com/matt-riley/panda/commit/a592818655da75713903a5b1e72c24e35a891a0f))
+* preserve ordered Codemode images and structured edit patches ([#73](https://github.com/matt-riley/panda/issues/73)) ([6a13310](https://github.com/matt-riley/panda/commit/6a133109fc03783d1a009d5c0c09ba74c9dd292f))
+* resolve layered settings, instructions, templates and skills ([#70](https://github.com/matt-riley/panda/issues/70)) ([e1e1fe6](https://github.com/matt-riley/panda/commit/e1e1fe6fefaf605ec162fa4d6a305a376aa4d811))
+* restore branch models and account for provider usage ([23ab6fa](https://github.com/matt-riley/panda/commit/23ab6fa36db2e8eb7abf9fa6087e1dbadc7120c2))
+* restore branch models and account for provider usage ([d1d1142](https://github.com/matt-riley/panda/commit/d1d11423e897bd16b01a30f7ec0dca8c0b511355))
+* trust project resources and integrate packages and MCP ([fa0c26d](https://github.com/matt-riley/panda/commit/fa0c26db9b96241f233a42b2120520a83c275d36))
+* trust project resources and integrate packages and MCP ([6d3b87b](https://github.com/matt-riley/panda/commit/6d3b87bf920521e725c75eb147d0e468675c6ff0))
+
+
+### Bug Fixes
+
+* protect project instructions and unify tool dispatch ([#76](https://github.com/matt-riley/panda/issues/76)) ([e53582e](https://github.com/matt-riley/panda/commit/e53582e3de74e93d0473233b6c52eb4910e4fd43))
+* retain captionless image turns in compaction plans ([c5cc16f](https://github.com/matt-riley/panda/commit/c5cc16f6d3a0ec06aa50658228719e409e86f345))
+
 ## [0.1.21](https://github.com/matt-riley/panda/compare/v0.1.20...v0.1.21) (2026-11-20)
 
 
