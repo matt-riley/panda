@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.21](https://github.com/matt-riley/panda/compare/v0.1.20...v0.1.21) (2026-11-20)
+
+
+### Features
+
+* preserve partial Codemode output on script failure ([#66](https://github.com/matt-riley/panda/issues/66)) ([906dd3d](https://github.com/matt-riley/panda/commit/906dd3d849281cb80b90113f3e6143e28d0c86bf))
+* support top-level return and exit in Codemode ([#64](https://github.com/matt-riley/panda/issues/64)) ([8c0ca40](https://github.com/matt-riley/panda/commit/8c0ca40fd920f5138566e1ea14acaba684038b8c))
+
 ## [0.1.20](https://github.com/matt-riley/panda/compare/v0.1.19...v0.1.20) (2026-11-20)
 
 
