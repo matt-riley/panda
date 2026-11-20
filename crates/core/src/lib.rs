@@ -1,5 +1,6 @@
 mod checkpoint_files;
 mod recovery;
+mod tool_details;
 use anyhow::{Result, bail};
 pub use checkpoint_files::CheckpointFiles;
 pub use recovery::TransientFailure;
@@ -9,6 +10,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+pub use tool_details::{ImagePosition, OutputItem, Part, Replacement, ToolDetails, parts};
 
 #[derive(Default, Clone)]
 pub struct Cancel(Arc<AtomicBool>);
@@ -36,6 +38,8 @@ pub struct Call {
 /// The text is suitable for terminal output. Image data URLs travel separately.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ToolDetails>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
@@ -46,6 +50,7 @@ impl From<String> for ToolOutput {
         Self {
             text,
             images: Vec::new(),
+            details: None,
         }
     }
 }
@@ -66,6 +71,8 @@ pub enum Message {
         calls: Vec<Call>,
     },
     Result {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<ToolDetails>,
         id: String,
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -456,6 +463,7 @@ pub enum Event {
     Calling(Call),
     NestedRead(String),
     NestedCall { parent: String, call: Call },
+    ResultDetails { id: String, details: ToolDetails },
     Result(String),
 }
 pub type Emit<'a> = dyn FnMut(Event) + 'a;
@@ -681,6 +689,7 @@ pub fn turn_message(
             cancel.check()?;
             emit(Event::Calling(call.clone()));
             let mut nested_reads = std::collections::BTreeSet::new();
+            let started = std::time::Instant::now();
             let result = tools.run_in_session(&s, &call, cancel, &mut |event| match event {
                 Event::NestedRead(path) => {
                     nested_reads.insert(path);
@@ -688,7 +697,7 @@ pub fn turn_message(
                 other => emit(other),
             });
             let is_error = result.is_err();
-            let (output, writes) = result
+            let (mut output, writes) = result
                 .unwrap_or_else(|e| (format!("tool error: {e}").into(), StoreWrites::default()));
             cancel.check()?;
             if !output.images.is_empty() && pending_image_exchange.is_none() {
@@ -697,14 +706,33 @@ pub fn turn_message(
             if !writes.is_empty() {
                 s.history.push(Message::CodemodeStore(writes));
             }
+            if call.name == "codemode" && output.details.is_none() {
+                output.details = Some(ToolDetails::Codemode {
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    success: !is_error,
+                    images: vec![],
+                    items: vec![],
+                });
+            }
             s.history.push(Message::Result {
-                id: call.id,
+                details: output.details,
+                id: call.id.clone(),
                 is_error,
                 nested_reads: nested_reads.into_iter().collect(),
                 text: output.text.clone(),
                 images: output.images,
             });
             store.save(&mut s)?;
+            if let Some(Message::Result {
+                details: Some(details),
+                ..
+            }) = s.history.last()
+            {
+                emit(Event::ResultDetails {
+                    id: call.id,
+                    details: details.clone(),
+                });
+            }
             emit(Event::Result(output.text));
         }
         let queued = pending(idle);
@@ -737,6 +765,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                     .collect();
                 for id in pending {
                     s.history.push(Message::Result {
+                        details: None,
                         id,
                         is_error: true,
                         nested_reads: vec![],
@@ -792,7 +821,7 @@ mod tests {
                 Message::Assistant { text: String::new(), calls: vec![Call {
                     id: "c".into(), name: "shell".into(), args: serde_json::json!({}),
                 }] },
-                Message::Result { id: "c".into(), text, images: vec![], is_error: true, nested_reads: vec![] },
+                Message::Result { details: None, id: "c".into(), text, images: vec![], is_error: true, nested_reads: vec![] },
             ];
             // An imported edit can replace several raw messages at one index.
             let bytes = serde_json::to_vec(&exchange).unwrap().len() - 1;

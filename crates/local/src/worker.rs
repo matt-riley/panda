@@ -1,4 +1,4 @@
-pub use crate::files::{read_output, run};
+pub use crate::files::{mutate, read_output, run};
 #[cfg(test)]
 use {
     serde_json::{Value, json},

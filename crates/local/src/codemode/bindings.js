@@ -1,4 +1,4 @@
-((invoke, emit, catalog, read, write) => {
+((invoke, emit, catalog, read, write, emitImage) => {
     const stringify = JSON.stringify, parse = JSON.parse;
     globalThis.load = key => {
         if (typeof key !== "string") throw new TypeError("load() key must be a string");
@@ -16,7 +16,12 @@
         ls: (args = {}) => parse(call("ls", args)),
         search: args => parse(call("search", args)),
         repo_map: (args = {}) => parse(call("repo_map", args)),
-        read: args => call("read", args)
+        read: args => {
+            const {text, image} = parse(call("read", args));
+            if (!image) return text;
+            const comma = image.indexOf(",");
+            return Object.freeze({type: "image", mimeType: image.slice(5, image.indexOf(";")), data: image.slice(comma + 1), note: text});
+        }
     };
     const entries = Object.freeze(catalog.map(entry => Object.freeze(entry)));
     globalThis.tools = Object.freeze(Object.fromEntries(entries.map(({name}) => [name, helpers[name]])));
@@ -65,7 +70,12 @@
         matches.sort((a, b) => b.exact - a.exact || b.covered - a.covered || b.score - a.score);
         return matches.slice(0, limit).map(match => match.entry);
     };
-    globalThis.text = value => emit(typeof value === "string" ? value : stringify(value), false);
+    globalThis.image = value => {
+        const url = value?.type === "image" ? "data:" + value.mimeType + ";base64," + value.data : value?.image_url?.url ?? value?.image_url ?? value;
+        if (typeof url !== "string" || !url.startsWith("data:image/")) throw new TypeError("image() requires a local image data URL or image block");
+        emitImage(url);
+    };
+    globalThis.text = value => emit(value?.type === "image" && typeof value.note === "string" ? value.note : typeof value === "string" ? value : stringify(value), false);
     function formatArgument(value) {
         if (typeof value === "string") return value;
         if (value instanceof Error) {
@@ -82,7 +92,8 @@
     }
     const log = (...args) => emit(args.map(formatArgument).join(" "), true);
     globalThis.console = Object.freeze({ log, info: log, warn: log, error: log, debug: log });
-})(globalThis.__invoke, globalThis.__emit, globalThis.__catalog, globalThis.__load, globalThis.__store);
+})(globalThis.__invoke, globalThis.__emit, globalThis.__catalog, globalThis.__load, globalThis.__store, globalThis.__image);
+delete globalThis.__image;
 delete globalThis.__load;
 delete globalThis.__store;
 delete globalThis.__catalog;

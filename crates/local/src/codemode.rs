@@ -1,4 +1,5 @@
 //! Optional read-only JavaScript composition for the native host.
+mod images;
 mod storage;
 mod vm;
 use storage::ScriptStore;
@@ -44,8 +45,8 @@ const HELPERS: &[(&str, &str, &str)] = &[
     ),
     (
         "read",
-        "string",
-        "tools.read({path,offset?,limit?}) returns file text or a short image description. Reading a PNG, JPEG or WebP attaches the original image when the script succeeds; only text supports line ranges.",
+        "string | ImageBlock",
+        "tools.read({path,offset?,limit?}) returns file text or an image block {type, data, mimeType, note}. Use image(block) to select an image in output order. Without image(), nested image reads attach automatically for older scripts; only text supports line ranges.",
     ),
 ];
 // A JSON-escaped byte can occupy six bytes in the outer protocol record.
@@ -53,7 +54,7 @@ const HELPERS: &[(&str, &str, &str)] = &[
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 16 * 1024;
 const MAX_ERROR_CHARS: usize = 1024;
 const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 6 * MAX_ERROR_CHARS + 1024;
-const REPLY_FRAME: usize = 6 * 1024 * 1024 + 1024;
+const REPLY_FRAME: usize = MAX_IMAGE_URL_BYTES + 6 * 1024 * 1024 + 1024;
 // Finished messages must also fit when every output byte needs JSON escaping.
 const _: () = assert!(WORKER_FRAME >= 6 * (MAX_OUTPUT_BYTES + MAX_ERROR_CHARS) + 64);
 
@@ -106,24 +107,41 @@ impl ScriptOptions {
     }
 }
 
-fn finish_output(root: &std::fs::File, text: String, preview_bytes: usize) -> Result<String> {
+const TRUNCATION: &str = "\n[Output truncated]\n";
+struct Preview {
+    text: String,
+    omitted: Option<std::ops::Range<usize>>,
+}
+impl Preview {
+    fn offset(&self, offset: usize) -> usize {
+        match &self.omitted {
+            Some(cut) if offset >= cut.end => cut.start + TRUNCATION.len() + offset - cut.end,
+            Some(cut) if offset > cut.start => cut.start,
+            _ => offset,
+        }
+    }
+}
+
+fn finish_output(root: &std::fs::File, text: String, preview_bytes: usize) -> Result<Preview> {
     ensure!(text.len() <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
     if text.len() <= preview_bytes {
-        return Ok(text);
+        return Ok(Preview {
+            text,
+            omitted: None,
+        });
     }
     let (path, _) =
         crate::output_log::create_log(root, "codemode", |file| file.write_all(text.as_bytes()))
             .context("could not save full Codemode output")?;
-    let middle = "\n[Output truncated]\n";
+    let middle = TRUNCATION;
     let footer = format!("\nFull output: {path}");
     let budget = preview_bytes.saturating_sub(middle.len() + footer.len());
     let head = text.floor_char_boundary(budget / 2);
     let tail = text.ceil_char_boundary(text.len() - budget.div_ceil(2));
-    Ok(format!(
-        "{}{middle}{}{footer}",
-        &text[..head],
-        &text[tail..]
-    ))
+    Ok(Preview {
+        text: format!("{}{middle}{}{footer}", &text[..head], &text[tail..]),
+        omitted: Some(head..tail),
+    })
 }
 
 struct NestedHelper<'a> {
@@ -185,6 +203,8 @@ impl NestedHelper<'_> {
 struct ScriptOutput {
     text: String,
     error: Option<String>,
+    offsets: Vec<usize>,
+    items: Vec<panda_core::OutputItem>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +212,7 @@ enum WorkerMessage {
     Invoke { name: String, args: Value },
     Load { key: String },
     Store { key: String, json: Option<String> },
+    Image { url: String },
     Finished(ScriptOutput),
 }
 
@@ -291,7 +312,8 @@ impl<'a> Codemode<'a> {
             "Codemode script exceeds 64 KiB"
         );
         let options = ScriptOptions::parse(script)?;
-        let deadline = Instant::now() + Duration::from_millis(options.timeout_ms);
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(options.timeout_ms);
         let catalog: Vec<_> = Self::helpers(&self.inner.schemas(mode))
             .map(|helper| helper.entry())
             .collect();
@@ -321,7 +343,7 @@ impl<'a> Codemode<'a> {
         // One watchdog covers compilation, JS, blocked IPC and a nested file worker.
         // The nested token is private so a timeout doesn't cancel the whole turn.
         let nested = Cancel::default();
-        let (result, images) = std::thread::scope(|scope| {
+        let (result, automatic, selected) = std::thread::scope(|scope| {
             let (finished, done) = mpsc::channel::<()>();
             let nested_cancel = nested.clone();
             let watchdog =
@@ -331,8 +353,9 @@ impl<'a> Codemode<'a> {
                 let mut count = 0;
                 let mut images = Vec::new();
                 let mut image_bytes = 0;
+                let mut selected = images::Selected::default();
                 loop {
-                    match receive(&mut input, WORKER_FRAME)? {
+                    match receive(&mut input, WORKER_FRAME.max(MAX_IMAGE_URL_BYTES + 1024))? {
                         WorkerMessage::Load { key } => {
                             send(&mut output, &Ok::<_, String>(store.load(&key)))?;
                         }
@@ -343,8 +366,12 @@ impl<'a> Codemode<'a> {
                                 .map_err(|e| e.to_string());
                             send(&mut output, &reply)?;
                         }
+                        WorkerMessage::Image { url } => {
+                            let reply = selected.push(url).map(|()| "").map_err(|e| e.to_string());
+                            send(&mut output, &reply)?;
+                        }
                         WorkerMessage::Finished(result) => {
-                            return Ok((result, images));
+                            return Ok((result, images, selected));
                         }
                         WorkerMessage::Invoke { name, args } => {
                             cancel.check()?;
@@ -384,8 +411,11 @@ impl<'a> Codemode<'a> {
                                         "Codemode image budget exceeded"
                                     );
                                     image_bytes += added;
-                                    images.extend(result.images);
-                                    Ok(result.text)
+                                    if child_call.name == "read" {
+                                        let response = serde_json::to_string(&json!({"text":result.text,"image":result.images.first()}))?;
+                                        images.extend(result.images);
+                                        Ok(response)
+                                    } else {Ok(result.text)}
                                 })
                                 .map_err(|err| err.to_string());
                             if reply.is_ok()
@@ -406,15 +436,31 @@ impl<'a> Codemode<'a> {
         cancel.check()?;
         let preview = finish_output(&root, result.text, options.max_output_tokens * 4);
         if let Some(error) = result.error {
-            let text = preview.unwrap_or_else(|log_error| log_error.to_string());
+            let text = preview
+                .map(|p| p.text)
+                .unwrap_or_else(|log_error| log_error.to_string());
             if text.is_empty() {
                 anyhow::bail!("{error}");
             }
             anyhow::bail!("{text}\nScript error: {error}");
         }
+        let preview = preview?;
+        let (images, positions) = selected.finish(&root, automatic, &result.offsets, &preview)?;
         Ok((
             ToolOutput {
-                text: preview?,
+                details: Some(panda_core::ToolDetails::Codemode {
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    success: true,
+                    images: positions,
+                    // The bounded preview includes an omission marker and a full log reference.
+                    // Its image positions are mapped separately when original item ranges disappear.
+                    items: if preview.omitted.is_none() {
+                        result.items
+                    } else {
+                        vec![]
+                    },
+                }),
+                text: preview.text,
                 images,
             },
             store.writes,
@@ -474,7 +520,7 @@ impl Toolset for Codemode<'_> {
             .join(" ");
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) to emit output in order. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
@@ -517,7 +563,7 @@ mod output_tests {
                 text.push(ch);
                 if text.len() >= byte_target { break; }
             }
-            let result = finish_output(&root, text.clone(), PREVIEW_BYTES).unwrap();
+            let result = finish_output(&root, text.clone(), PREVIEW_BYTES).unwrap().text;
             if text.len() <= PREVIEW_BYTES {
                 prop_assert_eq!(result, text);
                 prop_assert!(!dir.path().join(".panda").exists());

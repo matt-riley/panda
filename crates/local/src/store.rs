@@ -325,6 +325,7 @@ mod tests {
             },
             Message::Reasoning("hidden reasoning".into()),
             Message::Result {
+                details: None,
                 id: "1".into(),
                 text: "hidden tool output".into(),
                 images: vec![],

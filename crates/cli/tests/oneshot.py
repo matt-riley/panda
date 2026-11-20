@@ -760,6 +760,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert requests[-1][1]["messages"][-1]["content"] == '["private-cursor",true]'
 
     sys.dont_write_bytecode = True
+    from tool_results import check as check_tool_results
+    check_tool_results(repo, run, next_calls, requests, saved_session)
     from resources import check as check_resources
     requests.clear()
     check_resources(root, state, run, requests, saved_session)

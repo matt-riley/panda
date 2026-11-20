@@ -163,14 +163,41 @@ fn messages(system: &str, history: &[Message]) -> Vec<Value> {
             }
             Message::User(text) => json!({"role":"user","content":text}),
             Message::Result {
-                id, text, images, ..
+                id,
+                text,
+                images,
+                details,
+                ..
             } => {
-                image_parts.extend(
-                    images
+                if let Some(panda_core::ToolDetails::Codemode {
+                    images: positions, ..
+                }) = details
+                    && !positions.is_empty()
+                {
+                    image_parts.extend(
+                        panda_core::parts(text, images, details.as_ref())
+                            .into_iter()
+                            .map(|part| match part {
+                                panda_core::Part::Text(text) => json!({"type":"text","text":text}),
+                                panda_core::Part::Image(url) => {
+                                    json!({"type":"image_url","image_url":{"url":url}})
+                                }
+                            }),
+                    );
+                    let paths = positions
                         .iter()
-                        .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
-                );
-                json!({"role":"tool","tool_call_id":id,"content":text})
+                        .map(|p| p.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    json!({"role":"tool","tool_call_id":id,"content":format!("Codemode output follows. Saved images: {paths}")})
+                } else {
+                    image_parts.extend(
+                        images
+                            .iter()
+                            .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
+                    );
+                    json!({"role":"tool","tool_call_id":id,"content":text})
+                }
             }
             Message::Assistant { text, calls } => {
                 let mut m = json!({"role":"assistant","content":text});

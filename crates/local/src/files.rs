@@ -57,7 +57,10 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
         }
         return Ok(output);
     }
-    let path = root.join(path);
+    mutate(root, name, args).map(|output| output.text)
+}
+pub fn mutate(root: &Path, name: &str, args: &Value) -> Result<ToolOutput> {
+    let path = root.join(relative_path(args)?);
     match name {
         "write" | "edit" => {
             let parent = path
@@ -75,7 +78,7 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
             let directory = fs::File::open(parent)?;
             directory.lock()?;
             let (text, report) = match write_text {
-                Some(text) => (text.into(), "saved".into()),
+                Some(text) => (text.into(), String::from("saved").into()),
                 None => edit::apply(&read(&path)?, args)?,
             };
             let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -134,6 +137,7 @@ pub fn read_output(root: &Path, args: &Value) -> Result<ToolOutput> {
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= MAX_IMAGE_BYTES, "image exceeds 8 MiB");
         return Ok(ToolOutput {
+            details: None,
             text: format!("Read {mime} ({} bytes)", bytes.len()),
             images: vec![format!("data:{mime};base64,{}", STANDARD.encode(bytes))],
         });

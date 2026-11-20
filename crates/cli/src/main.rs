@@ -360,9 +360,19 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
                 }
             }
             Message::Result {
-                id, text, is_error, ..
-            } if screen.active => screen.tool_result(calls_by_id.remove(id), text, *is_error),
-            Message::Result { id, text, .. } => println!("[{}] {}", safe(id), safe(text)),
+                id,
+                text,
+                is_error,
+                details,
+                ..
+            } => {
+                let text = active::result_text(text, details.as_ref());
+                if screen.active {
+                    screen.tool_result(calls_by_id.remove(id), &text, *is_error);
+                } else {
+                    println!("[{}] {}", safe(id), safe(&text));
+                }
+            }
         }
     }
     if s.active {
@@ -441,6 +451,11 @@ fn run(
             serde_json::to_writer(
                 io::stdout().lock(),
                 &panda_local::worker::read_output(&root, &arg)?,
+            )?;
+        } else if name == "edit" {
+            serde_json::to_writer(
+                io::stdout().lock(),
+                &panda_local::worker::mutate(&root, name, &arg)?,
             )?;
         } else {
             print!("{}", panda_local::worker::run(&root, name, &arg)?);

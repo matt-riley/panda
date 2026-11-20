@@ -19,6 +19,14 @@ pub(crate) fn create_log(
     prefix: &str,
     initialize: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<(String, File)> {
+    create_artifact(root, prefix, "log", initialize)
+}
+pub(crate) fn create_artifact(
+    root: &File,
+    prefix: &str,
+    extension: &str,
+    initialize: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<(String, File)> {
     match mkdirat(root, ".panda", Mode::RWXU) {
         Ok(()) | Err(rustix::io::Errno::EXIST) => {}
         Err(err) => return Err(err.into()),
@@ -30,7 +38,7 @@ pub(crate) fn create_log(
         Mode::empty(),
     )?;
     loop {
-        let name = format!("{prefix}-{:016x}.log", fastrand::u64(..));
+        let name = format!("{prefix}-{:016x}.{extension}", fastrand::u64(..));
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         match openat(&dir, name.as_str(), flags, Mode::RUSR | Mode::WUSR) {

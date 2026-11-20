@@ -41,6 +41,8 @@ fn finish(result: Result<ScriptOutput>) -> Result<()> {
     let output = result.unwrap_or_else(|err| ScriptOutput {
         text: String::new(),
         error: Some(err.to_string()),
+        offsets: Vec::new(),
+        items: Vec::new(),
     });
     send(&mut io::stdout().lock(), &WorkerMessage::Finished(output))
 }
@@ -52,6 +54,8 @@ const CONSOLE_CLOSE: &str = "\n</console_output>";
 struct OutputBuffer {
     text: Option<String>,
     console: Option<String>,
+    offsets: Vec<usize>,
+    items: Vec<panda_core::OutputItem>,
 }
 
 impl OutputBuffer {
@@ -67,6 +71,14 @@ impl OutputBuffer {
             + self.text.as_ref().map_or(0, |s| s.len() + 1)
             + self.console.as_ref().map_or(0, |s| s.len() + 1);
         ensure!(size <= MAX_OUTPUT_BYTES, OUTPUT_LIMIT_ERROR);
+        if !console {
+            ensure!(self.items.len() < 4096, "too many output items");
+            let start = self.text.as_ref().map_or(0, |s| s.len() + 1);
+            self.items.push(panda_core::OutputItem::Text {
+                start,
+                end: start + value.len(),
+            });
+        }
         let group = if console {
             &mut self.console
         } else {
@@ -81,6 +93,20 @@ impl OutputBuffer {
         Ok(())
     }
 
+    fn finish(mut self, error: Option<String>) -> ScriptOutput {
+        if let Some(console) = &self.console {
+            let start = self.text.as_ref().map_or(0, |s| s.len() + 1);
+            let end = start + CONSOLE_OPEN.len() + console.len() + CONSOLE_CLOSE.len();
+            self.items
+                .push(panda_core::OutputItem::Console { start, end });
+        }
+        ScriptOutput {
+            items: std::mem::take(&mut self.items),
+            offsets: std::mem::take(&mut self.offsets),
+            text: self.render(),
+            error,
+        }
+    }
     fn render(self) -> String {
         let Some(console) = self.console else {
             return self.text.unwrap_or_default();
@@ -94,7 +120,8 @@ impl OutputBuffer {
 
 fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
     let runtime = Runtime::new()?;
-    runtime.set_memory_limit(32 * 1024 * 1024);
+    // A full-size encoded image can coexist with its JS block and protocol string.
+    runtime.set_memory_limit(64 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
     let context = JsContext::full(&runtime)?;
     // None latches an overflow, even if the script catches the text() error.
@@ -159,6 +186,30 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
                 },
             )?,
         )?;
+        let image_buffer = output.clone();
+        ctx.globals().set(
+            "__image",
+            Function::new(ctx.clone(), move |ctx: Ctx<'_>, url: String| {
+                let result = (|| -> Result<()> {
+                    ensure!(
+                        url.len() <= MAX_IMAGE_URL_BYTES,
+                        "Codemode image budget exceeded"
+                    );
+                    let mut slot = image_buffer.borrow_mut();
+                    let buffer = slot.as_mut().context(OUTPUT_LIMIT_ERROR)?;
+                    ensure!(buffer.items.len() < 4096, "too many output items");
+                    exchange(WorkerMessage::Image { url })?;
+                    buffer.items.push(panda_core::OutputItem::Image {
+                        index: buffer.offsets.len(),
+                    });
+                    buffer
+                        .offsets
+                        .push(buffer.text.as_ref().map_or(0, String::len));
+                    Ok(())
+                })();
+                result.map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            })?,
+        )?;
         let running = Rc::new(Cell::new(true));
         let exit_enabled = running.clone();
         let exit_output = output.clone();
@@ -174,10 +225,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
                     exit_output
                         .take()
                         .context(OUTPUT_LIMIT_ERROR)
-                        .map(|buffer| ScriptOutput {
-                            text: buffer.render(),
-                            error: None,
-                        }),
+                        .map(|buffer| buffer.finish(None)),
                 );
                 std::process::exit(if sent.is_ok() { 0 } else { 1 });
             })?,
@@ -186,12 +234,12 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
         let result = run_script(&ctx, code);
         // Freeze output before formatting an exception, which may run JS getters.
         running.set(false);
-        let text = output.take().context(OUTPUT_LIMIT_ERROR)?.render();
+        let buffer = output.take().context(OUTPUT_LIMIT_ERROR)?;
         let error = result
             .catch(&ctx)
             .err()
             .map(|err| err.to_string().chars().take(MAX_ERROR_CHARS).collect());
-        Ok(ScriptOutput { text, error })
+        Ok(buffer.finish(error))
     })
 }
 

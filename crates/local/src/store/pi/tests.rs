@@ -111,6 +111,7 @@ fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
             }],
         },
         Message::Result {
+            details: None,
             id: "call".into(),
             text: "image".into(),
             images: vec!["data:image/png;base64,YQ==".into()],
