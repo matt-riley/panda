@@ -2,6 +2,7 @@ mod active;
 mod attachments;
 mod automation;
 mod copy;
+mod html;
 mod markdown;
 mod picker;
 mod renderer;
@@ -417,7 +418,15 @@ fn transfer_session(args: &[String]) -> Result<()> {
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
             let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-            disk.export_pi(std::io::BufWriter::new(temp.as_file_mut()))?;
+            let out = io::BufWriter::new(temp.as_file_mut());
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+            {
+                html::export(&mut disk, out)?;
+            } else {
+                disk.export_pi(out)?;
+            }
             temp.persist_noclobber(path)
                 .with_context(|| format!("creating export {file}"))?;
         }
@@ -460,7 +469,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes Pi v3 JSONL.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
         );
         return Ok(());
     }

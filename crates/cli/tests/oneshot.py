@@ -328,6 +328,12 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
                 archive = root / f"{store.name}-{b}.jsonl"
                 run(["--export-session", str(b), str(archive)] + flags, "")
                 assert archive.is_file() and not requests
+                report = archive.with_suffix(".html")
+                run(["--export-session", str(b), str(report)] + flags, "")
+                html = report.read_bytes()
+                assert html.startswith(b"<!doctype html>"), html[:80]
+                run(["--export-session", str(b), str(report)] + flags, "", error="creating export")
+                assert report.read_bytes() == html and not requests
                 new_session("Other workspace", flags, cwd=foreign)
 
                 output = run(interface + flags + ["--continue", "Continue A"], "")
