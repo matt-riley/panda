@@ -554,21 +554,24 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     for name, count in [("a.rs", 34), ("b.rs", 17)]:
         (ranking_repo / name).write_text("TODO\n" * count)
 
-    def discover(selection, script):
-        next_calls.append(("codemode", {"code": script}))
-        output = run(["--mode", "json", "--no-session", "--tools", selection, "Rank TODOs"], "", cwd=ranking_repo)
+    (ranking_repo / "version.txt").write_text("1.2.3")
+
+    def exercise_tools(interface, flags, declared, call, prompt):
+        next_calls.append(call)
+        output = run([*interface, "--no-session", *flags, prompt], "", cwd=ranking_repo)
         first, followup = [body for _, body in requests]
         requests.clear()
-        assert {t["function"]["name"] for t in first["tools"]} == set(selection.split(","))
+        for body in (first, followup):
+            assert {t["function"]["name"] for t in body.get("tools", [])} == declared, body.get("tools")
         result = followup["messages"][-1]
         assert result["role"] == "tool", result
-        assert not result["content"].startswith("tool error:"), result["content"]
         events = [json.loads(line) for line in output if line.startswith("{")]
-        nested = [e["event"]["data"]["call"] for e in events
-                  if e["type"] == "event" and e["event"]["type"] == "nested_call"]
-        return json.loads(result["content"]), [(c["name"], c["args"]) for c in nested]
+        calls = [e["event"]["data"]["call"] for e in events
+                 if e["type"] == "event" and e["event"]["type"] == "nested_call"]
+        nested = [(c["name"], c["args"]) for c in calls]
+        return result["content"], nested
 
-    found, calls = discover("codemode,read,search", """
+    rank = """
         const [hit] = await searchTools("find matching lines", {limit: 1});
         const description = await describeTool(hit.name);
         if (!description.includes("offset?: number")) throw Error(description);
@@ -580,22 +583,49 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
             offset = page.next_offset;
         } while (offset !== null);
         text([ALL_TOOLS.map(tool => tool.name).sort(), hit.name, [...counts].sort((a,b) => b[1]-a[1])]);
-    """)
-    assert found == [["read", "search"], "search", [["a.rs", 34], ["b.rs", 17]]], found
-    assert calls == [("search", {"query": "TODO", "offset": n}) for n in (0, 50)], calls
-
-    hidden, calls = discover("codemode,read", """
+    """
+    read_version = """
         let blocked = false;
         try { tools.search({query: "TODO"}); } catch (err) { blocked = err instanceof TypeError; }
         text([ALL_TOOLS.map(tool => tool.name), (await searchTools("search")).map(tool => tool.name),
-              await describeTool("search") === undefined, Object.keys(tools), blocked]);
-    """)
-    assert hidden == [["read"], [], True, ["read"], True], hidden
-    assert calls == [], calls
-    next_calls.append(("search", {"query": "TODO"}))
-    run(["--print", "--no-session", "--tools", "codemode,read", "Search directly"], "", cwd=ranking_repo)
-    assert "tool search unavailable for this run" in requests[-1][1]["messages"][-1]["content"]
-    requests.clear()
+              await describeTool("search") === undefined, Object.keys(tools), blocked,
+              tools.read({path: "version.txt"})]);
+    """
+    selected = {"codemode", "read", "search"}
+    for interface in (["--mode", "json"], ["--print"]):
+        for flag in ("--codemode", "--codemode-only"):
+            only = flag == "--codemode-only"
+            flags = [flag, "--tools", "codemode,read,search"]
+            declared = {"codemode"} if only else selected
+            found, nested = exercise_tools(interface, flags, declared, ("codemode", {"code": rank}), "Rank TODOs")
+            assert json.loads(found) == [["read", "search"], "search", [["a.rs", 34], ["b.rs", 17]]], found
+            if interface == ["--mode", "json"]:
+                assert nested == [("search", {"query": "TODO", "offset": n}) for n in (0, 50)], nested
+
+            restricted = [flag, "--tools", "codemode,read"]
+            hidden, nested = exercise_tools(interface, restricted, {"codemode"} if only else {"codemode", "read"},
+                                            ("codemode", {"code": read_version}), "Read version.txt")
+            assert json.loads(hidden) == [["read"], [], True, ["read"], True, "1.2.3"], hidden
+            if interface == ["--mode", "json"]:
+                assert nested == [("read", {"path": "version.txt"})], nested
+
+            if only:
+                # Search is allowed inside the worker. The provider tries calling it directly.
+                denied, nested = exercise_tools(interface, flags, declared, ("search", {"query": "TODO"}), "Search directly")
+                assert "tool search unavailable for this run" in denied and not nested, denied
+            else:
+                version, nested = exercise_tools(interface, flags, declared, ("read", {"path": "version.txt"}), "Read version.txt")
+                assert version == "1.2.3" and not nested, version
+                denied, _ = exercise_tools(interface, restricted, {"codemode", "read"}, ("search", {"query": "TODO"}), "Search directly")
+                assert "tool search unavailable for this run" in denied, denied
+
+    catalog = ("codemode", {"code": "text(ALL_TOOLS.map(tool => tool.name).sort())"})
+    available, _ = exercise_tools(["--print"], ["--codemode-only"], {"codemode"}, catalog, "List helpers")
+    assert json.loads(available) == ["ls", "read", "repo_map", "search"], available
+    available, _ = exercise_tools(["--print"], ["--codemode-only", "--tools", "read"], {"codemode"}, catalog, "List helpers")
+    assert json.loads(available) == ["read"], available
+    denied, _ = exercise_tools(["--print"], ["--codemode-only", "--no-tools"], set(), catalog, "List helpers")
+    assert "tool codemode unavailable for this run" in denied, denied
 
     # This model always summarizes as "Saved old exchange", without filenames.
     for file in ("a.rs", "b.rs", "d.rs"):

@@ -10,6 +10,7 @@ mod screen;
 mod ui;
 mod vim;
 use anyhow::{Context, Result, bail, ensure};
+use automation::CodemodeExposure;
 use panda_coding::{Coding, Workspace};
 use panda_core::*;
 use panda_local::{
@@ -470,7 +471,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
@@ -549,18 +550,34 @@ fn run(
         None => &coding,
     };
     let codemode = panda_local::codemode::Codemode::new(base, &executable, &coding.workspace.root);
-    let tools: &(dyn Toolset + Sync) = if options.codemode { &codemode } else { base };
+    let provider_tools;
+    let tools: &(dyn Toolset + Sync) = match options.codemode {
+        CodemodeExposure::Off => base,
+        CodemodeExposure::Alongside => &codemode,
+        CodemodeExposure::Only => {
+            // Filter provider-facing declarations and dispatch after composing the nested helpers.
+            provider_tools =
+                panda_coding::SelectedTools::new(&codemode, ["codemode".to_owned()].into())?;
+            &provider_tools
+        }
+    };
     let prompted;
-    let tools = if options.system_prompt.is_some() || !options.append_system_prompt.is_empty() {
+    let tools = if options.system_prompt.is_some()
+        || !options.append_system_prompt.is_empty()
+        || options.codemode == CodemodeExposure::Only
+    {
         let mut prompt = if let Some(value) = &options.system_prompt {
             let mut prompt = coding.system_with_base(&automation::prompt_text(value)?)?;
-            if options.codemode {
+            if options.codemode != CodemodeExposure::Off {
                 codemode.append_guidance(&mut prompt);
             }
             prompt
         } else {
             tools.system()?
         };
+        if options.codemode == CodemodeExposure::Only {
+            prompt.push_str("\nUse codemode for every tool call. Follow tool-selection guidance inside the script using the available helpers.");
+        }
         for value in &options.append_system_prompt {
             prompt.push_str("\n\n");
             prompt.push_str(&automation::prompt_text(value)?);
