@@ -39,6 +39,8 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
     }
     let path = relative_path(args)?;
     if name == "instructions" {
+        let physical = root.canonicalize()?;
+        let root = physical.as_path();
         let mut output = String::new();
         let parents: Vec<_> = Path::new(path)
             .parent()
@@ -46,12 +48,10 @@ pub fn run(root: &Path, name: &str, args: &Value) -> Result<String> {
             .flat_map(Path::ancestors)
             .collect();
         for dir in parents.into_iter().rev() {
-            let file = dir.join("AGENTS.md");
-            if root.join(&file).try_exists()? {
+            if let Some((file, text)) = crate::resources::instruction(&root.join(dir))? {
                 output.push_str(&format!(
-                    "Instructions from {}:\n{}\n",
-                    file.display(),
-                    read(&root.join(&file))?
+                    "Instructions from {}:\n{text}\n",
+                    file.strip_prefix(root)?.display()
                 ));
             }
         }

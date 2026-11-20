@@ -178,3 +178,13 @@ Panda used DeepSeek to inspect a failing regression in its own subscription tran
 ## Releasing
 
 Conventional commits on main feed Release Please. Merge its release PR to publish the version in `version.txt`. This file versions the shipped binary independently of the internal Cargo workspace packages. The release workflow checks out the tag, packages the Intel and Apple Silicon binaries, uploads SHA-256 checksums, then dispatches the tap publisher at that tag. The publisher uses the tap App's `APP_ID` variable and `PRIVATE_KEY` Actions secret. To retry tap publication, dispatch the Homebrew workflow at the published tag.
+
+## Settings and Markdown resources
+
+Use `:settings` to inspect the effective compaction retention and skill index with their sources. `:settings reload` rereads them for the open session. Defaults are overridden by `$PANDA_HOME/settings.json`, then `.panda/settings.json` at the Git root (or launch directory outside Git). `--keep-recent-tokens N` overrides `compaction.keepRecentTokens` for one invocation. Set `"skillIndex": true` to include available skill descriptions in the provider prompt.
+
+At each directory from the Git root to the launch directory, Panda selects the first available instruction file in this order: `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. The same order applies to user instructions in `$PANDA_HOME` and scoped instruction reads. Put a base or appended system prompt in `$PANDA_HOME/SYSTEM.md` or `APPEND_SYSTEM.md`. For one invocation, `--trust-project` lets the corresponding files under the project's `.pi/` override those user files. Explicit base replacement wins, and CLI appends follow the selected append file.
+
+Markdown prompt files in `$PANDA_HOME/prompts/` become commands such as `/review "API compatibility"`. With `--trust-project`, Panda also discovers `.pi/prompts/` at the project root. User templates win name collisions and built-in terminal commands keep their names. Use `:prompts` to list templates. As in Pi, templates support positional arguments, all arguments, defaults and slices.
+
+Panda discovers ancestor `.agents/skills` and `.pi/skills` directories up to the Git root. The nearest definition wins duplicate names, followed by user and additional skill roots. `:skills` reports invalid frontmatter and lists both paths for name collisions. A skill declaring `disable-model-invocation: true` can still be invoked with `:skill:NAME`; model search, loading and the startup index omit it.

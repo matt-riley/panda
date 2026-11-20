@@ -138,6 +138,8 @@ pub struct Session {
         rename = "keepRecentTokens"
     )]
     pub keep_recent_tokens: Option<u64>,
+    #[serde(skip)]
+    pub invocation_keep_recent_tokens: Option<u64>,
     // Imported context edits replace contributions to the model while keeping
     // history positions stable for checkpoints and branch navigation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -248,7 +250,10 @@ impl Session {
     // Keep whole recent user exchanges where possible. Never leave tool results
     // without their assistant call at the start of the retained suffix.
     fn compact_through(&self, limit: usize, default_tokens: u64) -> usize {
-        let tokens = self.keep_recent_tokens.unwrap_or(default_tokens);
+        let retention = self
+            .invocation_keep_recent_tokens
+            .or(self.keep_recent_tokens);
+        let tokens = retention.unwrap_or(default_tokens);
         if tokens == 0 {
             return limit;
         }
@@ -261,7 +266,7 @@ impl Session {
                 continue;
             }
             let mut starts_exchange = message.user();
-            if self.keep_recent_tokens.is_some() {
+            if retention.is_some() {
                 let visible = self.resolved_at(i);
                 starts_exchange = visible.first().is_some_and(Message::user);
                 for m in visible {
@@ -278,7 +283,7 @@ impl Session {
                 boundary = i;
             }
         }
-        if self.keep_recent_tokens.is_some() {
+        if retention.is_some() {
             previous
         } else {
             boundary
@@ -427,7 +432,11 @@ pub fn compact_with_instructions(
     let mut s = store.load()?;
     anyhow::ensure!(!s.active, "acknowledge interrupted turn first");
     let end = s.compact_through(s.history.len(), 0);
-    if s.keep_recent_tokens.is_some() && end <= s.checkpoint.as_ref().map_or(0, |c| c.through) {
+    if s.invocation_keep_recent_tokens
+        .or(s.keep_recent_tokens)
+        .is_some()
+        && end <= s.checkpoint.as_ref().map_or(0, |c| c.through)
+    {
         return Ok(());
     }
     let prompt = summary_prompt(COMPACTION_PROMPT, instructions);

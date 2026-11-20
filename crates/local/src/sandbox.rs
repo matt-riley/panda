@@ -3,7 +3,7 @@ mod shell;
 use anyhow::{Context, Result, ensure};
 use panda_coding::{Workspace, field};
 use panda_core::{Cancel, ToolOutput};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
@@ -238,37 +238,14 @@ impl Workspace for Native {
         }
     }
     fn instructions(&self) -> Result<Vec<(String, String)>> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut paths = vec![state_dir()?.join("AGENTS.md")];
-        if let Some(top) = self.root.ancestors().find(|d| d.join(".git").exists()) {
-            let dirs: Vec<_> = self
-                .root
-                .ancestors()
-                .skip(1)
-                .take_while(|d| d.starts_with(top))
-                .collect();
-            paths.extend(dirs.into_iter().rev().map(|d| d.join("AGENTS.md")));
-        }
+        let state = state_dir()?;
         let mut loaded = Vec::new();
-        for p in paths {
-            if !p.try_exists()? {
-                continue;
+        for dir in
+            std::iter::once(state.as_path()).chain(crate::resources::project_dirs(&self.root))
+        {
+            if let Some((path, text)) = crate::resources::instruction(dir)? {
+                loaded.push((path.display().to_string(), text));
             }
-            let mut opts = fs::OpenOptions::new();
-            opts.read(true);
-            #[cfg(target_os = "macos")]
-            opts.custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK);
-            loaded.push((
-                p.display().to_string(),
-                super::files::read_file(opts.open(p)?)?,
-            ));
-        }
-        let file = self.root.join("AGENTS.md");
-        if file.try_exists()? {
-            loaded.push((
-                file.display().to_string(),
-                self.invoke("read", &json!({"path":"AGENTS.md"}), &Cancel::default())?,
-            ));
         }
         Ok(loaded)
     }

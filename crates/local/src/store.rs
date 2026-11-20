@@ -14,6 +14,7 @@ pub struct Disk {
     conn: Connection,
     id: i64,
     _lock: fs::File,
+    pub invocation_keep_recent_tokens: Option<u64>,
 }
 
 fn open_database(path: &Path) -> Result<Connection> {
@@ -192,6 +193,7 @@ impl Disk {
             conn,
             id,
             _lock: lock,
+            invocation_keep_recent_tokens: None,
         })
     }
     pub fn id(&self) -> i64 {
@@ -208,11 +210,13 @@ impl Disk {
 }
 impl Store for Disk {
     fn load(&self) -> Result<Session> {
-        Ok(serde_json::from_str(&self.conn.query_row(
+        let mut session: Session = serde_json::from_str(&self.conn.query_row(
             "SELECT data FROM sessions WHERE id=?",
             [self.id],
             |r| r.get::<_, String>(0),
-        )?)?)
+        )?)?;
+        session.invocation_keep_recent_tokens = self.invocation_keep_recent_tokens;
+        Ok(session)
     }
     fn save(&mut self, s: &mut Session) -> Result<()> {
         save_snapshot(&self.conn, self.id, s)

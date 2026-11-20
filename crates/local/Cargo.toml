@@ -20,6 +20,7 @@ regex = "1"
 libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 rquickjs = "0.14"
+serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 proptest = "1"

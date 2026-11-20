@@ -1,127 +1,205 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use panda_coding::Skills;
-use std::io::{BufRead, BufReader, Read};
-use std::os::unix::fs::OpenOptionsExt;
-fn open_skill(path: &Path) -> Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(target_os = "macos")]
-    opts.custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK);
-    let f = opts.open(path)?;
-    ensure!(f.metadata()?.is_file(), "expected a regular skill file");
-    Ok(f)
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
+
+#[derive(Default, Deserialize)]
+struct Metadata {
+    name: Option<String>,
+    description: String,
+    #[serde(default, rename = "disable-model-invocation")]
+    disabled: bool,
 }
-fn summary(path: &Path) -> Result<(Option<String>, String)> {
-    let mut lines = BufReader::new(open_skill(path)?.take(8192)).lines();
-    if lines.next().transpose()?.as_deref() != Some("---") {
-        return Ok((None, String::new()));
-    }
-    let mut name = None;
-    let mut description = String::new();
-    for line in lines {
-        let line = line?;
-        if line == "---" {
-            break;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            let text = value.trim().trim_matches(['"', char::from(39)]).to_owned();
-            match key {
-                "name" => name = Some(text),
-                "description" => description = text,
-                _ => {}
+
+struct Entry {
+    name: String,
+    path: PathBuf,
+    description: String,
+    disabled: bool,
+}
+
+fn entry(path: &Path) -> Result<Entry> {
+    use std::io::{BufRead, BufReader, Read};
+    let file = crate::resources::open_resource(path)?.context("skill disappeared")?;
+    let mut reader = BufReader::new(file.take(16 * 1024));
+    let mut raw = String::new();
+    reader.read_line(&mut raw)?;
+    if raw.trim_end() == "---" {
+        loop {
+            let start = raw.len();
+            if reader.read_line(&mut raw)? == 0 || raw[start..].trim_end() == "---" {
+                break;
             }
         }
     }
-    Ok((name, description))
+    let normalized = raw.replace("\r\n", "\n");
+    let metadata = if let Some(rest) = normalized.strip_prefix("---\n") {
+        let end = rest
+            .lines()
+            .position(|s| s == "---")
+            .context("unterminated skill frontmatter")?;
+        let yaml = rest.lines().take(end).collect::<Vec<_>>().join("\n");
+        let meta: Metadata = serde_yaml_ng::from_str(&yaml)?;
+        ensure!(
+            !meta.description.trim().is_empty() && meta.description.chars().count() <= 1024,
+            "description must contain 1–1024 characters"
+        );
+        if let Some(n) = &meta.name {
+            ensure!(
+                !n.is_empty()
+                    && n.len() <= 64
+                    && !n.starts_with('-')
+                    && !n.ends_with('-')
+                    && !n.contains("--")
+                    && n.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "invalid skill name"
+            );
+        }
+        meta
+    } else {
+        Metadata::default()
+    }; // Keep supporting Panda's plain Markdown skills.
+    let name = metadata
+        .name
+        .or_else(|| path.parent()?.file_name()?.to_str().map(str::to_owned))
+        .context("missing skill name")?;
+    Ok(Entry {
+        name,
+        path: path.to_owned(),
+        description: metadata.description,
+        disabled: metadata.disabled,
+    })
 }
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+
 pub struct Library(Vec<PathBuf>);
 impl Library {
     pub fn new(roots: Vec<PathBuf>) -> Self {
-        Self(roots)
+        Self(
+            roots
+                .into_iter()
+                .map(|p| p.canonicalize().unwrap_or(p))
+                .collect(),
+        )
     }
-    pub fn ranked(&self, query: &str) -> Result<Vec<(String, PathBuf, String)>> {
+
+    fn catalog(&self) -> Result<(Vec<Entry>, Vec<String>)> {
+        let mut seen = BTreeSet::new();
+        let mut catalog = BTreeMap::<String, Entry>::new();
+        let mut diagnostics = Vec::new();
+        for root in &self.0 {
+            if !root.is_dir() {
+                continue;
+            }
+            for result in walkdir::WalkDir::new(root)
+                .max_depth(5)
+                .follow_root_links(false)
+                .sort_by_file_name()
+            {
+                let file = result?;
+                if !file.file_type().is_file() || file.file_name() != "SKILL.md" {
+                    continue;
+                }
+                let path = file.into_path();
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                match entry(&path) {
+                    Ok(e) => {
+                        if let Some(first) = catalog.get(&e.name) {
+                            diagnostics.push(format!(
+                                "Duplicate skill {}: using {}, ignoring {}",
+                                e.name,
+                                first.path.display(),
+                                path.display()
+                            ));
+                        } else {
+                            catalog.insert(e.name.clone(), e);
+                        }
+                    }
+                    Err(e) => diagnostics.push(format!("Invalid skill {}: {e:#}", path.display())),
+                }
+            }
+        }
+        Ok((catalog.into_values().collect(), diagnostics))
+    }
+
+    pub fn diagnostics(&self) -> Result<Vec<String>> {
+        Ok(self.catalog()?.1)
+    }
+    fn matches(&self, query: &str, explicit: bool) -> Result<Vec<Entry>> {
         let needle = query.to_lowercase();
-        let mut entries = Vec::new();
-        for path in self.files()? {
-            let name = path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_owned();
-            let (declared, meta) = summary(&path).unwrap_or_default();
-            let name = declared.unwrap_or(name);
-            let label = name.to_lowercase();
+        let mut matches = Vec::new();
+        for entry in self.catalog()?.0 {
+            if entry.disabled && !explicit {
+                continue;
+            }
+            let label = entry.name.to_lowercase();
             let score = if label == needle {
                 0
             } else if label.starts_with(&needle) {
                 1
             } else if label.contains(&needle) {
                 2
-            } else if meta.to_lowercase().contains(&needle) {
+            } else if entry.description.to_lowercase().contains(&needle) {
                 3
-            } else if path.to_string_lossy().to_lowercase().contains(&needle) {
+            } else if entry
+                .path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&needle)
+            {
                 4
             } else {
                 continue;
             };
-            entries.push((score, name, path, meta));
+            matches.push((score, entry));
         }
-        entries.sort();
-        Ok(entries
+        matches.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.name.cmp(&y.name)));
+        Ok(matches.into_iter().map(|(_, e)| e).collect())
+    }
+    pub fn ranked(&self, query: &str) -> Result<Vec<(String, PathBuf, String)>> {
+        Ok(self
+            .matches(query, true)?
             .into_iter()
             .take(100)
-            .map(|(_, n, p, d)| (n, p, d))
+            .map(|e| (e.name, e.path, e.description))
             .collect())
     }
     pub fn named(&self, name: &str) -> Result<(PathBuf, String)> {
-        let mut matches = self
-            .ranked(name)?
+        let e = self
+            .matches(name, true)?
             .into_iter()
-            .filter(|(n, _, _)| n.eq_ignore_ascii_case(name));
-        let (_, p, _) = matches
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("unknown skill {name}"))?;
-        ensure!(
-            matches.next().is_none(),
-            "ambiguous skill {name}; use skill_load with the selected path"
-        );
-        let text = self.load(
-            p.to_str()
-                .ok_or_else(|| anyhow::anyhow!("non UTF-8 path"))?,
-        )?;
-        Ok((p, text))
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+            .with_context(|| format!("unknown skill {name}"))?;
+        let body = crate::resources::optional_text(&e.path)?.context("skill disappeared")?;
+        Ok((e.path, body))
     }
-    fn files(&self) -> Result<BTreeSet<PathBuf>> {
-        let mut files = BTreeSet::new();
-        for root in &self.0 {
-            let Ok(root) = root.canonicalize() else {
-                continue;
-            };
-            for e in walkdir::WalkDir::new(root).max_depth(5).follow_links(false) {
-                let e = e?;
-                if e.file_type().is_file() && e.file_name() == "SKILL.md" {
-                    files.insert(e.into_path());
-                }
-            }
-        }
-        Ok(files)
+    pub fn startup_index(&self) -> Result<String> {
+        Ok(self
+            .catalog()?
+            .0
+            .into_iter()
+            .filter(|e| !e.disabled)
+            .map(|e| format!("{} — {} ({})", e.name, e.description, e.path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 impl Skills for Library {
     fn search(&self, query: &str) -> Result<String> {
         Ok(self
-            .ranked(query)?
+            .matches(query, false)?
             .into_iter()
-            .map(|(_, p, desc)| {
-                if desc.is_empty() {
-                    p.display().to_string()
+            .take(100)
+            .map(|e| {
+                if e.description.is_empty() {
+                    e.path.display().to_string()
                 } else {
-                    format!("{}  {desc}", p.display())
+                    format!("{}  {}", e.path.display(), e.description)
                 }
             })
             .collect::<Vec<_>>()
@@ -129,8 +207,11 @@ impl Skills for Library {
     }
     fn load(&self, path: &str) -> Result<String> {
         let p = Path::new(path);
-        ensure!(self.files()?.contains(p), "unknown skill path");
-        super::files::read_file(open_skill(p)?)
+        ensure!(
+            self.catalog()?.0.iter().any(|e| e.path == p && !e.disabled),
+            "unknown or explicitly invoked skill path"
+        );
+        crate::resources::optional_text(p)?.context("skill disappeared")
     }
 }
 #[cfg(test)]
