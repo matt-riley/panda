@@ -2,6 +2,11 @@
 
 Panda is a Rust coding harness with a macOS terminal host. It streams model replies, runs workspace tools under Seatbelt, and saves conversations locally. The core and coding crates can also run inside another host. The [initial plan](docs/initial-plan/PLAN.md) describes the boundaries and release checks.
 
+The resume picker searches the current workspace by session ID, title, or transcript. Ctrl-R renames the selected session, Ctrl-D opens a deletion confirmation, Ctrl-S cycles newest/activity/name ordering, Ctrl-N filters to named sessions, and Ctrl-P shows the workspace path. Switch away from the active session before deleting it.
+
+In the session tree, Tab cycles default, no-tools, user-only, labeled-only and all entries. Ctrl-L jumps to labeled entries. Tool calls, results, reasoning and internal events are available for inspection. Prompts, completed answers, branch summaries and imported metadata/checkpoints support navigation.
+
+
 ## Run on macOS
 
 Install the Intel or Apple Silicon release with `brew install matt-riley/tools/panda`. Check the installed version with `panda --version`.

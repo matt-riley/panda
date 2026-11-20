@@ -3,7 +3,52 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal,
 };
+use panda_local::store::{EntryKind, TreeEntry};
 use std::io;
+
+#[derive(Default, Copy, Clone, PartialEq)]
+enum TreeFilter {
+    #[default]
+    Default,
+    NoTools,
+    User,
+    Labeled,
+    All,
+}
+impl TreeFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::Default => Self::NoTools,
+            Self::NoTools => Self::User,
+            Self::User => Self::Labeled,
+            Self::Labeled => Self::All,
+            Self::All => Self::Default,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::NoTools => "no-tools",
+            Self::User => "user-only",
+            Self::Labeled => "Labeled only",
+            Self::All => "all",
+        }
+    }
+    fn shows(self, entry: &TreeEntry) -> bool {
+        match self {
+            Self::All => true,
+            Self::User => entry.is_prompt,
+            Self::Labeled => entry.label.is_some(),
+            Self::Default | Self::NoTools => {
+                !matches!(
+                    entry.kind,
+                    EntryKind::Metadata | EntryKind::Other | EntryKind::Reasoning
+                ) && (self != Self::NoTools
+                    || !matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult))
+            }
+        }
+    }
+}
 
 fn matches(text: &str, query: &str) -> bool {
     let text = text.to_lowercase();
@@ -43,7 +88,7 @@ pub fn choose(title: &str, labels: &[String], selected: usize) -> io::Result<Opt
 #[derive(Clone, Copy)]
 enum PickerMode<'a> {
     List,
-    Preview,
+    Preview(&'a [SessionPreview], &'a std::path::Path),
     Tree(&'a [panda_local::store::TreeEntry]),
 }
 #[derive(Debug, PartialEq)]
@@ -54,9 +99,15 @@ pub enum TreeAction {
     Fork,
     EditLabel,
 }
+enum Command {
+    Tree(TreeAction),
+    Select,
+    Rename,
+    Delete,
+}
 struct Picked {
     index: usize,
-    action: TreeAction,
+    action: Command,
 }
 
 fn pick(
@@ -74,15 +125,30 @@ fn pick(
         }
     }
     let _restore = Restore;
-    let preview = matches!(mode, PickerMode::Preview);
-    let visible_hits = |query: &str, labeled_only: bool| {
+    let preview = matches!(mode, PickerMode::Preview(..));
+    let visible_hits = |query: &str, state: &Selection| {
         let mut hits = search(query);
-        if labeled_only && let PickerMode::Tree(entries) = mode {
-            hits.retain(|h| entries[h.index].label.is_some());
+        if let PickerMode::Tree(entries) = mode {
+            hits.retain(|h| state.tree_filter.shows(&entries[h.index]));
+        }
+        if let PickerMode::Preview(sessions, _) = mode {
+            if state.named {
+                hits.retain(|h| !sessions[h.index].name.is_empty());
+            }
+            match state.sort {
+                Sort::Newest => {}
+                Sort::Activity => {
+                    hits.sort_by_key(|h| std::cmp::Reverse(sessions[h.index].activity))
+                }
+                Sort::Name => hits.sort_by_cached_key(|h| sessions[h.index].name.to_lowercase()),
+            }
         }
         hits
     };
-    let mut hits = visible_hits(&state.query, state.labeled_only);
+    let mut hits = visible_hits(&state.query, state);
+    if let Some(index) = state.initial_entry.take() {
+        state.pos = hits.iter().position(|h| h.index == index).unwrap_or(0);
+    }
     let mut terminal = crate::renderer::terminal()?;
     let color = std::env::var_os("NO_COLOR").is_none();
     loop {
@@ -92,7 +158,11 @@ fn pick(
         let visible = usize::from(height.saturating_sub(if preview { 11 } else { 5 })).clamp(1, 10);
         let can_fork = matches!(mode, PickerMode::Tree(entries)
             if ids.get(state.pos).is_some_and(|&i| entries[i].is_prompt));
+        let inspect_only = matches!(mode,PickerMode::Tree(entries) if ids.get(state.pos).is_some_and(|&i| !entries[i].kind.navigable()));
         let hint = matches!(mode, PickerMode::Tree(_)).then(|| {
+            if inspect_only {
+                return " View only   Shift-L label   / filter   Esc close".to_owned();
+            }
             let fork = if can_fork { "   Ctrl-F fork" } else { "" };
             let summary = if state.filtering {
                 "Ctrl-S summarize"
@@ -101,18 +171,41 @@ fn pick(
             };
             format!(" Enter switch{fork}   {summary}   Esc close")
         });
+        let workspace_preview;
+        let mut preview_text =
+            preview.then(|| hits.get(state.pos).map_or("", |hit| hit.preview.as_str()));
+        if state.paths
+            && let PickerMode::Preview(_, root) = mode
+        {
+            workspace_preview = format!(
+                "{}\n{}",
+                crate::ui::inline(&root.display().to_string(), 512),
+                preview_text.unwrap_or_default()
+            );
+            preview_text = Some(&workspace_preview);
+        }
         let results = crate::renderer::PickerResults {
-            hint: hint.as_deref(),
+            hint: hint.as_deref().or(preview.then_some(
+                " Ctrl-R rename  Ctrl-D delete  Ctrl-S sort  Ctrl-N named  Ctrl-P path",
+            )),
             ids: &ids,
             pos: state.pos,
-            preview: preview.then(|| hits.get(state.pos).map_or("", |hit| hit.preview.as_str())),
+            preview: preview_text,
         };
+        let tree_title;
         let title = if matches!(mode, PickerMode::Tree(_)) {
-            if state.labeled_only {
-                "Labeled entries · Shift-L edit · Ctrl-L all · Shift-S guided summary"
-            } else {
-                "Session tree · Shift-L edit · Ctrl-L labeled · Shift-S guided summary"
-            }
+            tree_title = format!(
+                "Session tree · {} · Tab filters · Ctrl-L labeled · Shift-L edit",
+                state.tree_filter.name()
+            );
+            &tree_title
+        } else if preview {
+            tree_title = format!(
+                "Resume session · {}{}",
+                state.sort.name(),
+                if state.named { " · named only" } else { "" }
+            );
+            &tree_title
         } else {
             title
         };
@@ -121,31 +214,73 @@ fn pick(
         let Event::Key(k) = event::read()? else {
             continue;
         };
+        if preview && k.kind != KeyEventKind::Release && k.modifiers == KeyModifiers::CONTROL {
+            let chosen = ids.get(state.pos).copied();
+            match k.code {
+                KeyCode::Char('r' | 'd') => {
+                    if let Some(index) = chosen {
+                        return Ok(Some(Picked {
+                            index,
+                            action: if k.code == KeyCode::Char('r') {
+                                Command::Rename
+                            } else {
+                                Command::Delete
+                            },
+                        }));
+                    }
+                    continue;
+                }
+                KeyCode::Char('n') => state.named = !state.named,
+                KeyCode::Char('s') => state.sort = state.sort.next(),
+                KeyCode::Char('p') => {
+                    state.paths = !state.paths;
+                    continue;
+                }
+                _ => {}
+            }
+            if matches!(k.code, KeyCode::Char('n' | 's')) {
+                hits = visible_hits(&state.query, state);
+                state.pos = hits
+                    .iter()
+                    .position(|h| Some(h.index) == chosen)
+                    .unwrap_or(0);
+                continue;
+            }
+        }
         let action = if matches!(mode, PickerMode::Tree(_)) {
             state.tree_key(k, &ids, visible, can_fork)
         } else {
             state.key(k, &ids, visible)
         };
         match action {
+            Action::Close(Some(_)) if inspect_only => {}
+            Action::Tree(_, ref action) if inspect_only && *action != TreeAction::EditLabel => {}
             Action::Tree(index, action) => {
-                return Ok(Some(Picked { index, action }));
+                return Ok(Some(Picked {
+                    index,
+                    action: Command::Tree(action),
+                }));
             }
             Action::Close(id) => {
                 return Ok(id.map(|index| Picked {
                     index,
-                    action: TreeAction::Switch,
+                    action: Command::Select,
                 }));
             }
-            Action::ToggleLabels => {
+            Action::ToggleLabels | Action::CycleFilter => {
                 let selected = ids.get(state.pos);
-                state.labeled_only = !state.labeled_only;
-                hits = visible_hits(&state.query, state.labeled_only);
+                state.tree_filter = match action {
+                    Action::CycleFilter => state.tree_filter.next(),
+                    _ if state.tree_filter == TreeFilter::Labeled => TreeFilter::Default,
+                    _ => TreeFilter::Labeled,
+                };
+                hits = visible_hits(&state.query, state);
                 state.pos = hits
                     .iter()
                     .position(|h| Some(&h.index) == selected)
                     .unwrap_or(0);
             }
-            Action::Filter => hits = visible_hits(&state.query, state.labeled_only),
+            Action::Filter => hits = visible_hits(&state.query, state),
             Action::Stay => {}
         }
     }
@@ -153,7 +288,11 @@ fn pick(
 
 #[derive(Default)]
 pub struct Selection {
-    labeled_only: bool,
+    tree_filter: TreeFilter,
+    initial_entry: Option<usize>,
+    named: bool,
+    paths: bool,
+    sort: Sort,
     filtering: bool,
     query: String,
     pos: usize,
@@ -161,6 +300,7 @@ pub struct Selection {
 
 #[derive(Debug, PartialEq)]
 enum Action {
+    CycleFilter,
     ToggleLabels,
     Tree(usize, TreeAction),
     Close(Option<usize>),
@@ -176,6 +316,13 @@ impl Selection {
         }
     }
 
+    pub fn for_tree(entries: &[TreeEntry]) -> Self {
+        Self {
+            initial_entry: entries.iter().position(|e| e.current),
+            ..Self::default()
+        }
+    }
+
     fn tree_key(
         &mut self,
         k: event::KeyEvent,
@@ -185,6 +332,7 @@ impl Selection {
     ) -> Action {
         if k.kind != KeyEventKind::Release {
             match k.code {
+                KeyCode::Tab => return Action::CycleFilter,
                 KeyCode::Char('l') if k.modifiers == KeyModifiers::CONTROL => {
                     return Action::ToggleLabels;
                 }
@@ -290,7 +438,13 @@ fn tree_labels(entries: &[panda_local::store::TreeEntry]) -> Vec<String> {
                     .as_deref()
                     .map(|s| format!("[{}] ", crate::ui::inline(s, 80)))
                     .unwrap_or_default(),
-                if entry.is_prompt { "You:" } else { "Panda:" },
+                match entry.kind {
+                    EntryKind::Prompt => "You:",
+                    EntryKind::Answer => "Panda:",
+                    EntryKind::ToolCall => "Tool call:",
+                    EntryKind::ToolResult => "Tool result:",
+                    _ => "",
+                },
                 crate::ui::inline(&entry.text, 240)
             )
         })
@@ -309,7 +463,16 @@ pub fn tree(
         PickerMode::Tree(entries),
         |query| label_hits(&labels, query),
     )?
-    .map(|p| (entries[p.index].id, p.action)))
+    .map(|p| {
+        (
+            entries[p.index].id,
+            match p.action {
+                Command::Tree(a) => a,
+                Command::Select => TreeAction::Switch,
+                _ => unreachable!(),
+            },
+        )
+    }))
 }
 
 pub fn edit_text(title: &str, initial: &str) -> io::Result<Option<String>> {
@@ -336,37 +499,110 @@ pub fn edit_text(title: &str, initial: &str) -> io::Result<Option<String>> {
 
 use panda_local::store::SessionPreview;
 
-pub fn resume(sessions: &[SessionPreview]) -> io::Result<Option<i64>> {
-    let labels: Vec<_> = sessions
-        .iter()
-        .map(|s| {
-            let title = if s.name.is_empty() {
-                s.messages
-                    .first()
-                    .map_or("Empty session", |(_, text)| text.as_str())
-            } else {
-                &s.name
-            };
-            format!("#{}  {}", s.id, crate::ui::inline(title, 80))
-        })
-        .collect();
-    let selected = pick(
-        "Resume session",
-        &labels,
-        &mut Selection::default(),
-        PickerMode::Preview,
-        |query| {
-            let query = query.trim().to_lowercase();
-            sessions
-                .iter()
-                .enumerate()
-                .filter_map(|(index, s)| {
-                    session_preview(s, &query).map(|preview| Hit { index, preview })
-                })
-                .collect()
-        },
-    )?;
-    Ok(selected.map(|index| sessions[index.index].id))
+#[derive(Default)]
+enum Sort {
+    #[default]
+    Newest,
+    Activity,
+    Name,
+}
+impl Sort {
+    fn next(&self) -> Self {
+        match self {
+            Self::Newest => Self::Activity,
+            Self::Activity => Self::Name,
+            Self::Name => Self::Newest,
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Newest => "newest",
+            Self::Activity => "activity",
+            Self::Name => "name",
+        }
+    }
+}
+
+pub fn resume(
+    db: &mut panda_local::store::Disk,
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> anyhow::Result<Option<i64>> {
+    use panda_core::Store;
+    let mut state = Selection::default();
+    let mut selected_id = None;
+    loop {
+        let sessions = db.previews(root)?;
+        state.initial_entry = selected_id.and_then(|id| sessions.iter().position(|s| s.id == id));
+        let labels: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                let title = if s.name.is_empty() {
+                    s.messages
+                        .first()
+                        .map_or("Empty session", |(_, text)| text.as_str())
+                } else {
+                    &s.name
+                };
+                format!("#{}  {}", s.id, crate::ui::inline(title, 80))
+            })
+            .collect();
+        let selected = pick(
+            "Resume session",
+            &labels,
+            &mut state,
+            PickerMode::Preview(&sessions, root),
+            |query| {
+                let query = query.trim().to_lowercase();
+                sessions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, s)| {
+                        session_preview(s, &query).map(|preview| Hit { index, preview })
+                    })
+                    .collect()
+            },
+        )?;
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let session = &sessions[selected.index];
+        selected_id = Some(session.id);
+        match selected.action {
+            Command::Select => return Ok(selected_id),
+            Command::Rename => {
+                if let Some(name) =
+                    edit_text(&format!("Rename session #{}", session.id), &session.name)?
+                {
+                    let mut other;
+                    let target = if db.id() == session.id {
+                        &mut *db
+                    } else {
+                        other = panda_local::store::Disk::open(dir, root, selected_id)?;
+                        &mut other
+                    };
+                    let mut data = target.load()?;
+                    data.name = name;
+                    target.save(&mut data)?;
+                }
+            }
+            Command::Delete => {
+                anyhow::ensure!(
+                    session.id != db.id(),
+                    "resume another session before deleting the current session"
+                );
+                if choose(
+                    &format!("Delete session #{}?", session.id),
+                    &["Cancel".into(), "Delete permanently".into()],
+                    0,
+                )? == Some(1)
+                {
+                    panda_local::store::Disk::open(dir, root, selected_id)?.delete()?;
+                }
+            }
+            Command::Tree(_) => unreachable!(),
+        }
+    }
 }
 
 fn session_preview(session: &SessionPreview, query: &str) -> Option<String> {
@@ -433,6 +669,7 @@ mod tests {
         SessionPreview {
             id,
             name: name.into(),
+            activity: id,
             messages: vec![("Panda", reply.into())],
         }
     }
@@ -491,9 +728,9 @@ mod tests {
         fn tree_picker_key_sequences(keys in prop::collection::vec(0u8..12,1..96)) {
             use panda_local::store::TreeEntry;
             let entries = [
-                TreeEntry{label:None,id:41,branch_depth:0,starts_branch:false,is_prompt:true,text:"root".into(),current:false},
-                TreeEntry{label:None,id:53,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:false},
-                TreeEntry{label:None,id:89,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:true},
+                TreeEntry{kind: EntryKind::Prompt,label:None,id:41,branch_depth:0,starts_branch:false,is_prompt:true,text:"root".into(),current:false},
+                TreeEntry{kind: EntryKind::Answer,label:None,id:53,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:false},
+                TreeEntry{kind: EntryKind::Answer,label:None,id:89,branch_depth:1,starts_branch:true,is_prompt:false,text:"same 🐼".into(),current:true},
             ];
             let labels=tree_labels(&entries);
             let mut state=Selection::at(2);

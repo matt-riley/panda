@@ -69,7 +69,9 @@ fn labels_from_existing_imports_are_migrated_by_session_and_original_target() ->
     let a = import("first")?.id();
     let b = import("second")?.id();
     let conn = Connection::open(root.join("sessions.sqlite3"))?;
-    conn.execute_batch("DROP TABLE tree_labels; PRAGMA user_version=1;")?;
+    conn.execute_batch(
+        "DROP TABLE tree_labels; DROP TABLE session_id_floor; PRAGMA user_version=1;",
+    )?;
     for (id, label) in [(a, "first"), (b, "second")] {
         let mut db = Disk::open(root, root, Some(id))?;
         let labeled: Vec<_> = db

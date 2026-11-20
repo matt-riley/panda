@@ -4,10 +4,11 @@ use anyhow::{Context, Result, ensure};
 use panda_core::{Session, Store};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs, path::Path};
-pub use tree::TreeEntry;
+pub use tree::{EntryKind, TreeEntry};
 pub struct SessionPreview {
     pub id: i64,
     pub name: String,
+    pub activity: i64,
     pub messages: Vec<(&'static str, String)>,
 }
 pub struct Disk {
@@ -19,7 +20,7 @@ pub struct Disk {
 
 fn open_database(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
-    if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 2 {
+    if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 3 {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Another process may have migrated the store while we waited for the lock.
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -33,7 +34,11 @@ fn open_database(path: &Path) -> Result<Connection> {
         }
         if version < 2 {
             pi::migrate_labels(&tx)?;
-            tx.pragma_update(None, "user_version", 2)?;
+        }
+        if version < 3 {
+            tx.execute_batch("CREATE TABLE session_id_floor(id INTEGER PRIMARY KEY CHECK(id=1), retired INTEGER NOT NULL);
+                              INSERT INTO session_id_floor VALUES(1,0)")?;
+            tx.pragma_update(None, "user_version", 3)?;
         }
         tx.commit()?;
     }
@@ -119,7 +124,7 @@ impl Disk {
             "SELECT s.id, coalesce(json_extract(s.data, '$.name'), ''),
                     json_extract(m.value, '$.User'),
                     json_extract(m.value, '$.Images.text'),
-                    json_extract(m.value, '$.Assistant.text')
+                    json_extract(m.value, '$.Assistant.text'), s.modified_seq
              FROM sessions AS s LEFT JOIN json_each(s.data, '$.history') AS m
              WHERE s.repo = ? ORDER BY s.id DESC, m.key",
         )?;
@@ -131,6 +136,7 @@ impl Disk {
                 sessions.push(SessionPreview {
                     id,
                     name: row.get(1)?,
+                    activity: row.get(5)?,
                     messages: Vec::new(),
                 });
             }
@@ -173,8 +179,10 @@ impl Disk {
             }
             None => {
                 tx.execute(
-                    "INSERT INTO sessions(repo,data,modified_seq)
-                     SELECT ?1, ?2, coalesce(max(modified_seq),0)+1 FROM sessions WHERE repo=?1",
+                    "INSERT INTO sessions(id,repo,data,modified_seq)
+                     SELECT max((SELECT coalesce(max(id),0) FROM sessions),retired)+1, ?1, ?2,
+                           (SELECT coalesce(max(modified_seq),0)+1 FROM sessions WHERE repo=?1)
+                     FROM session_id_floor",
                     params![root, serde_json::to_string(seed)?],
                 )?;
                 tx.last_insert_rowid()
@@ -198,6 +206,38 @@ impl Disk {
     }
     pub fn id(&self) -> i64 {
         self.id
+    }
+    pub fn delete(self) -> Result<()> {
+        // Hold the same exclusive session lock as a writer until every archive row is removed.
+        let mut conn = self.conn;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        pi::schema(&tx)?;
+        for table in [
+            "pi_context_edits",
+            "pi_records",
+            "pi_export_times",
+            "tree_labels",
+        ] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE node IN (SELECT id FROM tree_nodes WHERE session=?)"
+                ),
+                [self.id],
+            )?;
+        }
+        for table in ["pi_headers", "tree_heads", "tree_nodes"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE session=?"), [self.id])?;
+        }
+        tx.execute(
+            "UPDATE session_id_floor SET retired=max(retired,?)",
+            [self.id],
+        )?;
+        ensure!(
+            tx.execute("DELETE FROM sessions WHERE id=?", [self.id])? == 1,
+            "unknown session"
+        );
+        tx.commit()?;
+        Ok(())
     }
     pub fn list(&self, repo: &Path) -> Result<Vec<i64>> {
         let mut stmt = self
