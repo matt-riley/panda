@@ -15,7 +15,7 @@ use std::{
     path::Path,
 };
 
-fn schema(conn: &Connection) -> Result<()> {
+pub(super) fn schema(conn: &Connection) -> Result<()> {
     tree::schema(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS pi_headers(session INTEGER PRIMARY KEY,raw TEXT NOT NULL);

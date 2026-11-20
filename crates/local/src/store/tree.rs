@@ -5,7 +5,28 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Prompt,
+    Answer,
+    Summary,
+    Checkpoint,
+    Metadata,
+    ToolCall,
+    ToolResult,
+    Reasoning,
+    Other,
+}
+impl EntryKind {
+    pub fn navigable(self) -> bool {
+        matches!(
+            self,
+            Self::Prompt | Self::Answer | Self::Summary | Self::Checkpoint | Self::Metadata
+        )
+    }
+}
 pub struct TreeEntry {
+    pub kind: EntryKind,
     pub id: i64,
     pub branch_depth: usize,
     pub starts_branch: bool,
@@ -175,7 +196,16 @@ fn destination(conn: &Connection, session: i64, node: i64) -> Result<(i64, Optio
     Ok((tip, draft))
 }
 impl Disk {
+    /// Branch targets for callers that navigate the returned entries.
     pub fn tree(&mut self) -> Result<Vec<TreeEntry>> {
+        Ok(self
+            .tree_entries()?
+            .into_iter()
+            .filter(|entry| entry.kind.navigable())
+            .collect())
+    }
+
+    pub fn tree_entries(&mut self) -> Result<Vec<TreeEntry>> {
         let s = self.load()?;
         let tx = self.conn.transaction()?;
         let tip = sync(&tx, self.id, &s)?;
@@ -189,28 +219,54 @@ impl Disk {
             })?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
         drop(stmt);
-        let mut children: HashMap<i64, Vec<(i64, bool, Option<String>)>> = HashMap::new();
+        let mut children = HashMap::<i64, Vec<(i64, EntryKind, String)>>::new();
         {
-            let mut stmt=tx.prepare("SELECT id,parent, json_type(message,'$.User') IS NOT NULL OR json_type(message,'$.Images') IS NOT NULL,
-                substr(coalesce(CASE WHEN message='null' THEN CASE WHEN checkpoint IS NULL THEN 'Session metadata' ELSE 'Compaction checkpoint' END END, 'Branch summary · ' || json_extract(message,'$.BranchSummary'),json_extract(message,'$.User'), json_extract(message,'$.Images.text'),
-                CASE WHEN json_array_length(message,'$.Assistant.calls')=0 THEN json_extract(message,'$.Assistant.text') END),1,512)
+            // Extract bounded previews in SQLite so browsing never loads attachment data.
+            let mut stmt = tx.prepare("SELECT id,parent,
+                (SELECT key FROM json_each(message) LIMIT 1),
+                coalesce(json_array_length(message,'$.Assistant.calls'),0),
+                checkpoint IS NOT NULL,
+                substr(coalesce(json_extract(message,'$.User'),json_extract(message,'$.Images.text'),
+                    nullif(json_extract(message,'$.Assistant.text'),''),
+                    json_extract(message,'$.Assistant.calls[0].name'),json_extract(message,'$.Result.text'),
+                    json_extract(message,'$.BranchSummary'),json_extract(message,'$.Truncated.text'),''),1,512)
                 FROM tree_nodes WHERE session=? ORDER BY id DESC")?;
             let mut rows = stmt.query([self.id])?;
             while let Some(row) = rows.next()? {
-                children.entry(row.get(1)?).or_default().push((
-                    row.get(0)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                ));
+                let kind = match row.get::<_, Option<String>>(2)?.as_deref() {
+                    Some("User" | "Images") => EntryKind::Prompt,
+                    Some("Assistant") if row.get::<_, usize>(3)? == 0 => EntryKind::Answer,
+                    Some("Assistant") => EntryKind::ToolCall,
+                    Some("Result") => EntryKind::ToolResult,
+                    Some("BranchSummary") => EntryKind::Summary,
+                    Some("Reasoning") => EntryKind::Reasoning,
+                    None if row.get::<_, bool>(4)? => EntryKind::Checkpoint,
+                    None => EntryKind::Metadata,
+                    _ => EntryKind::Other,
+                };
+                let text: String = row.get(5)?;
+                let text = match kind {
+                    EntryKind::Metadata => "Session metadata".into(),
+                    EntryKind::Checkpoint => "Compaction checkpoint".into(),
+                    EntryKind::Summary => format!("Branch summary · {text}"),
+                    EntryKind::Reasoning => "Reasoning".into(),
+                    EntryKind::Other if text.is_empty() => "Session event".into(),
+                    _ => text,
+                };
+                children
+                    .entry(row.get(1)?)
+                    .or_default()
+                    .push((row.get(0)?, kind, text));
             }
         }
         let mut entries = Vec::new();
-        let mut stack = vec![(0, false, None, 0, false)];
-        while let Some((id, is_prompt, text, branch_depth, starts_branch)) = stack.pop() {
-            if let Some(text) = text {
+        let mut stack = vec![(0, EntryKind::Metadata, String::new(), 0, false)];
+        while let Some((id, kind, text, branch_depth, starts_branch)) = stack.pop() {
+            if id != 0 {
                 entries.push(TreeEntry {
                     id,
-                    is_prompt,
+                    kind,
+                    is_prompt: kind == EntryKind::Prompt,
                     text,
                     label: labels.remove(&id),
                     branch_depth,

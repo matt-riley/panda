@@ -83,6 +83,48 @@ def request_log(state):
     return [json.loads(line) for line in (state / "requests.jsonl").read_text().splitlines()]
 
 
+def test_manage_picker(repo, state):
+    for title in ("first history", "second history"):
+        with panda(repo, state, args=[title], startup="First answer") as (send, expect):
+            send(":name Twin\r")
+            expect("deepseek-flash")
+    original = request_log(state)
+    with panda(repo, state, args=[]) as (send, expect):
+        send(":resume\r")
+        expect("Resume session")
+        send("1\x12")
+        expect("Rename session #1")
+        send("\x15Survivor\r")
+        expect("Resume session")
+        expect("Survivor")
+        send("\x13")
+        expect("activity")
+        send("\x0e")
+        expect("named only")
+        send("\x10")
+        expect(str(repo.name))
+        send("\x7f2\x04")
+        expect("Delete session #2?")
+        send("\r")
+        expect("Twin")
+        send("\x04")
+        expect("Delete session #2?")
+        send("\x1b[B\r")
+        expect("matches")
+        send("\x1b")
+        expect("deepseek-flash")
+    with panda(repo, state, args=["--continue"]) as (send, expect):
+        send(":resume\r")
+        expect("Resume session")
+        send("Survivor\r")
+        expect("first history")
+        expect("deepseek-flash")
+    with sqlite3.connect(state / "sessions.sqlite3") as db:
+        rows = {i: json.loads(raw) for i,raw in db.execute("select id,data from sessions")}
+    assert 2 not in rows and rows[1]["name"] == "Survivor"
+    assert rows[1]["history"][0] == {"User":"first history"} and request_log(state) == original
+
+
 def test_guided_branch_summary(repo, state):
     guidance = "Carry over the  unresolved test."
     summary = {"BranchSummary": "Checkpoint answer"}
@@ -207,6 +249,7 @@ os.environ["PANDA_TEST_PASTEBOARD"] = "panda-copy-" + str(uuid.uuid4())
 with tempfile.TemporaryDirectory() as tmp:
     repo, state = Path(tmp) / "repo", Path(tmp) / "state"
     repo.mkdir()
+    test_manage_picker(repo, Path(tmp) / "manage")
     test_guided_branch_summary(repo, Path(tmp) / "guided")
     test_manual_compaction(repo, Path(tmp) / "compact")
     # Two identical prompts have different ancestors. Mark the second, then open
@@ -221,6 +264,13 @@ with tempfile.TemporaryDirectory() as tmp:
         for suffix, parent, text in [("root", None, prefix), ("prompt", prefix+"root", "Duplicate prompt")]:
             rows.append(dict(type="message", id=prefix+suffix, parentId=parent, timestamp=stamp,
                              message=dict(role="user", content=text, timestamp=0)))
+    rows.extend([
+        dict(type="message", id="rightcall", parentId="rightprompt", timestamp=stamp,
+             message=dict(role="assistant", content=[dict(type="toolCall",id="c",name="read",arguments={})],timestamp=0)),
+        dict(type="message", id="rightresult", parentId="rightcall", timestamp=stamp,
+             message=dict(role="toolResult",toolCallId="c", toolName="read",content=[dict(type="text",text="Tool preview")],isError=False,timestamp=0)),
+        dict(type="branch_summary",id="rightsummary",parentId="rightresult",timestamp=stamp,fromId="rightprompt",summary="Branch note"),
+    ])
     rows.append(dict(type="custom", id="lefttip", parentId="leftprompt", timestamp=stamp,
                      customType="fixture", data={}))
     source.write_text("".join(json.dumps(r)+"\n" for r in rows))
@@ -231,6 +281,20 @@ with tempfile.TemporaryDirectory() as tmp:
 
     transfer(marked, ["--import-session", str(source)])
     with panda(repo, marked, args=["--continue"]) as (send, expect):
+        send(":tree\r")
+        expect("Session tree")
+        send("\t")
+        expect("no-tools")
+        send("\t")
+        expect("user-")
+        send("\t")
+        expect("Labeled")
+        send("\t")
+        expect("all")
+        send("/Tool preview")
+        expect("only")
+        send("\r\x1b")
+        expect("deepseek-flash")
         send(":tree\r")
         expect("Session tree")
         send("/Duplicate\x1b[BL")

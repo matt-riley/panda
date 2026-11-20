@@ -859,13 +859,12 @@ fn run(
                     mode = show(&db, &mut screen)?;
                 }
                 ":tree" if interactive => {
-                    let mut entries = db.tree()?;
+                    let mut entries = db.tree_entries()?;
                     if entries.is_empty() {
                         screen.line(Tone::Dim, "This session has no prompts or answers yet.");
                         return Ok(());
                     }
-                    let mut selection =
-                        picker::Selection::at(entries.iter().position(|e| e.current).unwrap_or(0));
+                    let mut selection = picker::Selection::for_tree(&entries);
                     let draft = loop {
                         let Some((node, action)) = picker::tree(&entries, &mut selection)? else {
                             return Ok(());
@@ -1005,7 +1004,7 @@ fn run(
                             id
                         })
                     } else if interactive {
-                        picker::resume(&db.previews(&root)?)?
+                        picker::resume(&mut db, &state, &root)?
                     } else {
                         for (id, name, _) in db.catalogue(&root)? {
                             screen.line(Tone::Dim, &format!("{id} {name}"));
