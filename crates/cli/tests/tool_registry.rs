@@ -108,6 +108,14 @@ fn discoveries_follow_the_selected_branch_across_restart() -> Result<()> {
     let state = tempfile::tempdir()?;
     let coding = fixture();
     let tools = Exposure::new(&coding, ["fixture".into()].into(), ["secret".into()].into())?;
+    assert!(
+        tools
+            .definitions(Mode::Plan)
+            .iter()
+            .any(|d| d.name() == "tool_search"
+                && d.access == Access::Stateful
+                && d.namespace.is_none())
+    );
     let mut db = Disk::open(state.path(), root.path(), None)?;
     let mut session = db.load()?;
     session.mode = Mode::Plan;

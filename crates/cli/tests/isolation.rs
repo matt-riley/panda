@@ -86,6 +86,8 @@ fn native_workspace_enforces_policy() {
     assert!(run("shell", json!({"command":"cat link"})).is_err());
     assert!(run("read", json!({"path":"link"})).is_err());
     assert!(run("shell", json!({"command":"sh -c 'echo bad > link'"})).is_err());
+    run("shell", json!({"command":"ln Makefile ordinary-link"})).unwrap();
+    assert!(root.join("ordinary-link").is_file());
     for dir in [".git", ".panda", ".agents", ".codex", ".pi"] {
         std::fs::create_dir(root.join(dir)).unwrap();
         let path = format!("{dir}/marker");
@@ -98,6 +100,13 @@ fn native_workspace_enforces_policy() {
             "{path}"
         );
         assert!(!root.join(&path).exists(), "{path}");
+
+        std::fs::write(root.join(&path), "protected fixture").unwrap();
+        assert!(
+            run("shell", json!({"command":format!("ln {path} alias")})).is_err(),
+            "{path}"
+        );
+        assert!(!root.join("alias").exists(), "{path}");
     }
     assert!(run("shell", json!({"command":"ln ../private hard-link"})).is_err());
     assert!(!root.join("hard-link").exists());

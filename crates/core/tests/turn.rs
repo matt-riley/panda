@@ -17,7 +17,7 @@ impl Toolset for Read {
     fn system(&self) -> Result<String> {
         Ok("repo".into())
     }
-    fn schemas(&self, _: Mode) -> Vec<Value> {
+    fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
         vec![]
     }
     fn run(
@@ -343,7 +343,7 @@ fn large_tool_result_triggers_compaction_with_small_reported_usage() {
         fn system(&self) -> Result<String> {
             Ok(String::new())
         }
-        fn schemas(&self, _: Mode) -> Vec<Value> {
+        fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
             vec![]
         }
         fn run(
@@ -414,7 +414,7 @@ fn concurrent_reads_complete_in_order_before_serial_mutations() -> Result<()> {
             _: &mut Emit,
         ) -> Result<(String, Vec<Call>)> {
             if h.len() == 1 {
-                let calls = ["read", "read", "edit", "edit"]
+                let calls = ["inspect", "inspect", "read", "read"]
                     .into_iter()
                     .enumerate()
                     .map(|(i, name)| Call {
@@ -439,10 +439,16 @@ fn concurrent_reads_complete_in_order_before_serial_mutations() -> Result<()> {
         fn system(&self) -> Result<String> {
             Ok(String::new())
         }
-        fn schemas(&self, _: Mode) -> Vec<Value> {
-            ["read", "edit"]
+        fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
+            // The deliberately mismatched names catch any return to name-based scheduling.
+            [("inspect", Access::Read), ("read", Access::Mutate)]
                 .into_iter()
-                .map(|s| json!({"function":{"name":s}}))
+                .map(|(name, access)| ToolDefinition {
+                    schema: json!({"function":{"name":name}}),
+                    access,
+                    output: OutputKind::Text,
+                    namespace: None,
+                })
                 .collect()
         }
         fn run(
@@ -452,7 +458,7 @@ fn concurrent_reads_complete_in_order_before_serial_mutations() -> Result<()> {
             _: &Cancel,
             _: &mut Emit,
         ) -> Result<(ToolOutput, StoreWrites)> {
-            if c.name == "read" {
+            if c.name == "inspect" {
                 let mut n = self.readers.lock().unwrap();
                 *n += 1;
                 self.started.notify_all();

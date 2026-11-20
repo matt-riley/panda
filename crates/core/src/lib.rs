@@ -542,27 +542,13 @@ mod tool_policy;
 pub use tool_policy::{Access, OutputKind, ToolDefinition, validate as validate_tool_args};
 
 pub trait Toolset: Sync {
+    /// Declare each tool's access explicitly. The scheduler may overlap read-only calls.
+    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition>;
+
     fn schemas_for(&self, session: &Session) -> Vec<Value> {
-        self.schemas(session.mode)
-    }
-    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
-        self.schemas(mode)
+        self.definitions(session.mode)
             .into_iter()
-            .map(|schema| {
-                let name = schema["function"]["name"].as_str().unwrap_or_default();
-                let nested = matches!(name, "ls" | "repo_map" | "search" | "read");
-                let output = if name == "read" {
-                    OutputKind::File
-                } else {
-                    OutputKind::Json
-                };
-                ToolDefinition {
-                    schema,
-                    access: if nested { Access::Read } else { Access::Mutate },
-                    output,
-                    namespace: nested.then(|| "workspace".into()),
-                }
-            })
+            .map(|d| d.schema)
             .collect()
     }
     fn nested_definitions(&self, session: &Session) -> Vec<ToolDefinition> {
@@ -588,7 +574,12 @@ pub trait Toolset: Sync {
     ) -> Result<(ToolOutput, StoreWrites)>;
 
     fn system(&self) -> Result<String>;
-    fn schemas(&self, mode: Mode) -> Vec<Value>;
+    fn schemas(&self, mode: Mode) -> Vec<Value> {
+        self.schemas_for(&Session {
+            mode,
+            ..Session::default()
+        })
+    }
 }
 
 /// Apply the nested read policy before entering the shared session dispatcher.

@@ -99,7 +99,7 @@ impl Native {
         }
         for name in [".git", ".panda", ".agents", ".codex", ".pi"] {
             let path = quoted(&self.root.join(name))?;
-            rules.push_str(&format!("(deny file-write* (subpath {path}))"))
+            rules.push_str(&format!("(deny file-write* file-link (subpath {path}))"))
         }
         Ok(rules)
     }

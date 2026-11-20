@@ -1,8 +1,8 @@
 use anyhow::{Result, ensure};
 use panda_coding::Coding;
 use panda_core::{
-    Call, Cancel, Emit, Event, Message, Mode, Provider, Session, Store, StoreWrites, ToolOutput,
-    Toolset, turn,
+    Access, Call, Cancel, Emit, Event, Message, Mode, OutputKind, Provider, Session, Store,
+    StoreWrites, ToolDefinition, ToolOutput, Toolset, turn,
 };
 use panda_local::{codemode::Codemode, sandbox::Native};
 use panda_memory::{EmptySkills, MemoryStore};
@@ -943,8 +943,13 @@ fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
         fn system(&self) -> Result<String> {
             Ok(String::new())
         }
-        fn schemas(&self, _: Mode) -> Vec<Value> {
-            vec![json!({"function":{"name":"read","description":"Test read","parameters":{}}})]
+        fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                schema: json!({"function":{"name":"read","description":"Test read","parameters":{}}}),
+                access: Access::Read,
+                output: OutputKind::File,
+                namespace: Some("workspace".into()),
+            }]
         }
         fn run(
             &self,

@@ -214,6 +214,15 @@ def exercise(port, root):
     assert saved["attempts"][-1]["model"]["provider"] == "local-a"
     assert saved["attempts"][-1]["cost_source"] == "catalog"
     assert any(path == "/jev/systemone" for path, _, _ in requests)
+    del env["TYPESAFE_API_KEY"]
+    env["LORE_TYPESAFE_API_KEY"] = "fixture-lore-key"
+    count = len(requests)
+    run("--print", "--session", 1, "local compaction " + "猫" * 12000)
+    run("--print", "--session", 1, "retain the latest exchange")
+    run("--continue", stdin=":resume 1\n:compact\n:q\n")
+    assert snapshot(1)["checkpoint"]["through"] > saved["checkpoint"]["through"]
+    assert all(path != "/jev/systemone" for path, _, _ in requests[count:])
+
     text["maxTokens"] = -1
     count = len(requests)
     catalog.write_text(json.dumps(config))

@@ -72,9 +72,7 @@ impl Jev {
         })
     }
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("TYPESAFE_API_KEY")
-            .or_else(|_| std::env::var("LORE_TYPESAFE_API_KEY"))
-            .unwrap_or_default();
+        let key = std::env::var("TYPESAFE_API_KEY").unwrap_or_default();
         let secrets = std::env::vars()
             .filter(|(k, v)| {
                 v.len() >= 8

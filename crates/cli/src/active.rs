@@ -464,8 +464,13 @@ mod delivery_tests {
             fn system(&self) -> Result<String> {
                 Ok(String::new())
             }
-            fn schemas(&self, _: Mode) -> Vec<Value> {
-                vec![json!({"function":{"name":"read"}})]
+            fn definitions(&self, _: Mode) -> Vec<ToolDefinition> {
+                vec![ToolDefinition {
+                    schema: json!({"function":{"name":"read"}}),
+                    access: Access::Read,
+                    output: OutputKind::Text,
+                    namespace: None,
+                }]
             }
             fn run(
                 &self,

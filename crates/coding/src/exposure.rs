@@ -40,21 +40,15 @@ impl<'a> Exposure<'a> {
             .flatten()
             .map(String::as_str)
             .collect();
-        let mut search = false;
-        let mut schemas: Vec<_> = self
-            .definitions(mode)
+        self.definitions(mode)
             .into_iter()
             .filter(|d| {
-                let deferred = self.deferred.contains(d.name());
-                search |= deferred;
-                !deferred || discovered.contains(d.name())
+                d.name() == "tool_search"
+                    || !self.deferred.contains(d.name())
+                    || discovered.contains(d.name())
             })
             .map(|d| d.schema)
-            .collect();
-        if search && !self.hidden.contains("tool_search") {
-            schemas.push(search_schema());
-        }
-        schemas
+            .collect()
     }
 }
 impl Toolset for Exposure<'_> {
@@ -62,14 +56,24 @@ impl Toolset for Exposure<'_> {
         self.inner.system()
     }
     fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
-        self.inner
+        let mut definitions: Vec<_> = self
+            .inner
             .definitions(mode)
             .into_iter()
             .filter(|d| !self.hidden.contains(d.name()))
-            .collect()
-    }
-    fn schemas(&self, mode: Mode) -> Vec<Value> {
-        self.available(mode, &[])
+            .collect();
+        if !self.hidden.contains("tool_search")
+            && definitions.iter().any(|d| self.deferred.contains(d.name()))
+        {
+            definitions.retain(|d| d.name() != "tool_search");
+            definitions.push(ToolDefinition {
+                schema: search_schema(),
+                access: Access::Stateful,
+                output: OutputKind::Json,
+                namespace: None,
+            });
+        }
+        definitions
     }
     fn schemas_for(&self, s: &Session) -> Vec<Value> {
         self.available(s.mode, &s.history)

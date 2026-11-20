@@ -317,9 +317,6 @@ impl Toolset for PromptedTools<'_> {
         }
         Ok(prompt)
     }
-    fn schemas(&self, mode: Mode) -> Vec<Value> {
-        self.tools.schemas(mode)
-    }
 }
 
 pub struct Host<'a> {
