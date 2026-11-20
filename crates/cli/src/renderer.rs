@@ -17,7 +17,12 @@ pub fn terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 pub fn ink(color: Color, enabled: bool) -> Style {
     if enabled {
-        Style::default().fg(color)
+        let themed = match color {
+            ACCENT => crate::terminal_config::color("accent"),
+            MUTED => crate::terminal_config::color("muted"),
+            _ => None,
+        };
+        Style::default().fg(themed.unwrap_or(color))
     } else {
         Style::default()
     }
@@ -113,7 +118,8 @@ pub fn picker(
             if selected {
                 let mut style = accent.add_modifier(Modifier::BOLD);
                 if color {
-                    style = style.bg(Color::Rgb(28, 52, 62));
+                    style = style.bg(crate::terminal_config::color("selection")
+                        .unwrap_or(Color::Rgb(28, 52, 62)));
                 }
                 line.style(style)
             } else {
@@ -126,8 +132,12 @@ pub fn picker(
     }
     frame.render_widget(Paragraph::new(lines), results);
     frame.render_widget(
-        Paragraph::new(key_hint.unwrap_or(" ↑↓ move   Enter select   Esc close"))
-            .style(ink(MUTED, color)),
+        Paragraph::new(
+            key_hint
+                .map(str::to_owned)
+                .unwrap_or_else(crate::terminal_config::help),
+        )
+        .style(ink(MUTED, color)),
         hint,
     );
 }

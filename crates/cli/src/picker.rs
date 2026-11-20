@@ -161,7 +161,10 @@ fn pick(
         let inspect_only = matches!(mode,PickerMode::Tree(entries) if ids.get(state.pos).is_some_and(|&i| !entries[i].kind.navigable()));
         let hint = matches!(mode, PickerMode::Tree(_)).then(|| {
             if inspect_only {
-                return " View only   Shift-L label   / filter   Esc close".to_owned();
+                return format!(
+                    " View only   Shift-L label   / filter   {} close",
+                    crate::terminal_config::label("close")
+                );
             }
             let fork = if can_fork { "   Ctrl-F fork" } else { "" };
             let summary = if state.filtering {
@@ -169,7 +172,11 @@ fn pick(
             } else {
                 "s summarize   / filter"
             };
-            format!(" Enter switch{fork}   {summary}   Esc close")
+            format!(
+                " {} switch{fork}   {summary}   {} close",
+                crate::terminal_config::label("select"),
+                crate::terminal_config::label("close")
+            )
         });
         let workspace_preview;
         let mut preview_text =
@@ -212,6 +219,9 @@ fn pick(
         terminal
             .draw(|f| crate::renderer::picker(f, title, &state.query, labels, results, color))?;
         let Event::Key(k) = event::read()? else {
+            continue;
+        };
+        let Some(k) = crate::terminal_config::picker_event(k) else {
             continue;
         };
         if preview && k.kind != KeyEventKind::Release && k.modifiers == KeyModifiers::CONTROL {

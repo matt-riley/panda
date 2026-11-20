@@ -115,6 +115,8 @@ panda --continue --mode rpc
 
 Print mode writes the final answer. JSON mode emits one object per line, ending with a `done` object containing the answer and session ID. Both accept a prompt from standard input. If you also supply a prompt argument, Panda prepends the piped text verbatim, separates it from the prompt with a blank line, and resolves attachments from the argument.
 
+The [terminal and workspace guide](docs/terminal-workspaces.md) covers cross-workspace sessions, private checkpoint recovery, themes and picker shortcuts.
+
 To follow up on a specific conversation, pass its numeric `session_id` from the JSON `done` object to either output mode, for example `panda --print --session 42 "Explain the first finding"`. The ID must identify an existing session in the current workspace. A JSON follow-up returns the same ID. The `--session` flag conflicts with `--continue` and `--no-session`.
 
 Import a Pi v3 JSONL file in the workspace where you want to continue it. Import prints a new Panda session ID. For example, if it prints `{"session_id":42}`, run:

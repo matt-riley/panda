@@ -34,6 +34,7 @@ pub struct Options {
     pub tools: Option<BTreeSet<String>>,
     pub resume: bool,
     pub session_id: Option<i64>,
+    pub workspace: Option<crate::workspaces::Choice>,
     pub session_dir: Option<PathBuf>,
     pub no_session: bool,
     pub provider: Option<String>,
@@ -87,6 +88,27 @@ impl Options {
                         .filter(|s| !s.is_empty() && !s.starts_with('-'))
                         .context("expected a directory after --session-dir")?;
                     out.session_dir = Some(PathBuf::from(dir));
+                }
+                "--resume-any" | "--fork-here" | "--all-sessions" => {
+                    use crate::workspaces::Choice;
+                    ensure!(
+                        out.workspace.is_none(),
+                        "choose one cross-workspace operation"
+                    );
+                    out.workspace = Some(if arg == "--all-sessions" {
+                        Choice::Pick
+                    } else {
+                        let id = it
+                            .next()
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .filter(|i| *i > 0)
+                            .with_context(|| format!("expected positive session ID after {arg}"))?;
+                        if arg == "--fork-here" {
+                            Choice::Fork(id)
+                        } else {
+                            Choice::Open(id)
+                        }
+                    });
                 }
                 "--session" => {
                     ensure!(out.session_id.is_none(), "specify --session once");
@@ -149,6 +171,10 @@ impl Options {
             out.interface != Interface::Rpc || out.prompt.is_empty(),
             "RPC reads requests on stdin"
         );
+        ensure!(
+            out.workspace.is_none() || !(out.resume || out.no_session || out.session_id.is_some()),
+            "cross-workspace selection conflicts with --continue, --session and --no-session"
+        );
         let one_shot = out.codemode == CodemodeExposure::Only
             || out.no_session
             || out.session_id.is_some()
@@ -199,11 +225,12 @@ impl Options {
 }
 
 /// An explicit CLI argument names a regular UTF-8 file or supplies the text itself.
-pub fn prompt_text(value: &str) -> Result<String> {
-    match std::fs::metadata(value) {
+pub fn prompt_text_at(root: &Path, value: &str) -> Result<String> {
+    let path = root.join(value);
+    match std::fs::metadata(&path) {
         Ok(info) => {
             ensure!(info.is_file(), "expected a regular prompt file: {value}");
-            std::fs::read_to_string(value).with_context(|| format!("reading prompt file {value}"))
+            std::fs::read_to_string(&path).with_context(|| format!("reading prompt file {value}"))
         }
         Err(e)
             if matches!(
@@ -535,10 +562,10 @@ mod tests {
     #[test]
     fn prompt_files_must_be_regular_and_utf8() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(prompt_text(dir.path().to_str().unwrap()).is_err());
+        assert!(prompt_text_at(Path::new("."), dir.path().to_str().unwrap()).is_err());
         let file = dir.path().join("invalid.md");
         std::fs::write(&file, [0xff]).unwrap();
-        assert!(prompt_text(file.to_str().unwrap()).is_err());
+        assert!(prompt_text_at(Path::new("."), file.to_str().unwrap()).is_err());
     }
 
     proptest::proptest! {
@@ -570,7 +597,7 @@ mod tests {
         fn inline_prompts_preserve_text(text in r"[^\x00]{0,650}") {
             // A single path component longer than NAME_MAX is still a valid inline prompt.
             let literal = format!("{}{}", "x".repeat(256), text);
-            proptest::prop_assert_eq!(prompt_text(&literal).unwrap(), literal);
+            proptest::prop_assert_eq!(prompt_text_at(Path::new("."),&literal).unwrap(), literal);
         }
     }
 

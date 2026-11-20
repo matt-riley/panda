@@ -455,7 +455,11 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         result = raw[4]["Result"]
         assert call["name"] == "shell" and result["id"] == call["id"] and result["isError"]
         assert result["text"].count(compiler_error) == 1 and raw[5] == raw[1]
-        assert session["checkpoint"] == {"through": 2, "summary": "Saved old exchange", "files": {"readFiles": [], "modifiedFiles": []}}
+        pointer = session["checkpoint"]["recovery"]
+        recovered = run(["--recover-transcript", str(sid), pointer], "")
+        transcript = [json.loads(line) for line in recovered if line.startswith("{")]
+        assert transcript == raw[:len(transcript)] and compiler_error in json.dumps(transcript)
+        assert session["checkpoint"] == {"recovery": pointer, "through": 2, "summary": "Saved old exchange", "files": {"readFiles": [], "modifiedFiles": []}}
         initial, second, third = [req["messages"] for _, req in requests]
         assert initial[-1]["content"] == recent
         summary, tool_exchange = (second, third) if automatic else (third, second)
@@ -765,3 +769,6 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     from resources import check as check_resources
     requests.clear()
     check_resources(root, state, run, requests, saved_session)
+
+    from workspaces import check as check_workspaces
+    check_workspaces(root, state, run, requests, next_calls)
