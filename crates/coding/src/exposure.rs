@@ -56,24 +56,41 @@ impl<'a> Exposure<'a> {
         }
         schemas
     }
-    fn invoke(
+}
+impl Toolset for Exposure<'_> {
+    fn system(&self) -> Result<String> {
+        self.inner.system()
+    }
+    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
+        self.inner
+            .definitions(mode)
+            .into_iter()
+            .filter(|d| !self.hidden.contains(d.name()))
+            .collect()
+    }
+    fn schemas(&self, mode: Mode) -> Vec<Value> {
+        self.available(mode, &[])
+    }
+    fn schemas_for(&self, s: &Session) -> Vec<Value> {
+        self.available(s.mode, &s.history)
+    }
+    fn run(
         &self,
-        mode: Mode,
-        history: &[Message],
+        session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-        session: Option<&Session>,
     ) -> Result<(ToolOutput, StoreWrites)> {
         cancel.check()?;
         let allowed = self
-            .available(mode, history)
+            .available(session.mode, &session.history)
             .into_iter()
             .find(|s| s["function"]["name"] == call.name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "tool {} unavailable for this run ({mode:?} mode)",
-                    call.name
+                    "tool {} unavailable for this run ({:?} mode)",
+                    call.name,
+                    session.mode
                 )
             })?;
         if call.name == "tool_search" {
@@ -84,7 +101,7 @@ impl<'a> Exposure<'a> {
             )?;
             let query = field(&call.args, "query")?.to_lowercase();
             let matches: Vec<_> = self
-                .definitions(mode)
+                .definitions(session.mode)
                 .into_iter()
                 .filter(|d| {
                     self.deferred.contains(d.name())
@@ -109,45 +126,6 @@ impl<'a> Exposure<'a> {
                 StoreWrites::default(),
             ));
         }
-        match session {
-            Some(session) => self.inner.run_in_session(session, call, cancel, emit),
-            None => Ok((
-                self.inner.run_stream(mode, call, cancel, emit)?,
-                StoreWrites::default(),
-            )),
-        }
-    }
-}
-impl Toolset for Exposure<'_> {
-    fn system(&self) -> Result<String> {
-        self.inner.system()
-    }
-    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
-        self.inner
-            .definitions(mode)
-            .into_iter()
-            .filter(|d| !self.hidden.contains(d.name()))
-            .collect()
-    }
-    fn schemas(&self, mode: Mode) -> Vec<Value> {
-        self.available(mode, &[])
-    }
-    fn schemas_for(&self, s: &Session) -> Vec<Value> {
-        self.available(s.mode, &s.history)
-    }
-    fn run_in_session(
-        &self,
-        s: &Session,
-        c: &Call,
-        k: &Cancel,
-        e: &mut Emit,
-    ) -> Result<(ToolOutput, StoreWrites)> {
-        self.invoke(s.mode, &s.history, c, k, e, Some(s))
-    }
-    fn run_stream(&self, m: Mode, c: &Call, k: &Cancel, e: &mut Emit) -> Result<ToolOutput> {
-        Ok(self.invoke(m, &[], c, k, e, None)?.0)
-    }
-    fn run(&self, m: Mode, c: &Call, k: &Cancel) -> Result<String> {
-        Ok(self.run_stream(m, c, k, &mut |_| {})?.text)
+        self.inner.run(session, call, cancel, emit)
     }
 }

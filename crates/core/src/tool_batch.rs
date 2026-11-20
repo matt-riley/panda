@@ -19,9 +19,9 @@ pub(crate) fn parallel_reads(
             .map(|call| {
                 scope.spawn(move || {
                     let mut events = Vec::new();
-                    let result = cancel.check().and_then(|()| {
-                        tools.run_in_session(session, call, cancel, &mut |e| events.push(e))
-                    });
+                    let result = cancel
+                        .check()
+                        .and_then(|()| tools.run(session, call, cancel, &mut |e| events.push(e)));
                     Completion { result, events }
                 })
             })

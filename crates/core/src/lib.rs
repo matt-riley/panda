@@ -551,9 +551,9 @@ pub trait Toolset: Sync {
             })
             .collect()
     }
-    fn nested_definitions(&self, mode: Mode, session: Option<&Session>) -> Vec<ToolDefinition> {
-        let visible = session.map_or_else(|| self.schemas(mode), |s| self.schemas_for(s));
-        self.definitions(mode)
+    fn nested_definitions(&self, session: &Session) -> Vec<ToolDefinition> {
+        let visible = self.schemas_for(session);
+        self.definitions(session.mode)
             .into_iter()
             .filter(|d| {
                 d.access == Access::Read
@@ -564,51 +564,38 @@ pub trait Toolset: Sync {
             })
             .collect()
     }
-    fn run_nested(
-        &self,
-        mode: Mode,
-        session: Option<&Session>,
-        call: &Call,
-        cancel: &Cancel,
-    ) -> Result<ToolOutput> {
-        let definition = self
-            .nested_definitions(mode, session)
-            .into_iter()
-            .find(|d| d.name() == call.name)
-            .ok_or_else(|| anyhow::anyhow!("unavailable nested tool {}", call.name))?;
-        definition.validate(&call.args)?;
-        match session {
-            Some(s) => Ok(self.run_in_session(s, call, cancel, &mut |_| {})?.0),
-            None => self.run_stream(mode, call, cancel, &mut |_| {}),
-        }
-    }
     /// The caller commits any returned branch-local writes atomically with the tool result.
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-    ) -> Result<(ToolOutput, StoreWrites)> {
-        Ok((
-            self.run_stream(session.mode, call, cancel, emit)?,
-            StoreWrites::default(),
-        ))
-    }
-
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        _emit: &mut Emit,
-    ) -> Result<ToolOutput> {
-        self.run(mode, call, cancel).map(Into::into)
-    }
+    ) -> Result<(ToolOutput, StoreWrites)>;
 
     fn system(&self) -> Result<String>;
     fn schemas(&self, mode: Mode) -> Vec<Value>;
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String>;
+}
+
+/// Apply the nested read policy before entering the shared session dispatcher.
+pub fn run_nested(
+    tools: &dyn Toolset,
+    session: &Session,
+    call: &Call,
+    cancel: &Cancel,
+) -> Result<ToolOutput> {
+    let definition = tools
+        .nested_definitions(session)
+        .into_iter()
+        .find(|d| d.name() == call.name)
+        .ok_or_else(|| anyhow::anyhow!("unavailable nested tool {}", call.name))?;
+    definition.validate(&call.args)?;
+    let (output, writes) = tools.run(session, call, cancel, &mut |_| {})?;
+    anyhow::ensure!(
+        writes.is_empty(),
+        "read-only nested tool returned store writes"
+    );
+    Ok(output)
 }
 
 pub fn turn(
@@ -852,7 +839,7 @@ pub fn turn_message(
                         }
                         done.result
                     }
-                    None => tools.run_in_session(&s, &call, cancel, &mut handle),
+                    None => tools.run(&s, &call, cancel, &mut handle),
                 };
                 let is_error = result.is_err();
                 let (mut output, writes) = result.unwrap_or_else(|e| {
