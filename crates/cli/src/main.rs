@@ -2,6 +2,7 @@ mod active;
 mod attachments;
 mod automation;
 mod copy;
+mod diagnostics;
 mod html;
 mod markdown;
 mod picker;
@@ -27,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -793,6 +794,16 @@ fn run(
                     db.save(&mut s)?;
                     mode = s.mode;
                     screen.line(Tone::Dim, &format!("{mode:?} mode"))
+                }
+                ":diagnostics" | ":bug-report" => {
+                    let path =
+                        diagnostics::collect(&state, db.id(), &db.load()?, first == ":bug-report")?;
+                    screen.line(Tone::Dim, &format!("Saved local report {}", path.display()));
+                }
+                ":changelog" => {
+                    for row in diagnostics::changelog(words.next())?.lines() {
+                        screen.line(Tone::Dim, row);
+                    }
                 }
                 ":prompts" => {
                     for name in templates.names() {

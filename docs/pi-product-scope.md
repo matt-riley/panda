@@ -1,0 +1,29 @@
+# Scope of the wider Pi products
+
+The [daily-use verification](daily-use-verification.md) gives us two concrete workflows. The Markdown review skill found a documentation error from inside Panda. A test run completed locally while its hosted checks had their own lifetime. An interrupted shell command required acknowledgement after restart. These observations drive the following decisions.
+
+| Area | Decision | User workflow and reason |
+| --- | --- | --- |
+| Remote execution | Defer | For a change that needs a second operating system, run the platform job in hosted CI. Reconsider if a daily task requires an interactive workspace on a specific remote machine. |
+| Pi Env Rust daemon | Defer | If a developer needs to read build logs and stop a long test on that machine, evaluate the existing daemon as the transport first. Its protocol can stream output and cancel work. See the contract comparison below. |
+| Durable | Defer | A test launched in the terminal might need to survive closing a laptop. First qualify one local job through disconnect, cancellation and crash after a side effect. Durable persists turns and retries interrupted model attempts, while Panda already records uncertain tool outcomes. [Durable](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/durable/README.md) |
+| Chord | Exclude | Inspecting the result of that test from a second process needs a status query. Chord also provides principal-scoped object references and live plugin reload across hosts, for which the current workflow has no user. [Chord](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/chord/README.md) |
+| p2 | Exclude | Reviewing a branched answer offline already works through Panda’s HTML export. p2 is an experimental, self-hosted Durable UI made of Chord plugins and upstream explicitly plans its replacement. [p2](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/apps/p2/README.md) |
+| p3 | Defer | Resuming a terminal session after lunch works from SQLite. Revisit the personal server and per-session worker model if reconnecting a second client becomes a requirement. At this revision p3 describes itself as headless. [p3](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/apps/p3/README.md) |
+| Subagents | Defer | The review skill caught the documentation contradiction in one session. An independent reviewer for a large patch is a plausible next case. Measure what it finds and require propagated cancellation and recorded tool use before adopting the process model. [Subagent example](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/coding-agent/examples/extensions/subagent/README.md) |
+| Telemetry contracts | Adopt the explicit, optional observer pattern | When a scripted turn unexpectedly retries, record the attempt and tool events in a test observer. Use Panda’s event callback and keep a no-op observer available. An exporter is a separate decision. [Telemetry](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/telemetry/README.md) |
+| Schemas | Adopt portable JSON fixtures | A client author can verify that a tool declaration accepts its documented arguments and rejects invalid ones. Reuse JSON Schema and fixture data across Rust and Pi at the wire boundary. [Schema](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/schema/README.md) |
+| Eval fixtures | Adopt reproducible cases | Replay a fixed search-pagination task with and without guidance and compare the captured requests and answer. Keep deterministic provider fixtures in CI. Use a separately requested live run for model-dependent behavior. [Evals](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/evals/README.md) |
+
+## Pi Env and the Panda workspace contract
+
+Panda’s [Workspace trait](../crates/coding/src/lib.rs) receives a named tool, JSON arguments, cancellation and an event callback. It returns a tool result, including attachments, and supplies instruction files separately. The [Pi Env protocol](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/env/docs/protocol.md) exchanges length-prefixed frames with request IDs, structured errors, optional binary payloads, progress events and cancellation over process streams. Its paths are absolute. [Pi Env](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/env/README.md) describes deploying the existing Rust daemon and keeping provider credentials on the local worker.
+
+| Panda operation | Pi Env primitive | What an adapter would have to prove |
+| --- | --- | --- |
+| Read a workspace file or load nested instructions | Open, positional reads and close | Resolve the workspace boundary remotely, preserve instruction precedence and enforce Panda’s text and attachment limits. |
+| List, map and search | Directory handles and scan operations | Return Panda’s stable pages, ignored-path behavior and relative paths, including in an empty directory. |
+| Apply an exact batch edit | File operations including writes and renames | Preserve Panda’s all-or-nothing validation and writer serialization, including after a connection loss. |
+| Stream and cancel a test command | Exec progress frames, terminal result and request cancellation | Tie progress to the original call, record uncertain completion at disconnect and verify a single side effect after reconnecting. |
+
+This comparison identifies candidate mappings. No remote run was performed. A future evaluation starts with a disposable workspace and the existing daemon, and checks these contracts before choosing an adapter.
