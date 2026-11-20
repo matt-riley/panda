@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
     rename_all_fields = "camelCase"
 )]
 pub enum ToolDetails {
+    Discovery {
+        tools: Vec<String>,
+    },
     Edit {
         first_changed_line: Option<usize>,
         patch: Vec<Replacement>,

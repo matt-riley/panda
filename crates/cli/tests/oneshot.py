@@ -772,3 +772,34 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
     from workspaces import check as check_workspaces
     check_workspaces(root, state, run, requests, next_calls)
+
+    # Exercise the actual RPC reader, provider serialization and worker together.
+    requests.clear()
+    probe = repo / "rpc-policy-fixture"
+    probe.mkdir()
+    (probe / "note").write_text("untouched")
+    run([], ":plan\n:q\n", cwd=probe)
+    next_calls.extend([
+        ("ls", {}),
+        ("codemode", {"code":"return tools.ls({})"}),
+        ("tool_search", {"query":"ls"}),
+        ("ls", {"offset":"wrong"}),
+        ("edit", {"path":"note", "old":"untouched", "new":"changed"}),
+        ("ls", {}),
+        ("codemode", {"code":"return tools.ls({})"}),
+        ("codemode", {"code":"return tools.ls({offset:'wrong'})"}),
+        ("codemode", {"code":"return tools.edit({path:'note',old:'untouched',new:'changed'})"}),
+        ("codemode", {"code":"return describeNamespace('workspace').map(t=>t.name)"}),
+    ])
+    rpc = ["--mode","rpc","--continue","--codemode","--defer-tools","ls","--hide-tools","search"]
+    events = run(rpc, json.dumps({"type":"prompt","id":71,"text":"inspect"})+"\n", cwd=probe)
+    assert done(events)["id"] == 71
+    declared = [{t["function"]["name"] for t in request["tools"]} for _, request in requests]
+    assert "tool_search" in declared[0] and "ls" not in declared[0]
+    assert "ls" in declared[3] and all("search" not in names and "edit" not in names for names in declared)
+    outcomes = [m["content"] for m in requests[-1][1]["messages"] if m["role"]=="tool"]
+    assert "unavailable" in outcomes[0] and "tool error" in outcomes[1] and "expects an integer" in outcomes[3] and "unavailable" in outcomes[4]
+    assert json.loads(outcomes[5]) == json.loads(outcomes[6])
+    assert "expects an integer" in outcomes[7] and "tool error" in outcomes[8]
+    assert sorted(json.loads(outcomes[9])) == ["ls","read","repo_map"]
+    assert (probe / "note").read_text() == "untouched"

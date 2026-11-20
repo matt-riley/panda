@@ -381,3 +381,119 @@ fn large_tool_result_triggers_compaction_with_small_reported_usage() {
     assert!(matches!(&db.0.history[2],Message::Result{text,..} if text.len()==6400));
     assert_eq!(db.0.checkpoint.unwrap().through, 3);
 }
+
+#[test]
+fn concurrent_reads_complete_in_order_before_serial_mutations() -> Result<()> {
+    use std::{
+        sync::{
+            Condvar, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    struct BatchProvider;
+    impl Provider for BatchProvider {
+        fn reply(
+            &mut self,
+            _: &str,
+            h: &[Message],
+            _: &[Value],
+            _: &Cancel,
+            _: &mut Emit,
+        ) -> Result<(String, Vec<Call>)> {
+            if h.len() == 1 {
+                let calls = ["read", "read", "edit", "edit"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| Call {
+                        name: name.into(),
+                        id: i.to_string(),
+                        args: json!({"path":"same"}),
+                    })
+                    .collect();
+                Ok((String::new(), calls))
+            } else {
+                Ok(("done".into(), vec![]))
+            }
+        }
+    }
+    #[derive(Default)]
+    struct Probe {
+        readers: Mutex<usize>,
+        started: Condvar,
+        writers: AtomicUsize,
+    }
+    impl Toolset for Probe {
+        fn system(&self) -> Result<String> {
+            Ok(String::new())
+        }
+        fn schemas(&self, _: Mode) -> Vec<Value> {
+            ["read", "edit"]
+                .into_iter()
+                .map(|s| json!({"function":{"name":s}}))
+                .collect()
+        }
+        fn run(&self, _: Mode, c: &Call, _: &Cancel) -> Result<String> {
+            if c.name == "read" {
+                let mut n = self.readers.lock().unwrap();
+                *n += 1;
+                self.started.notify_all();
+                let (guard, timed) = self
+                    .started
+                    .wait_timeout_while(n, Duration::from_secs(2), |n| *n != 2)
+                    .unwrap();
+                anyhow::ensure!(!timed.timed_out(), "read barrier timed out");
+                drop(guard);
+                if c.id == "0" {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            } else {
+                assert_eq!(*self.readers.lock().unwrap(), 2);
+                assert_eq!(self.writers.fetch_add(1, Ordering::SeqCst), 0);
+                std::thread::sleep(Duration::from_millis(10));
+                self.writers.fetch_sub(1, Ordering::SeqCst);
+            }
+            Ok(c.id.clone())
+        }
+    }
+    for single in [true, false] {
+        let mut results = vec![];
+        let mut pending = vec!["first".into(), "second".into()];
+        let mut store = Memory::default();
+        turn_with_input(
+            &mut BatchProvider,
+            &mut store,
+            &Probe::default(),
+            "start".into(),
+            &Cancel::default(),
+            &mut |e| {
+                if let Event::Result(text) = e {
+                    results.push(text)
+                }
+            },
+            &mut |_| {
+                let n = if single {
+                    pending.len().min(1)
+                } else {
+                    pending.len()
+                };
+                pending.drain(..n).collect()
+            },
+        )?;
+        assert_eq!(results, ["0", "1", "2", "3"]);
+        let messages: Vec<_> = store
+            .0
+            .history
+            .iter()
+            .filter_map(|m| {
+                if let Message::User(t) = m {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(messages, ["start", "first", "second"]);
+    }
+    Ok(())
+}

@@ -602,18 +602,28 @@ fn run(
         Some(selected) => selected,
         None => &coding,
     };
-    let codemode = panda_local::codemode::Codemode::new(base, &executable, &coding.workspace.root);
+    // Native and script dispatch share the same policy. The outer projection
+    // additionally controls the synthetic codemode tool itself.
+    let exposure =
+        panda_coding::Exposure::new(base, options.deferred.clone(), options.hidden.clone())?;
+    let codemode =
+        panda_local::codemode::Codemode::new(&exposure, &executable, &coding.workspace.root);
     let provider_tools;
     let tools: &(dyn Toolset + Sync) = match options.codemode {
-        CodemodeExposure::Off => base,
+        CodemodeExposure::Off => &exposure,
         CodemodeExposure::Alongside => &codemode,
         CodemodeExposure::Only => {
-            // Filter provider-facing declarations and dispatch after composing the nested helpers.
             provider_tools =
                 panda_coding::SelectedTools::new(&codemode, ["codemode".to_owned()].into())?;
             &provider_tools
         }
     };
+    let provider_exposure = panda_coding::Exposure::new(
+        tools,
+        std::mem::take(&mut options.deferred),
+        std::mem::take(&mut options.hidden),
+    )?;
+    let tools: &(dyn Toolset + Sync) = &provider_exposure;
     let index = std::sync::RwLock::new(if settings.skill_index {
         coding.skills.startup_index()?
     } else {
@@ -1053,7 +1063,7 @@ fn run(
                         &format!(
                             "Context {} bytes · estimated {} / {} input tokens · byte limit {} · {} messages covered by summary",
                             s.context_bytes(),
-                            s.estimated_tokens(&tools.system()?, &tools.schemas(s.mode)),
+                            s.estimated_tokens(&tools.system()?, &tools.schemas_for(&s)),
                             s.token_budget(),
                             s.context_budget.map_or_else(|| "unset".into(), |n| n.to_string()),
                             s.checkpoint.as_ref().map_or(0, |c| c.through)
@@ -1357,7 +1367,7 @@ fn run(
                         engine.as_mut(),
                         &mut db,
                         tools,
-                        input,
+                        (input, options.delivery),
                         &cancel,
                         &mut screen,
                         editor.as_mut(),

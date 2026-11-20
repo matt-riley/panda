@@ -32,6 +32,9 @@ pub struct Options {
     pub interface: Interface,
     pub codemode: CodemodeExposure,
     pub tools: Option<BTreeSet<String>>,
+    pub deferred: BTreeSet<String>,
+    pub hidden: BTreeSet<String>,
+    pub delivery: crate::active::Delivery,
     pub resume: bool,
     pub session_id: Option<i64>,
     pub workspace: Option<crate::workspaces::Choice>,
@@ -52,6 +55,18 @@ impl Options {
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "--steering-mode" | "--follow-up-mode" => {
+                    let one = match it.next().map(String::as_str) {
+                        Some("one" | "one-at-a-time") => true,
+                        Some("all" | "all-at-once") => false,
+                        _ => anyhow::bail!("expected one or all after {arg}"),
+                    };
+                    if arg == "--steering-mode" {
+                        out.delivery.single_steer = one
+                    } else {
+                        out.delivery.single_follow = one
+                    }
+                }
                 "--trust-project" => out.trust_project = true,
                 "--keep-recent-tokens" => {
                     out.recent_override =
@@ -62,6 +77,21 @@ impl Options {
                 "--codemode" => {
                     if out.codemode == CodemodeExposure::Off {
                         out.codemode = CodemodeExposure::Alongside;
+                    }
+                }
+                "--defer-tools" | "--hide-tools" => {
+                    let list = it
+                        .next()
+                        .filter(|s| !s.starts_with('-'))
+                        .context("expected comma-separated tool names")?;
+                    let names = if arg == "--defer-tools" {
+                        &mut out.deferred
+                    } else {
+                        &mut out.hidden
+                    };
+                    for name in list.split(',').map(str::trim) {
+                        ensure!(!name.is_empty(), "empty tool name");
+                        names.insert(name.to_owned());
                     }
                 }
                 "--codemode-only" => out.codemode = CodemodeExposure::Only,
@@ -251,6 +281,12 @@ pub struct PromptedTools<'a> {
     pub index: &'a std::sync::RwLock<String>,
 }
 impl Toolset for PromptedTools<'_> {
+    fn definitions(&self, m: Mode) -> Vec<panda_core::ToolDefinition> {
+        self.tools.definitions(m)
+    }
+    fn schemas_for(&self, s: &Session) -> Vec<Value> {
+        self.tools.schemas_for(s)
+    }
     fn run_in_session(
         &self,
         session: &Session,
@@ -300,7 +336,7 @@ pub struct Host<'a> {
 impl Host<'_> {
     pub fn run(&mut self, options: Options) -> Result<()> {
         if options.interface == Interface::Rpc {
-            return self.rpc();
+            return self.rpc(options.delivery);
         }
         let input = one_shot_input(self.root, &options.prompt)?;
         let mut p = (self.connect)()?;
@@ -338,7 +374,7 @@ impl Host<'_> {
         }
         Ok(())
     }
-    fn rpc(&mut self) -> Result<()> {
+    fn rpc(&mut self, delivery: crate::active::Delivery) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in io::stdin().lock().lines() {
@@ -364,7 +400,10 @@ impl Host<'_> {
                         let text = r["text"].as_str().context("expected text")?;
                         let input = attachments::prepare(self.root, text, None)?;
                         let mut p = (self.connect)()?;
-                        let queue = Mutex::new((Vec::new(), Vec::new()));
+                        let queue = Mutex::new(crate::active::Queue {
+                            delivery,
+                            ..Default::default()
+                        });
                         let queue_ref = &queue;
                         let cancel = self.cancel;
                         cancel.reset();
@@ -381,14 +420,7 @@ impl Host<'_> {
                                     &mut |e| {
                                         println!("{}", json!({"id":id,"type":"event","event":e}))
                                     },
-                                    &mut |idle| {
-                                        let mut q = queue_ref.lock().unwrap();
-                                        let mut items = std::mem::take(&mut q.0);
-                                        if idle && items.is_empty() {
-                                            items.append(&mut q.1);
-                                        }
-                                        items
-                                    },
+                                    &mut |idle| queue_ref.lock().unwrap().take(idle),
                                 )
                             });
                             while !worker.is_finished() {
@@ -406,9 +438,9 @@ impl Host<'_> {
                                                 {
                                                     let mut q = queue.lock().unwrap();
                                                     let dest = if kind == "steer" {
-                                                        &mut q.0
+                                                        &mut q.steer
                                                     } else {
-                                                        &mut q.1
+                                                        &mut q.follow
                                                     };
                                                     dest.push(cmd["text"].as_str().unwrap().into());
                                                     json!({"id":cmd_id,"type":"queued"})
@@ -428,8 +460,8 @@ impl Host<'_> {
                                 .join()
                                 .map_err(|_| anyhow::anyhow!("turn worker failed"))?
                         });
-                        let (steer, follow) = queue.into_inner().unwrap();
-                        let undelivered = [steer, follow].concat();
+                        let q = queue.into_inner().unwrap();
+                        let undelivered = [q.steer, q.follow].concat();
                         match run {
                             Ok(()) => {
                                 json!({"id":id,"type":"done","session_id":self.session_id,"undelivered":undelivered})

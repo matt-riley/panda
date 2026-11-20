@@ -29,8 +29,20 @@ fn run_script(ctx: &Ctx<'_>, code: &str) -> rquickjs::Result<()> {
     let text: Function = ctx.globals().get("text")?;
     let async_function: Constructor = ctx.eval("(async () => {}).constructor")?;
     let script: Function = async_function.construct((format!("\"use strict\";\n{code}"),))?;
+    let flush: Function = ctx.globals().get("__flushTools")?;
+    ctx.globals().remove("__flushTools")?;
     let promise: Promise = script.call(())?;
-    let value: rquickjs::Value = promise.finish()?;
+    let value: rquickjs::Value = loop {
+        if let Some(result) = promise.result() {
+            break result?;
+        }
+        if !ctx.execute_pending_job() && !flush.call::<_, bool>(())? {
+            return Err(Exception::throw_message(
+                ctx,
+                "Codemode is waiting on a promise with no pending tool",
+            ));
+        }
+    };
     if !value.is_undefined() {
         text.call::<_, ()>((value,))?;
     }
@@ -162,6 +174,21 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
                         .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
                 },
             )?,
+        )?;
+        ctx.globals()
+            .set("__asyncMode", ScriptOptions::parse(code)?.asynchronous)?;
+        ctx.globals().set(
+            "__batch",
+            Function::new(ctx.clone(), |ctx: Ctx<'_>, json: String| {
+                let result = (|| -> Result<String> {
+                    ensure!(
+                        json.len() <= 4 * (ARG_BYTES + 128),
+                        "nested batch exceeds argument limit"
+                    );
+                    exchange(WorkerMessage::Batch(serde_json::from_str(&json)?))
+                })();
+                result.map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
+            })?,
         )?;
         ctx.globals().set(
             "__invoke",

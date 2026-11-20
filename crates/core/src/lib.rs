@@ -1,5 +1,6 @@
 mod checkpoint_files;
 mod recovery;
+mod tool_batch;
 mod tool_details;
 use anyhow::{Result, bail};
 pub use checkpoint_files::CheckpointFiles;
@@ -494,7 +495,64 @@ pub trait Store {
         self.save(s)
     }
 }
-pub trait Toolset {
+mod tool_policy;
+pub use tool_policy::{Access, OutputKind, ToolDefinition, validate as validate_tool_args};
+
+pub trait Toolset: Sync {
+    fn schemas_for(&self, session: &Session) -> Vec<Value> {
+        self.schemas(session.mode)
+    }
+    fn definitions(&self, mode: Mode) -> Vec<ToolDefinition> {
+        self.schemas(mode)
+            .into_iter()
+            .map(|schema| {
+                let name = schema["function"]["name"].as_str().unwrap_or_default();
+                let nested = matches!(name, "ls" | "repo_map" | "search" | "read");
+                let output = if name == "read" {
+                    OutputKind::File
+                } else {
+                    OutputKind::Json
+                };
+                ToolDefinition {
+                    schema,
+                    access: if nested { Access::Read } else { Access::Mutate },
+                    output,
+                    namespace: nested.then(|| "workspace".into()),
+                }
+            })
+            .collect()
+    }
+    fn nested_definitions(&self, mode: Mode, session: Option<&Session>) -> Vec<ToolDefinition> {
+        let visible = session.map_or_else(|| self.schemas(mode), |s| self.schemas_for(s));
+        self.definitions(mode)
+            .into_iter()
+            .filter(|d| {
+                d.access == Access::Read
+                    && d.namespace.is_some()
+                    && visible
+                        .iter()
+                        .any(|schema| schema["function"]["name"] == d.name())
+            })
+            .collect()
+    }
+    fn run_nested(
+        &self,
+        mode: Mode,
+        session: Option<&Session>,
+        call: &Call,
+        cancel: &Cancel,
+    ) -> Result<ToolOutput> {
+        let definition = self
+            .nested_definitions(mode, session)
+            .into_iter()
+            .find(|d| d.name() == call.name)
+            .ok_or_else(|| anyhow::anyhow!("unavailable nested tool {}", call.name))?;
+        definition.validate(&call.args)?;
+        match session {
+            Some(s) => Ok(self.run_in_session(s, call, cancel, &mut |_| {})?.0),
+            None => self.run_stream(mode, call, cancel, &mut |_| {}),
+        }
+    }
     /// The caller commits any returned branch-local writes atomically with the tool result.
     fn run_in_session(
         &self,
@@ -580,7 +638,7 @@ pub fn turn_message(
             }
         });
         let mut compacted = false;
-        let schemas = tools.schemas(s.mode);
+        let schemas = tools.schemas_for(&s);
         let previous = s.checkpoint.as_ref().map_or(0, |c| c.through);
         if s.needs_compaction(&system, &schemas)
             && keep > previous
@@ -687,55 +745,89 @@ pub fn turn_message(
         if !idle {
             store.save(&mut s)?;
         }
-        for call in calls {
+        let definitions = tools.definitions(s.mode);
+        let mut remaining = calls.as_slice();
+        while !remaining.is_empty() {
             cancel.check()?;
-            emit(Event::Calling(call.clone()));
-            let mut nested_reads = std::collections::BTreeSet::new();
-            let started = std::time::Instant::now();
-            let result = tools.run_in_session(&s, &call, cancel, &mut |event| match event {
-                Event::NestedRead(path) => {
-                    nested_reads.insert(path);
+            let readers = remaining
+                .iter()
+                .take(4)
+                .take_while(|call| {
+                    definitions
+                        .iter()
+                        .any(|d| d.name() == call.name && d.access == Access::Read)
+                })
+                .count();
+            let (group, rest) = remaining.split_at(readers.max(1));
+            remaining = rest;
+            for call in group {
+                emit(Event::Calling(call.clone()));
+            }
+            let mut completed = if readers > 1 {
+                tool_batch::parallel_reads(tools, &s, group, cancel)
+            } else {
+                Vec::new()
+            }
+            .into_iter();
+            for call in group.iter().cloned() {
+                cancel.check()?;
+                let mut nested_reads = std::collections::BTreeSet::new();
+                let started = std::time::Instant::now();
+                let mut handle = |event| match event {
+                    Event::NestedRead(path) => {
+                        nested_reads.insert(path);
+                    }
+                    other => emit(other),
+                };
+                let result = match completed.next() {
+                    Some(done) => {
+                        for event in done.events {
+                            handle(event)
+                        }
+                        done.result
+                    }
+                    None => tools.run_in_session(&s, &call, cancel, &mut handle),
+                };
+                let is_error = result.is_err();
+                let (mut output, writes) = result.unwrap_or_else(|e| {
+                    (format!("tool error: {e}").into(), StoreWrites::default())
+                });
+                cancel.check()?;
+                if !output.images.is_empty() && pending_image_exchange.is_none() {
+                    pending_image_exchange = s.history.iter().rposition(Message::user);
                 }
-                other => emit(other),
-            });
-            let is_error = result.is_err();
-            let (mut output, writes) = result
-                .unwrap_or_else(|e| (format!("tool error: {e}").into(), StoreWrites::default()));
-            cancel.check()?;
-            if !output.images.is_empty() && pending_image_exchange.is_none() {
-                pending_image_exchange = s.history.iter().rposition(Message::user);
-            }
-            if !writes.is_empty() {
-                s.history.push(Message::CodemodeStore(writes));
-            }
-            if call.name == "codemode" && output.details.is_none() {
-                output.details = Some(ToolDetails::Codemode {
-                    elapsed_ms: started.elapsed().as_millis() as u64,
-                    success: !is_error,
-                    images: vec![],
-                    items: vec![],
+                if !writes.is_empty() {
+                    s.history.push(Message::CodemodeStore(writes));
+                }
+                if call.name == "codemode" && output.details.is_none() {
+                    output.details = Some(ToolDetails::Codemode {
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        success: !is_error,
+                        images: vec![],
+                        items: vec![],
+                    });
+                }
+                s.history.push(Message::Result {
+                    details: output.details,
+                    id: call.id.clone(),
+                    is_error,
+                    nested_reads: nested_reads.into_iter().collect(),
+                    text: output.text.clone(),
+                    images: output.images,
                 });
+                store.save(&mut s)?;
+                if let Some(Message::Result {
+                    details: Some(details),
+                    ..
+                }) = s.history.last()
+                {
+                    emit(Event::ResultDetails {
+                        id: call.id,
+                        details: details.clone(),
+                    });
+                }
+                emit(Event::Result(output.text));
             }
-            s.history.push(Message::Result {
-                details: output.details,
-                id: call.id.clone(),
-                is_error,
-                nested_reads: nested_reads.into_iter().collect(),
-                text: output.text.clone(),
-                images: output.images,
-            });
-            store.save(&mut s)?;
-            if let Some(Message::Result {
-                details: Some(details),
-                ..
-            }) = s.history.last()
-            {
-                emit(Event::ResultDetails {
-                    id: call.id,
-                    details: details.clone(),
-                });
-            }
-            emit(Event::Result(output.text));
         }
         let queued = pending(idle);
         if idle && queued.is_empty() {

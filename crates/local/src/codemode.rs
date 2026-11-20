@@ -1,4 +1,5 @@
 //! Optional read-only JavaScript composition for the native host.
+mod admission;
 mod images;
 mod storage;
 mod vm;
@@ -54,7 +55,7 @@ const HELPERS: &[(&str, &str, &str)] = &[
 const REQUEST_FRAME: usize = 6 * SCRIPT_BYTES + 16 * 1024;
 const MAX_ERROR_CHARS: usize = 1024;
 const WORKER_FRAME: usize = 6 * storage::TOTAL_CHARS + 6 * MAX_ERROR_CHARS + 1024;
-const REPLY_FRAME: usize = MAX_IMAGE_URL_BYTES + 6 * 1024 * 1024 + 1024;
+const REPLY_FRAME: usize = MAX_IMAGE_URL_BYTES + 32 * 1024 * 1024 + 8192;
 // Finished messages must also fit when every output byte needs JSON escaping.
 const _: () = assert!(WORKER_FRAME >= 6 * (MAX_OUTPUT_BYTES + MAX_ERROR_CHARS) + 64);
 
@@ -63,6 +64,8 @@ const _: () = assert!(WORKER_FRAME >= 6 * (MAX_OUTPUT_BYTES + MAX_ERROR_CHARS) +
 struct ScriptOptions {
     max_output_tokens: usize,
     timeout_ms: u64,
+    #[serde(rename = "async")]
+    asynchronous: bool,
 }
 
 impl Default for ScriptOptions {
@@ -70,6 +73,7 @@ impl Default for ScriptOptions {
         Self {
             max_output_tokens: PREVIEW_BYTES / 4,
             timeout_ms: TIME_LIMIT.as_millis() as u64,
+            asynchronous: false,
         }
     }
 }
@@ -153,8 +157,10 @@ struct NestedHelper<'a> {
 
 #[derive(Serialize)]
 struct ToolEntry {
-    name: &'static str,
+    name: String,
     description: String,
+    namespace: String,
+    output: &'static str,
 }
 
 impl NestedHelper<'_> {
@@ -189,7 +195,9 @@ impl NestedHelper<'_> {
             self.result_type
         );
         ToolEntry {
-            name: self.name,
+            name: self.name.into(),
+            namespace: "workspace".into(),
+            output: if self.name == "read" { "file" } else { "json" },
             description: format!(
                 "{} {}\n{declaration}",
                 self.function["description"].as_str().unwrap_or_default(),
@@ -210,6 +218,7 @@ struct ScriptOutput {
 #[derive(Serialize, Deserialize)]
 enum WorkerMessage {
     Invoke { name: String, args: Value },
+    Batch(Vec<(String, Value)>),
     Load { key: String },
     Store { key: String, json: Option<String> },
     Image { url: String },
@@ -303,9 +312,17 @@ impl<'a> Codemode<'a> {
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
-        mut store: ScriptStore,
+        session: Option<&Session>,
     ) -> Result<(ToolOutput, StoreWrites)> {
+        let mut store = session.map_or_else(ScriptStore::default, |s| {
+            ScriptStore::from_history(&s.history)
+        });
         cancel.check()?;
+        panda_core::validate_tool_args(
+            &json!({"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}),
+            &call.args,
+            "codemode",
+        )?;
         let script = panda_coding::field(&call.args, "code")?;
         ensure!(
             script.len() <= SCRIPT_BYTES,
@@ -314,9 +331,38 @@ impl<'a> Codemode<'a> {
         let options = ScriptOptions::parse(script)?;
         let started = Instant::now();
         let deadline = started + Duration::from_millis(options.timeout_ms);
-        let catalog: Vec<_> = Self::helpers(&self.inner.schemas(mode))
-            .map(|helper| helper.entry())
+        let definitions = self.inner.nested_definitions(mode, session);
+        let schemas: Vec<_> = definitions.iter().map(|d| d.schema.clone()).collect();
+        let mut catalog: Vec<_> = Self::helpers(&schemas)
+            .filter(|h| {
+                definitions.iter().any(|d| {
+                    d.name() == h.name
+                        && d.namespace.is_some()
+                        && d.access == panda_core::Access::Read
+                })
+            })
+            .map(|h| h.entry())
             .collect();
+        for d in definitions {
+            if let Some(namespace) = &d.namespace
+                && d.access == panda_core::Access::Read
+                && !catalog.iter().any(|entry| entry.name == d.name())
+            {
+                catalog.push(ToolEntry {
+                    name: d.name().to_owned(),
+                    description: d.schema["function"]["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    namespace: namespace.clone(),
+                    output: match d.output {
+                        panda_core::OutputKind::Text => "text",
+                        panda_core::OutputKind::Json => "json",
+                        panda_core::OutputKind::File => "file",
+                    },
+                });
+            }
+        }
         let executable = self.executable.canonicalize()?;
         let root = crate::output_log::open_root(self.workspace_root)?;
         let literal =
@@ -327,6 +373,8 @@ impl<'a> Codemode<'a> {
             (allow sysctl-read file-read-metadata)
             (allow file-read* (literal {literal}) (subpath "/System/Library") (subpath "/usr/lib") (literal "/dev/urandom"))"#
         );
+        let _slot = admission::acquire(cancel, deadline)?;
+        cancel.check()?;
         let mut child = Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile])
             .arg(executable)
@@ -373,58 +421,88 @@ impl<'a> Codemode<'a> {
                         WorkerMessage::Finished(result) => {
                             return Ok((result, images, selected));
                         }
-                        WorkerMessage::Invoke { name, args } => {
-                            cancel.check()?;
-                            nested.check()?;
-                            count += 1;
-                            ensure!(count <= MAX_CALLS, "Codemode nested call limit exceeded");
-                            ensure!(
-                                catalog.iter().any(|entry| entry.name == name),
-                                "unavailable nested tool {name}"
-                            );
-                            ensure!(
-                                args.is_object() && args.to_string().len() <= ARG_BYTES,
-                                "invalid nested tool arguments"
-                            );
-                            let child_call = Call {
-                                id: format!("{}/{}", call.id, count),
-                                name,
-                                args,
+                        message @ (WorkerMessage::Invoke { .. } | WorkerMessage::Batch(_)) => {
+                            let (batch, requests) = match message {
+                                WorkerMessage::Invoke { name, args } => (false, vec![(name, args)]),
+                                WorkerMessage::Batch(requests) => (true, requests),
+                                _ => unreachable!(),
                             };
-                            emit(Event::NestedCall {
-                                parent: call.id.clone(),
-                                call: child_call.clone(),
-                            });
-                            cancel.check()?;
-                            let reply = self
-                                .inner
-                                .run_stream(mode, &child_call, &nested, &mut |_| {})
-                                .and_then(|result| {
-                                    ensure!(
-                                        result.text.len() <= crate::MAX_TOOL_RESULT_BYTES,
-                                        "nested result exceeds 1 MiB"
-                                    );
-                                    let added =
-                                        result.images.iter().map(|url| url.len()).sum::<usize>();
-                                    ensure!(
-                                        image_bytes + added <= MAX_IMAGE_URL_BYTES,
-                                        "Codemode image budget exceeded"
-                                    );
-                                    image_bytes += added;
-                                    if child_call.name == "read" {
-                                        let response = serde_json::to_string(&json!({"text":result.text,"image":result.images.first()}))?;
-                                        images.extend(result.images);
-                                        Ok(response)
-                                    } else {Ok(result.text)}
-                                })
-                                .map_err(|err| err.to_string());
-                            if reply.is_ok()
-                                && child_call.name == "read"
-                                && let Some(path) = child_call.args["path"].as_str()
-                            {
-                                emit(Event::NestedRead(path.to_owned()));
+                            ensure!(
+                                !requests.is_empty() && requests.len() <= 4,
+                                "invalid nested batch size"
+                            );
+                            ensure!(
+                                count + requests.len() <= MAX_CALLS,
+                                "Codemode nested call limit exceeded"
+                            );
+                            let mut calls = Vec::new();
+                            for (name, args) in requests {
+                                cancel.check()?;
+                                nested.check()?;
+                                count += 1;
+                                ensure!(
+                                    catalog.iter().any(|entry| entry.name == name),
+                                    "unavailable nested tool {name}"
+                                );
+                                ensure!(
+                                    args.to_string().len() <= ARG_BYTES,
+                                    "nested arguments exceed 16 KiB"
+                                );
+                                let child = Call {
+                                    id: format!("{}/{}", call.id, count),
+                                    name,
+                                    args,
+                                };
+                                emit(Event::NestedCall {
+                                    parent: call.id.clone(),
+                                    call: child.clone(),
+                                });
+                                calls.push(child);
                             }
-                            send(&mut output, &reply)?;
+                            let results = std::thread::scope(|scope| {
+                                let handles: Vec<_> = calls
+                                    .iter()
+                                    .map(|c| {
+                                        scope.spawn(|| {
+                                            nested.check().and_then(|()| {
+                                                self.inner.run_nested(mode, session, c, &nested)
+                                            })
+                                        })
+                                    })
+                                    .collect();
+                                handles
+                                    .into_iter()
+                                    .map(|h| {
+                                        h.join().unwrap_or_else(|_| {
+                                            Err(anyhow::anyhow!("nested worker panicked"))
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                            let mut replies = Vec::new();
+                            for (c, result) in calls.iter().zip(results) {
+                                let reply=result.and_then(|out|{
+                                    ensure!(out.text.len()<=crate::MAX_TOOL_RESULT_BYTES,"nested result exceeds 1 MiB");
+                                    let added:usize=out.images.iter().map(String::len).sum();
+                                    ensure!(image_bytes+added<=MAX_IMAGE_URL_BYTES,"Codemode image budget exceeded");
+                                    image_bytes+=added;
+                                    if c.name=="read" && let Some(path)=c.args["path"].as_str(){emit(Event::NestedRead(path.to_owned()));}
+                                    if catalog.iter().any(|entry|entry.name==c.name && entry.output=="file"){
+                                        let response=serde_json::to_string(&json!({"text":out.text,"image":out.images.first()}))?;
+                                        images.extend(out.images);
+                                        Ok(response)
+                                    }else{Ok(out.text)}
+                                }).map_err(|e|e.to_string());
+                                replies.push(reply);
+                            }
+                            if batch {
+                                send(
+                                    &mut output,
+                                    &Ok::<_, String>(serde_json::to_string(&replies)?),
+                                )?;
+                            } else {
+                                send(&mut output, &replies[0])?;
+                            }
                         }
                     }
                 }
@@ -487,6 +565,21 @@ For per-file results, group the items by their path in the same loop and emit on
 }
 
 impl Toolset for Codemode<'_> {
+    fn definitions(&self, m: Mode) -> Vec<panda_core::ToolDefinition> {
+        let mut definitions = self.inner.definitions(m);
+        definitions.push(panda_core::ToolDefinition {
+            schema: self.schemas(m).pop().expect("codemode declaration"),
+            access: panda_core::Access::Stateful,
+            output: panda_core::OutputKind::Text,
+            namespace: None,
+        });
+        definitions
+    }
+    fn schemas_for(&self, s: &Session) -> Vec<Value> {
+        let mut schemas = self.inner.schemas_for(s);
+        schemas.push(self.schemas(s.mode).pop().expect("codemode declaration"));
+        schemas
+    }
     fn run_in_session(
         &self,
         session: &Session,
@@ -495,13 +588,7 @@ impl Toolset for Codemode<'_> {
         emit: &mut Emit,
     ) -> Result<(ToolOutput, StoreWrites)> {
         if call.name == "codemode" {
-            self.execute(
-                session.mode,
-                call,
-                cancel,
-                emit,
-                ScriptStore::from_history(&session.history),
-            )
+            self.execute(session.mode, call, cancel, emit, Some(session))
         } else {
             self.inner.run_in_session(session, call, cancel, emit)
         }
@@ -514,13 +601,37 @@ impl Toolset for Codemode<'_> {
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         let mut schemas = self.inner.schemas(mode);
-        let helpers = Self::helpers(&schemas)
-            .map(|helper| helper.usage)
-            .collect::<Vec<_>>()
-            .join(" ");
+        let definitions = self.inner.definitions(mode);
+        let mut helpers = String::new();
+        for d in definitions.iter().filter(|d| {
+            d.namespace.is_some()
+                && d.access == panda_core::Access::Read
+                && schemas
+                    .iter()
+                    .any(|schema| schema["function"]["name"] == d.name())
+        }) {
+            let usage = HELPERS
+                .iter()
+                .find(|(name, _, _)| *name == d.name())
+                .map(|(_, _, usage)| (*usage).to_owned())
+                .unwrap_or_else(|| {
+                    format!(
+                        "tools.{}: {} ",
+                        d.name(),
+                        d.schema["function"]["description"]
+                            .as_str()
+                            .unwrap_or_default()
+                    )
+                });
+            // The provider can retrieve the full filtered namespace inside the script.
+            if helpers.len() + usage.len() < 3_000 * 4 {
+                helpers.push_str(&usage);
+                helpers.push(' ');
+            }
+        }
         schemas.push(json!({"type":"function","function":{
             "name":"codemode",
-            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Calls are synchronous. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+            "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
             "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
         }}));
         schemas
@@ -537,7 +648,7 @@ impl Toolset for Codemode<'_> {
         emit: &mut Emit,
     ) -> Result<ToolOutput> {
         if call.name == "codemode" {
-            self.execute(mode, call, cancel, emit, ScriptStore::default())
+            self.execute(mode, call, cancel, emit, None)
                 .map(|(output, _)| output)
         } else {
             self.inner.run_stream(mode, call, cancel, emit)
