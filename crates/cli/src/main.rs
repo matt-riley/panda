@@ -629,8 +629,32 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
+        return Ok(());
+    }
+    if let Some(flag @ ("--trust" | "--package")) = args.first().map(String::as_str) {
+        let root = std::env::current_dir()?.canonicalize()?;
+        let project = panda_local::resources::project_root(&root);
+        let state = state_dir()?;
+        if flag == "--package" {
+            println!(
+                "{}",
+                panda_local::packages::manage(&state, project, &args[1..])?
+            );
+        } else {
+            ensure!(args.len() <= 2, "usage: --trust [allow|deny|revoke|status]");
+            let action = args.get(1).map_or("status", String::as_str);
+            if action != "status" {
+                panda_local::catalog::decide(&state, project, action)?;
+            }
+            let status = match panda_local::catalog::trusted(&state, project)? {
+                Some(true) => "allowed",
+                Some(false) => "denied",
+                None => "undecided",
+            };
+            println!("{} · {status}", project.display());
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--list-models") {
@@ -705,10 +729,44 @@ fn run(
         (root, None)
     };
     let project = panda_local::resources::project_root(&root);
+    let saved_trust = panda_local::catalog::trusted(&state, project)?;
+    if !options.trust_project
+        && saved_trust.is_none()
+        && interactive_terminal
+        && options.interface == automation::Interface::Terminal
+        && project.join(".panda/mcp.json").try_exists()?
+    {
+        let labels = [
+            "Skip this time".into(),
+            "Trust this workspace".into(),
+            "Decline and remember".into(),
+        ];
+        match picker::choose(
+            &format!(
+                "Allow project MCP servers from {}?",
+                ui::inline(&project.display().to_string(), 128)
+            ),
+            &labels,
+            0,
+        )? {
+            Some(1) => {
+                panda_local::catalog::decide(&state, project, "allow")?;
+                options.trust_project = true;
+            }
+            Some(2) => panda_local::catalog::decide(&state, project, "deny")?,
+            _ => {}
+        }
+    }
+    options.trust_project |= saved_trust == Some(true);
+    let packages = panda_local::packages::active(&state, project, options.trust_project)?;
     let mut settings = settings::Settings::read(&state, project)?;
     let cli_recent = options.recent_override;
-    let templates =
-        panda_local::prompts::Templates::discover(&state, project, options.trust_project)?;
+    let templates = panda_local::prompts::Templates::with_packages(
+        &state,
+        project,
+        options.trust_project,
+        packages.prompts,
+    )?;
     if options.prompt.starts_with('/')
         && let Some(prompt) = templates.expand(&options.prompt)?
     {
@@ -717,7 +775,8 @@ fn run(
     let executable = std::env::current_exe()?;
     #[cfg(test)]
     let executable = std::env::var_os("PANDA_TEST_WORKER").map_or(executable, PathBuf::from);
-    let native = Native::new(&root, &executable)?;
+    let mut native = Native::new(&root, &executable)?;
+    native.mcp = panda_local::mcp::Servers::load(&state, project, options.trust_project, &native)?;
     let sessions = match &options.session_dir {
         Some(dir) if !options.no_session => native.session_dir(dir)?,
         _ => state.clone(),
@@ -772,7 +831,7 @@ fn run(
     }
     let coding = Coding {
         workspace: native,
-        skills: Library::new(roots),
+        skills: Library::new(roots).with_packages(packages.skills),
     };
     let selected_tools = options
         .tools

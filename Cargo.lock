@@ -1174,6 +1174,7 @@ dependencies = [
  "panda-core",
  "proptest",
  "regex",
+ "reqwest",
  "rquickjs",
  "rusqlite",
  "rustix",
@@ -1181,6 +1182,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
+ "tokio",
  "walkdir",
 ]
 
@@ -2082,6 +2084,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
