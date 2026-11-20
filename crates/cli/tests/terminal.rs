@@ -213,3 +213,18 @@ fn skill_search_explains_an_empty_result() {
     let transcript = String::from_utf8(output.stdout).unwrap();
     assert!(transcript.contains("No matching skills") && transcript.contains("PANDA_SKILL_ROOTS"));
 }
+
+#[test]
+fn custom_model_routes_branches_scopes_and_usage() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/model_routes.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

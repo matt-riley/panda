@@ -8,6 +8,7 @@ struct Link {
     tail: Option<String>,
     calls: Vec<panda_core::Call>,
     thinking: Option<String>,
+    preference: (Option<panda_core::ModelId>, Option<String>),
 }
 
 fn tool_name<'a>(nodes: &'a HashMap<i64, Link>, mut parent: i64, id: &str) -> Option<&'a str> {
@@ -60,8 +61,8 @@ pub(super) fn write_entries(
         params![sid, now, ms],
     )?;
     let mut stmt = conn.prepare(
-        "SELECT n.id,n.parent,n.depth,n.message,n.checkpoint,n.usage,r.node,r.external_id,r.raw,t.stamp,t.millis
-        FROM tree_nodes n LEFT JOIN pi_records r ON r.node=n.id LEFT JOIN pi_export_times t ON t.node=n.id
+        "SELECT n.id,n.parent,n.depth,n.message,n.checkpoint,n.usage,r.node,r.external_id,r.raw,t.stamp,t.millis,m.responder,m.preference
+        FROM tree_nodes n LEFT JOIN pi_records r ON r.node=n.id LEFT JOIN pi_export_times t ON t.node=n.id LEFT JOIN tree_models m ON m.node=n.id
         WHERE session=? ORDER BY n.id",
     )?;
     let mut rows = stmt.query([sid])?;
@@ -86,6 +87,34 @@ pub(super) fn write_entries(
         let node_time = stamp.as_deref().unwrap_or(now);
         let millis = r.get::<_, Option<i64>>(10)?.unwrap_or(ms);
         let mut tail = nodes[&parent].tail.clone();
+        let previous = &nodes[&parent].preference;
+        let preference: (Option<panda_core::ModelId>, Option<String>) = r
+            .get::<_, Option<String>>(12)?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_else(|| previous.clone());
+        if !imported && preference != *previous {
+            let mut changes = Vec::new();
+            if preference.0 != previous.0
+                && let Some(id) = &preference.0
+            {
+                changes.push((
+                    "model",
+                    json!({"type":"model_change","provider":id.provider,"modelId":id.model}),
+                ));
+            }
+            if preference.1 != previous.1 {
+                changes.push(("effort",json!({"type":"thinking_level_change","thinkingLevel":preference.1.as_deref().unwrap_or("off")})));
+            }
+            for (kind, mut change) in changes {
+                let id = fresh_id(&format!("{kind}-{node}"));
+                change["id"] = json!(id);
+                change["timestamp"] = json!(node_time);
+                change["parentId"] = json!(tail);
+                writeln!(out, "{change}")?;
+                tail = Some(id);
+            }
+        }
         let mut thinking = None;
         let mut original_cp = false;
         if let Some(raw) = raw {
@@ -120,6 +149,13 @@ pub(super) fn write_entries(
                     )?
                 }
             };
+            if matches!(m, Message::Assistant { .. })
+                && let Some(raw) = r.get::<_, Option<String>>(11)?
+            {
+                let responder: panda_core::ModelId = serde_json::from_str(&raw)?;
+                record["message"]["provider"] = json!(responder.provider);
+                record["message"]["model"] = json!(responder.model);
+            }
             record["id"] = json!(id);
             record["parentId"] = json!(tail);
             record["timestamp"] = json!(node_time);
@@ -140,6 +176,7 @@ pub(super) fn write_entries(
                 tail: tail.clone(),
                 calls,
                 thinking,
+                preference,
             },
         );
         if let Some(cp) = cp

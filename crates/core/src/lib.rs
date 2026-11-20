@@ -1,3 +1,6 @@
+mod accounting;
+use accounting::tracked;
+pub use accounting::{Attempt, FailedUsage, IdentifiedProvider, ModelId, TokenPrices, UsageRecord};
 mod checkpoint_files;
 mod recovery;
 mod tool_batch;
@@ -126,6 +129,14 @@ pub enum Mode {
 }
 #[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub responders: std::collections::BTreeMap<usize, ModelId>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub preferences: std::collections::BTreeMap<usize, (Option<ModelId>, Option<String>)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<Attempt>,
     #[serde(default)]
     pub usage: Vec<UsageRecord>,
     #[serde(default)]
@@ -167,28 +178,6 @@ pub struct Checkpoint {
     pub files: Option<CheckpointFiles>,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct UsageRecord {
-    #[serde(default)]
-    pub checkpoint_through: usize,
-    pub through: usize,
-    pub input: u64,
-    pub output: u64,
-    pub cost: Option<f64>,
-}
-impl UsageRecord {
-    fn from_event(u: &Value) -> Option<Self> {
-        Some(Self {
-            through: 0,
-            checkpoint_through: 0,
-            input: u["input_tokens"].as_u64().or(u["prompt_tokens"].as_u64())?,
-            output: u["output_tokens"]
-                .as_u64()
-                .or(u["completion_tokens"].as_u64())?,
-            cost: u["cost"].as_f64(),
-        })
-    }
-}
 impl Session {
     fn resolved_at(&self, i: usize) -> &[Message] {
         match self.context_edits.get(&i) {
@@ -339,6 +328,9 @@ fn checkpoint(
         prompt,
         cancel,
         emit,
+        &mut s.attempts,
+        s.history.len(),
+        "compaction",
     )?;
     s.checkpoint = Some(Checkpoint {
         recovery: None,
@@ -361,6 +353,15 @@ pub fn summarize_branch_with_instructions(
     instructions: &str,
     cancel: &Cancel,
 ) -> Result<String> {
+    summarize_branch_accounted(p, messages, instructions, cancel, &mut Vec::new())
+}
+pub fn summarize_branch_accounted(
+    p: &mut dyn Provider,
+    messages: &[Message],
+    instructions: &str,
+    cancel: &Cancel,
+    attempts: &mut Vec<Attempt>,
+) -> Result<String> {
     summarize(
         p,
         messages,
@@ -369,8 +370,12 @@ pub fn summarize_branch_with_instructions(
         &summary_prompt(BRANCH_SUMMARY_PROMPT, instructions),
         cancel,
         &mut |_| {},
+        attempts,
+        0,
+        "branch_summary",
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn summarize(
     p: &mut dyn Provider,
     messages: &[Message],
@@ -379,6 +384,9 @@ fn summarize(
     instruction: &str,
     cancel: &Cancel,
     emit: &mut Emit,
+    attempts: &mut Vec<Attempt>,
+    through: usize,
+    purpose: &str,
 ) -> Result<String> {
     let mut chunk = String::new();
     let mut summarize =
@@ -388,7 +396,9 @@ fn summarize(
                 "Prior summary:\n{summary}\nTranscript data:\n{chunk}"
             ))];
             let (next, calls) = recovery::request(cancel, emit, |_| {
-                p.reply(instruction, &input, &[], cancel, &mut |_| {})
+                tracked(p, attempts, through, purpose, &mut |_| {}, |p, events| {
+                    p.reply(instruction, &input, &[], cancel, events)
+                })
             })?;
             anyhow::ensure!(
                 calls.is_empty() && !next.trim().is_empty(),
@@ -431,6 +441,15 @@ impl Message {
         matches!(self, Self::User(_) | Self::Images { .. })
     }
 }
+fn save_summary(store: &mut dyn Store, s: &mut Session, result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => store.save_checkpoint(s),
+        Err(error) => {
+            store.save(s)?;
+            Err(error)
+        }
+    }
+}
 pub fn compact(p: &mut dyn Provider, store: &mut dyn Store, cancel: &Cancel) -> Result<()> {
     compact_with_instructions(p, store, "", cancel)
 }
@@ -447,14 +466,15 @@ pub fn compact_with_instructions(
         return Ok(());
     }
     let prompt = summary_prompt(COMPACTION_PROMPT, instructions);
-    checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {})?;
-    store.save_checkpoint(&mut s)
+    let result = checkpoint(p, &mut s, end, &prompt, cancel, &mut |_| {});
+    save_summary(store, &mut s, result)
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
     Truncated { text: String, retrying: bool },
     Retry { attempt: u32, seconds: u64 },
+    Responder(String),
     Reasoning(String),
     ToolOutput(String),
     Text(String),
@@ -468,6 +488,15 @@ pub enum Event {
 }
 pub type Emit<'a> = dyn FnMut(Event) + 'a;
 pub trait Provider {
+    fn default_model(&self) -> Option<ModelId> {
+        None
+    }
+    fn model(&self) -> Option<ModelId> {
+        None
+    }
+    fn prices(&self) -> Option<TokenPrices> {
+        None
+    }
     fn reply_with_effort(
         &mut self,
         system: &str,
@@ -623,7 +652,12 @@ pub fn turn_message(
     let turn_start = s.history.len();
     let mut retried_length = false;
     s.active = true;
+    if s.model.is_none() {
+        s.model = p.default_model();
+    }
     s.history.push(input);
+    s.preferences
+        .insert(s.history.len(), (s.model.clone(), s.reasoning.clone()));
     store.save(&mut s)?;
     let mut pending_image_exchange = None;
     for _ in 0..64 {
@@ -645,8 +679,8 @@ pub fn turn_message(
             && let end = s.compact_through(keep, (s.token_budget() / 4).min(20000))
             && end > previous
         {
-            checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-            store.save_checkpoint(&mut s)?;
+            let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
+            save_summary(store, &mut s, result)?;
             compacted = true;
         }
         let (text, calls, thought, reading) = loop {
@@ -663,15 +697,27 @@ pub fn turn_message(
             };
             let history = s.projected();
             let reply = recovery::request(cancel, &mut relay, |events| {
-                p.reply_with_effort(
-                    &system,
-                    &history,
-                    &schemas,
-                    cancel,
+                tracked(
+                    p,
+                    &mut s.attempts,
+                    s.history.len(),
+                    "turn",
                     events,
-                    s.reasoning.as_deref(),
+                    |p, events| {
+                        p.reply_with_effort(
+                            &system,
+                            &history,
+                            &schemas,
+                            cancel,
+                            events,
+                            s.reasoning.as_deref(),
+                        )
+                    },
                 )
             });
+            if reply.is_err() {
+                store.save(&mut s)?;
+            }
             match reply {
                 Ok((text, calls)) => break (text, calls, thought, reading),
                 Err(e) if e.is::<LengthStop>() => {
@@ -683,6 +729,12 @@ pub fn turn_message(
                         retrying,
                     };
                     s.history.push(Message::Truncated(partial));
+                    if let Some(a) = s.attempts.last_mut() {
+                        a.through = s.history.len();
+                        if let Some(u) = &mut a.usage {
+                            u.through = a.through;
+                        }
+                    }
                     if let Some(mut usage) = reading {
                         usage.through = s.history.len();
                         usage.checkpoint_through = s.checkpoint.as_ref().map_or(0, |cp| cp.through);
@@ -700,8 +752,8 @@ pub fn turn_message(
                     cancel.check()?;
                     let end = s.compact_through(turn_start, 0);
                     if !compacted && end > previous {
-                        checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-                        store.save_checkpoint(&mut s)?;
+                        let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
+                        save_summary(store, &mut s, result)?;
                         compacted = true;
                     }
                 }
@@ -715,8 +767,8 @@ pub fn turn_message(
                     if end <= previous {
                         return Err(e);
                     }
-                    checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit)?;
-                    store.save_checkpoint(&mut s)?;
+                    let result = checkpoint(p, &mut s, end, COMPACTION_PROMPT, cancel, emit);
+                    save_summary(store, &mut s, result)?;
                     compacted = true;
                 }
                 Err(e) => return Err(e),
@@ -732,11 +784,25 @@ pub fn turn_message(
             s.history.push(Message::Reasoning(thought));
         }
         emit(Event::AssistantComplete(text.clone()));
+        if let Some(id) = s.attempts.last().and_then(|a| a.model.clone()) {
+            s.responders.insert(s.history.len(), id);
+        }
         s.history.push(Message::Assistant {
             text,
             calls: calls.clone(),
         });
+        if let Some(attempt) = s.attempts.last_mut() {
+            attempt.through = s.history.len();
+            if let Some(reading) = &mut attempt.usage {
+                reading.through = attempt.through;
+            }
+        }
         if let Some(mut u) = reading {
+            u.cost = s
+                .attempts
+                .last()
+                .and_then(|a| a.usage.as_ref())
+                .and_then(|u| u.cost);
             u.through = s.history.len();
             u.checkpoint_through = s.checkpoint.as_ref().map_or(0, |cp| cp.through);
             s.usage.push(u);

@@ -374,7 +374,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     imported = run(["--import-session", str(fixture)], "")
     sid = next(json.loads(line)["session_id"] for line in imported if line.startswith("{"))
     assert not requests
-    run(["--print", "--session", str(sid), "continue selected branch"], "")
+    run(["--print", "--session", str(sid), "--provider", "deepseek", "--model", "saved-model", "continue selected branch"], "")
     assert len(requests) == 1
     request = requests.pop()[1]
     assert "Archived Pi system prompt" not in json.dumps(request)
@@ -393,10 +393,9 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert records[1:-2] == original[1:]
     assert records[-2]["parentId"] == "a-answer" and records[-1]["parentId"] == records[-2]["id"]
     assert records[-1]["message"]["content"][0]["text"] == "reviewed"
-    # Imported model metadata survives, but a native reply currently exports
-    # without responder identity. Keep this portability limit visible.
-    assert records[-1]["message"]["provider"] == "panda"
-    assert records[-1]["message"]["model"] == "unknown"
+    # Imported entries retain their responder. The new answer names its one-shot override.
+    assert records[-1]["message"]["provider"] == "deepseek"
+    assert records[-1]["message"]["model"] == "saved-model"
     saved = exported.read_bytes()
     run(["--export-session", str(sid), str(exported)], "", error="creating export")
     assert exported.read_bytes() == saved

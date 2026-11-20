@@ -5,6 +5,8 @@ mod copy;
 mod diagnostics;
 mod html;
 mod markdown;
+mod model_catalog;
+use model_catalog::{Catalog, available_models, scope_effort};
 mod picker;
 mod renderer;
 mod screen;
@@ -30,7 +32,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -52,18 +54,19 @@ fn key_env(provider: &str) -> Result<&'static str> {
         _ => bail!("unknown API-key provider"),
     }
 }
-fn provider_id(input: &str) -> Result<&'static str> {
+fn provider_id(input: &str) -> Result<&str> {
     match input.to_ascii_lowercase().as_str() {
         "1" | "openai" | "codex" | "openai-codex" => Ok("openai-codex"),
         "2" | "deepseek" => Ok("deepseek"),
         "3" | "openrouter" => Ok("openrouter"),
+        _ if model_catalog::valid_provider(input) && input != "github-copilot" => Ok(input),
         _ => bail!("unknown provider: choose OpenAI Codex, DeepSeek or OpenRouter"),
     }
 }
 
 fn canonical_model<'a>(id: &'a str, model: &'a str) -> (&'a str, &'a str) {
     let name = model.rsplit('/').next().unwrap_or(model);
-    if name.to_ascii_lowercase().starts_with("gpt-") {
+    if PROVIDERS.contains(&id) && name.to_ascii_lowercase().starts_with("gpt-") {
         ("openai-codex", name)
     } else {
         (id, model)
@@ -98,6 +101,12 @@ enum Picker {
 
 const PROVIDERS: [&str; 3] = ["openai-codex", "deepseek", "openrouter"];
 fn configured(state: &Path, id: &str) -> Result<bool> {
+    if model_catalog::logged_out(state, id)? {
+        return Ok(false);
+    }
+    if let Some(ep) = Catalog::read(state)?.providers.get(id) {
+        return Ok(ep.key(state, id).is_ok());
+    }
     if subscription(id) {
         return panda_providers::models::codex_configured(state);
     }
@@ -107,6 +116,13 @@ fn configured(state: &Path, id: &str) -> Result<bool> {
     )
 }
 fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Option<u64>)>> {
+    if let Some(ep) = Catalog::read(state)?.providers.get(id) {
+        return Ok(ep
+            .models
+            .iter()
+            .map(|m| (m.id.clone(), Some(m.context_window)))
+            .collect());
+    }
     let path = state.join(format!("catalog-{id}.json"));
     if cached
         && let Ok(data) = fs::read(&path)
@@ -129,6 +145,9 @@ fn model_entries(state: &Path, id: &str, cached: bool) -> Result<Vec<(String, Op
         let mut file = tempfile::NamedTempFile::new_in(state)?;
         serde_json::to_writer(&mut file, &catalogue.output_limits)?;
         file.persist(state.join("catalog-openrouter-output.json"))?;
+        let mut file = tempfile::NamedTempFile::new_in(state)?;
+        serde_json::to_writer(&mut file, &catalogue.prices)?;
+        file.persist(state.join("catalog-openrouter-prices.json"))?;
     }
     if subscription(id) {
         let mut file = tempfile::NamedTempFile::new_in(state)?;
@@ -175,40 +194,39 @@ fn effort_levels(
     Ok(options)
 }
 
-fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option<String>> {
+fn pick_command(
+    state: &Path,
+    cmd: &str,
+    current: (&str, &str),
+    scope: &str,
+) -> Result<Option<String>> {
+    let catalog = Catalog::read(state)?;
+    let ids = catalog.ids();
     if cmd == ":login" {
-        let mut labels = Vec::new();
-        for (id, label) in PROVIDERS.iter().zip([
-            "OpenAI Codex (ChatGPT subscription)",
-            "DeepSeek (API key)",
-            "OpenRouter (API key)",
-        ]) {
-            labels.push(format!(
-                "{label} · {}",
-                if configured(state, id)? {
-                    "configured"
-                } else {
-                    "not configured"
-                }
-            ));
-        }
-        return Ok(picker::choose("Search providers", &labels, 0)?
-            .map(|i| format!(":login {}", PROVIDERS[i])));
+        let labels = ids
+            .iter()
+            .map(|id| {
+                let label = match *id {
+                    "openai-codex" => "OpenAI Codex (ChatGPT subscription)",
+                    "deepseek" => "DeepSeek (API key)",
+                    "openrouter" => "OpenRouter (API key)",
+                    other => other,
+                };
+                Ok(format!(
+                    "{label} · {}",
+                    if configured(state, id)? {
+                        "configured"
+                    } else {
+                        "not configured"
+                    }
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(
+            picker::choose("Search providers", &labels, 0)?.map(|i| format!(":login {}", ids[i]))
+        );
     }
-    let mut models = Vec::new();
-    let mut errors = Vec::new();
-    for id in PROVIDERS {
-        if configured(state, id)? {
-            match model_entries(state, id, true) {
-                Ok(rows) => models.extend(
-                    rows.into_iter()
-                        .filter(|(m, _)| canonical_model(id, m).0 == id)
-                        .map(|(m, _)| (id, m)),
-                ),
-                Err(e) => errors.push(format!("{id}: {e:#}")),
-            }
-        }
-    }
+    let (models, errors) = available_models(state, scope)?;
     ensure!(
         !models.is_empty(),
         "No available models. Use :login to configure a provider. {}",
@@ -216,11 +234,21 @@ fn pick_command(state: &Path, cmd: &str, current: (&str, &str)) -> Result<Option
     );
     let labels = models
         .iter()
-        .map(|(id, m)| format!("{m}  [{id}]"))
+        .map(|(id, m)| {
+            let name = catalog
+                .providers
+                .get(id)
+                .and_then(|ep| ep.model(m).ok())
+                .and_then(|m| m.name.as_deref());
+            name.map_or_else(
+                || format!("{m}  [{id}]"),
+                |name| format!("{name}  {m}  [{id}]"),
+            )
+        })
         .collect::<Vec<_>>();
     let selected = models
         .iter()
-        .position(|(id, m)| (*id, m.as_str()) == current)
+        .position(|(id, m)| (id.as_str(), m.as_str()) == current)
         .unwrap_or(0);
     Ok(picker::choose("Search models", &labels, selected)?
         .map(|i| format!(":model {} {}", models[i].0, models[i].1)))
@@ -237,6 +265,24 @@ fn output_limit(state: &Path, provider: &str, model: &str) -> Result<Option<u64>
     Ok(limits.get(model).copied().filter(|&n| n > 0))
 }
 fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> {
+    ensure!(
+        !model_catalog::logged_out(state, p)?,
+        "{p} is logged out; use :login {p}"
+    );
+    if let Some(ep) = Catalog::read(state)?.providers.get(p) {
+        let model = ep.model(m)?;
+        return Ok(Box::new(
+            Api {
+                key: ep.key(state, p)?,
+                model: m.into(),
+                endpoint: ep.url(),
+            }
+            .configured(
+                Some(model.max_tokens),
+                model.input.iter().any(|i| i == "image"),
+            ),
+        ));
+    }
     if subscription(p) {
         return Ok(Box::new(Subscription {
             provider: p.into(),
@@ -262,16 +308,26 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     ))
 }
 fn login(state: &Path, p: &str, cancel: &Cancel, browser: Option<bool>) -> Result<()> {
+    if let Some(ep) = Catalog::read(state)?.providers.get(p) {
+        let key = ep.key(state, p)?;
+        if !key.is_empty() {
+            let mut file = tempfile::NamedTempFile::new_in(state)?;
+            file.write_all(key.as_bytes())?;
+            file.persist(state.join(format!("{p}.key")))?;
+        }
+        return model_catalog::remove(&state.join(format!("{p}.logged-out")));
+    }
     if subscription(p) {
         let account = Subscription {
             provider: p.into(),
             model: String::new(),
             state: state.into(),
         };
-        return match browser {
+        match browser {
             Some(method) => account.login_with_method(cancel, method),
             None => account.login_with_cancel(cancel),
-        };
+        }?;
+        return model_catalog::remove(&state.join(format!("{p}.logged-out")));
     }
     let var = key_env(p)?;
     let key = std::env::var(var)
@@ -279,6 +335,7 @@ fn login(state: &Path, p: &str, cancel: &Cancel, browser: Option<bool>) -> Resul
     let mut temp = tempfile::NamedTempFile::new_in(state)?;
     temp.write_all(key.trim().as_bytes())?;
     temp.persist(state.join(format!("{p}.key")))?;
+    model_catalog::remove(&state.join(format!("{p}.logged-out")))?;
     println!("Saved {p} credential");
     Ok(())
 }
@@ -288,19 +345,44 @@ fn safe(s: &str) -> String {
         .collect()
 }
 fn usage(s: &Session) -> String {
-    let input: u64 = s.usage.iter().map(|u| u.input).sum();
-    let output: u64 = s.usage.iter().map(|u| u.output).sum();
-    let mut text = format!("↑{input} ↓{output}");
-    if let Some(last) = s.usage.last()
-        && let Some(window) = s.model_window
-    {
-        text.push_str(&format!(" · last input {}/{window}", last.input));
+    let accounted: std::collections::BTreeSet<_> = s
+        .attempts
+        .iter()
+        .filter(|a| a.purpose == "turn" && a.usage.is_some())
+        .map(|a| a.through)
+        .collect();
+    let legacy = s.usage.iter().filter(|u| !accounted.contains(&u.through));
+    let readings = legacy
+        .clone()
+        .chain(s.attempts.iter().filter_map(|a| a.usage.as_ref()));
+    let mut input = 0;
+    let mut output = 0;
+    let mut read = 0;
+    let mut write = 0;
+    let cost: f64 = legacy
+        .clone()
+        .filter_map(|u| u.cost)
+        .chain(s.attempts.iter().filter_map(|a| a.cost))
+        .sum();
+    for u in readings {
+        input += u.input;
+        output += u.output;
+        read += u.cache_read.unwrap_or(0);
+        write += u.cache_write.unwrap_or(0);
     }
-    if s.usage.iter().any(|u| u.cost.is_some()) {
-        text.push_str(&format!(
-            " · reported ${:.4}",
-            s.usage.iter().filter_map(|u| u.cost).sum::<f64>()
-        ));
+    let unknown = s
+        .attempts
+        .iter()
+        .filter(|a| a.cost_source == "unknown")
+        .count()
+        + legacy.filter(|u| u.cost.is_none()).count();
+    let mut text =
+        format!("↑{input} ↓{output} · cache read {read} write {write} · known ${cost:.6}");
+    if unknown > 0 {
+        text.push_str(&format!(" · {unknown} unpriced"));
+    }
+    if let (Some(last), Some(window)) = (s.usage.last(), s.model_window) {
+        text.push_str(&format!(" · last input {}/{window}", last.input));
     }
     text
 }
@@ -312,7 +394,10 @@ fn configure_context(
     keep_recent_tokens: Option<u64>,
 ) -> Result<()> {
     let path = state.join(format!("catalog-{id}.json"));
-    let window = if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
+    let catalog = Catalog::read(state)?;
+    let window = if let Some(ep) = catalog.providers.get(id) {
+        Some(ep.model(model)?.context_window)
+    } else if matches!(id, "deepseek" | "openai-codex" | "openrouter") && path.try_exists()? {
         let rows: Vec<(String, Option<u64>)> = serde_json::from_slice(&fs::read(path)?)?;
         rows.iter().find(|(m, _)| m == model).and_then(|r| r.1)
     } else {
@@ -479,8 +564,32 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--list-models") {
+        ensure!(args.len() <= 2, "usage: panda --list-models [PATTERN]");
+        let state = state_dir()?;
+        let catalog = Catalog::read(&state)?;
+        let (models, errors) = available_models(&state, args.get(1).map_or("", String::as_str))?;
+        for (id, m) in models {
+            if let Some(ep) = catalog.providers.get(&id) {
+                let model = ep.model(&m)?;
+                println!(
+                    "{id}/{m} · {} · context {} · output {} · {}",
+                    model.name.as_deref().unwrap_or(&m),
+                    model.context_window,
+                    model.max_tokens,
+                    model.input.join("+")
+                );
+            } else {
+                println!("{id}/{m}");
+            }
+        }
+        for error in errors {
+            eprintln!("{error}");
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| {
@@ -498,6 +607,13 @@ fn run(
     let mut options = automation::Options::parse(&args, interactive_terminal)?;
     let root = std::env::current_dir()?.canonicalize()?;
     let state = state_dir()?;
+    let catalog = Catalog::read(&state)?;
+    if let Some(id) = &options.provider {
+        ensure!(
+            catalog.ids().contains(&id.as_str()),
+            "unknown provider {id}"
+        );
+    }
     if options.interface == automation::Interface::Terminal {
         terminal_config::load(&state)?;
     }
@@ -676,23 +792,13 @@ fn run(
         .map(|id| Disk::open(&sessions, &root, Some(id)))
         .transpose()?);
     let (mut p, mut model) = initial_model(&selected, &options)?;
-    if !subscription(&p) && key_env(&p).is_err() {
+    if !catalog.ids().contains(&p.as_str()) {
         let warning = "Saved provider is unavailable; choose a supported provider with :model PROVIDER MODEL.";
         if interactive {
             screen.line(Tone::Removed, warning);
         } else {
             eprintln!("{warning}");
         }
-    }
-    if let Some(level) = options.thinking.as_deref()
-        && level != "default"
-    {
-        let levels = effort_levels(&state, &p, &model, false)?;
-        ensure!(
-            levels.iter().any(|s| s == level),
-            "available efforts for {model}: {}",
-            levels.join(", ")
-        );
     }
     if disk.is_none() && !options.no_session {
         let initial = if options.resume {
@@ -716,6 +822,74 @@ fn run(
             &mut memory
         }
     };
+    let mut session = store.load()?;
+    if options.model.is_none() {
+        if let Some(saved) = &session.model {
+            (p, model) = (saved.provider.clone(), saved.model.clone());
+        }
+        if let Some(scope) = &options.scope {
+            let (models, errors) = available_models(&state, scope)?;
+            ensure!(
+                !models.is_empty(),
+                "no available models in scope {scope}. {}",
+                errors.join(", ")
+            );
+            if !models.contains(&(p.clone(), model.clone())) {
+                (p, model) = models[0].clone();
+            }
+            if let Some(effort) = scope_effort(scope, &p, &model)? {
+                session.reasoning = Some(effort);
+            }
+        }
+        if catalog.ids().contains(&p.as_str())
+            && (session.history.is_empty() || options.scope.is_some())
+        {
+            let id = ModelId {
+                provider: p.clone(),
+                model: model.clone(),
+            };
+            if session.model.as_ref() != Some(&id) || session.reasoning != store.load()?.reasoning {
+                session.model = Some(id);
+                store.save(&mut session)?;
+            }
+        }
+    } else if options.provider.is_none()
+        && let Some(saved) = &session.model
+    {
+        p = saved.provider.clone();
+    }
+    if let Some(level) = options.thinking.as_deref()
+        && level != "default"
+    {
+        let levels = effort_levels(&state, &p, &model, false)?;
+        ensure!(
+            levels.iter().any(|s| s == level),
+            "available efforts for {model}: {}",
+            levels.join(", ")
+        );
+    }
+    let persist_default = options.model.is_none();
+    let make_provider = |state: &Path, p: &str, m: &str| -> Result<Box<dyn Provider + Send>> {
+        let configured = Catalog::read(state)?;
+        let prices = if let Some(ep) = configured.providers.get(p) {
+            ep.model(m)?.cost.clone()
+        } else if p == "openrouter" && state.join("catalog-openrouter-prices.json").try_exists()? {
+            let mut rows: std::collections::BTreeMap<String, TokenPrices> =
+                serde_json::from_slice(&fs::read(state.join("catalog-openrouter-prices.json"))?)?;
+            rows.remove(m)
+        } else {
+            None
+        };
+        Ok(Box::new(IdentifiedProvider {
+            persist_default,
+            inner: provider(state, p, m)?,
+            id: ModelId {
+                provider: p.into(),
+                model: m.into(),
+            },
+            prices,
+        }))
+    };
     configure_context(store, &state, &p, &model, settings.keep)?;
     let cancel = Cancel::default();
     let signal = cancel.clone();
@@ -725,12 +899,19 @@ fn run(
             db: store,
             session_id,
             tools,
-            connect: &|| provider(&state, &p, &model),
+            connect: &|| make_provider(&state, &p, &model),
             root: &root,
             cancel: &cancel,
         }
         .run(options);
     }
+    let restore_model = |db: &mut Disk| -> Result<(String, String)> {
+        let s = db.load()?;
+        if let Some(id) = &s.model {
+            return Ok((id.provider.clone(), id.model.clone()));
+        }
+        initial_model(&selected, &automation::Options::default())
+    };
     let mut db = disk.context("terminal mode requires a saved session")?;
     let mut mode = show(&db, &mut screen)?;
     screen.line(
@@ -741,6 +922,7 @@ fn run(
             HELP
         },
     );
+    let mut scope = options.scope.clone().unwrap_or_default();
     let mut picker = None;
     let mut catalogue: Vec<(String, String)> = Vec::new();
     let mut initial_prompt = (!options.prompt.is_empty()).then_some(options.prompt);
@@ -819,9 +1001,32 @@ fn run(
                 }
                 _ => line,
             };
+            let cycled;
+            let line = if allow_commands && matches!(line, ":cycle" | ":cycle prev" | ":cycle next")
+            {
+                let (models, errors) = available_models(&state, &scope)?;
+                ensure!(
+                    !models.is_empty(),
+                    "no available models in scope {scope}. {}",
+                    errors.join(", ")
+                );
+                let pos = models.iter().position(|(id, m)| id == &p && m == &model);
+                let n = models.len();
+                let next = if line == ":cycle prev" {
+                    pos.map_or(n - 1, |i| (i + n - 1) % n)
+                } else {
+                    pos.map_or(0, |i| (i + 1) % n)
+                };
+                let (id, m) = &models[next];
+                let effort = scope_effort(&scope, id, m)?.unwrap_or_default();
+                cycled = format!(":model {id} {m} {effort}");
+                &cycled
+            } else {
+                line
+            };
             let chosen;
             let line = if allow_commands && interactive && matches!(line, ":login" | ":model") {
-                let Some(cmd) = pick_command(&state, line, (&p, &model))? else {
+                let Some(cmd) = pick_command(&state, line, (&p, &model), &scope)? else {
                     return Ok(());
                 };
                 chosen = cmd;
@@ -930,6 +1135,7 @@ fn run(
                     screen.clipboard = None;
                     screen.clear();
                     screen.footer.usage.clear();
+                    (p, model) = restore_model(&mut db)?;
                     configure_context(&mut db, &state, &p, &model, settings.keep)?;
                     mode = show(&db, &mut screen)?;
                 }
@@ -978,19 +1184,32 @@ fn run(
                                     String::new()
                                 };
                                 cancel.reset();
-                                db.navigate_summarized(node, &cancel, |messages| {
+                                let mut attempts = Vec::new();
+                                let result = db.navigate_summarized(node, &cancel, |messages| {
                                     eprintln!("Summarizing branch… Ctrl-C to cancel");
-                                    summarize_branch_with_instructions(
-                                        provider(&state, &p, &model)?.as_mut(),
+                                    summarize_branch_accounted(
+                                        make_provider(&state, &p, &model)?.as_mut(),
                                         messages,
                                         &instructions,
                                         &cancel,
+                                        &mut attempts,
                                     )
-                                })?
+                                });
+                                if !attempts.is_empty() {
+                                    let mut s = db.load()?;
+                                    for a in &mut attempts {
+                                        a.through = s.history.len();
+                                    }
+                                    s.attempts.extend(attempts);
+                                    db.save(&mut s)?;
+                                }
+                                result?
                             }
                         };
                     };
                     screen.clear();
+                    (p, model) = restore_model(&mut db)?;
+                    configure_context(&mut db, &state, &p, &model, settings.keep)?;
                     mode = show(&db, &mut screen)?;
                     let text = match draft {
                         Some(Message::User(text)) => {
@@ -1043,7 +1262,7 @@ fn run(
                     if first == ":compact" {
                         cancel.reset();
                         compact_with_instructions(
-                            provider(&state, &p, &model)?.as_mut(),
+                            make_provider(&state, &p, &model)?.as_mut(),
                             &mut db,
                             &line[first.len()..],
                             &cancel,
@@ -1105,6 +1324,7 @@ fn run(
                         }
                         screen.clear();
                         screen.footer.usage.clear();
+                        (p, model) = restore_model(&mut db)?;
                         configure_context(&mut db, &state, &p, &model, settings.keep)?;
                         mode = show(&db, &mut screen)?
                     }
@@ -1118,6 +1338,75 @@ fn run(
                         "Choose a model provider"
                     };
                     screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter. Enter a number or name (:cancel to close)."));
+                }
+                ":usage" => {
+                    let s = db.load()?;
+                    screen.line(Tone::Dim, &usage(&s));
+                    for (i, a) in s.attempts.iter().enumerate() {
+                        let id = a.model.as_ref().map_or_else(
+                            || "unknown model".into(),
+                            |id| format!("{}/{}", id.provider, id.model),
+                        );
+                        let cost = a
+                            .cost
+                            .map_or_else(|| "unknown".into(), |v| format!("${v:.6}"));
+                        screen.line(
+                            Tone::Dim,
+                            &format!(
+                                "{} · {} · {} · {id} · {cost} ({})",
+                                i + 1,
+                                a.purpose,
+                                a.outcome,
+                                a.cost_source
+                            ),
+                        );
+                    }
+                }
+                ":scope" => {
+                    let new = line[first.len()..].trim();
+                    if !new.is_empty() {
+                        let filter = if new == "all" { "" } else { new };
+                        let (rows, _) = available_models(&state, filter)?;
+                        ensure!(!rows.is_empty(), "no available models in scope {filter}");
+                        scope = filter.into();
+                    }
+                    screen.line(
+                        Tone::Dim,
+                        &format!(
+                            "Model scope {}",
+                            if scope.is_empty() { "all" } else { &scope }
+                        ),
+                    );
+                }
+                ":auth" | ":logout" => {
+                    let ids = if let Some(raw) = words.next() {
+                        vec![provider_id(raw)?]
+                    } else if first == ":logout" {
+                        vec![p.as_str()]
+                    } else {
+                        catalog.ids()
+                    };
+                    for id in ids {
+                        ensure!(catalog.ids().contains(&id), "unknown provider {id}");
+                        if first == ":logout" {
+                            fs::write(state.join(format!("{id}.logged-out")), b"")?;
+                            model_catalog::remove(&state.join(format!("{id}.key")))?;
+                            if subscription(id) {
+                                panda_providers::models::logout(&state)?;
+                            }
+                        }
+                        screen.line(
+                            Tone::Dim,
+                            &format!(
+                                "{id} · {}",
+                                if configured(&state, id)? {
+                                    "configured"
+                                } else {
+                                    "not configured"
+                                }
+                            ),
+                        );
+                    }
                 }
                 ":login" => {
                     cancel.reset();
@@ -1233,7 +1522,25 @@ fn run(
                             }
                         };
                         let (id, m) = canonical_model(id, m);
-                        ensure!(subscription(id) || key_env(id).is_ok(), "unknown provider");
+                        ensure!(catalog.ids().contains(&id), "unknown provider");
+                        if let Some(ep) = catalog.providers.get(id) {
+                            ep.model(m)?;
+                        }
+                        let mut session = db.load()?;
+                        if let Some(effort) = words.next() {
+                            ensure!(
+                                effort_levels(&state, id, m, true)?
+                                    .iter()
+                                    .any(|v| v == effort),
+                                "unsupported thinking effort {effort}"
+                            );
+                            session.reasoning = (effort != "default").then(|| effort.to_owned());
+                        }
+                        session.model = Some(ModelId {
+                            provider: id.into(),
+                            model: m.into(),
+                        });
+                        db.save(&mut session)?;
                         let mut temp = tempfile::NamedTempFile::new_in(&state)?;
                         serde_json::to_writer(&mut temp, &(id, m))?;
                         temp.persist(&selected)?;
@@ -1336,7 +1643,7 @@ fn run(
                     bail!("unknown command: {HELP}")
                 }
                 _ => {
-                    let mut engine = provider(&state, &p, &model)?;
+                    let mut engine = make_provider(&state, &p, &model)?;
                     cancel.reset();
                     let mut input = if let Some(mut urls) = screen.recalled_images.take() {
                         // The saved message already includes its resolved files and skill text.

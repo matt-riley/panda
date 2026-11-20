@@ -48,6 +48,7 @@ pub(super) fn schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS tree_nodes (
         id INTEGER PRIMARY KEY, session INTEGER NOT NULL, parent INTEGER NOT NULL,
         depth INTEGER NOT NULL, message TEXT NOT NULL, usage TEXT, checkpoint TEXT);
+        CREATE TABLE IF NOT EXISTS tree_models(node INTEGER PRIMARY KEY,responder TEXT,preference TEXT,attempts TEXT);
         CREATE INDEX IF NOT EXISTS tree_session ON tree_nodes(session);
         CREATE TABLE IF NOT EXISTS tree_heads(session INTEGER PRIMARY KEY, tip INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS pi_context_edits(node INTEGER PRIMARY KEY,start INTEGER NOT NULL,end INTEGER NOT NULL,replacement TEXT NOT NULL);",
@@ -86,6 +87,23 @@ pub(super) fn archive(conn: &Connection, id: i64, session: &Session) -> Result<i
     let path = stmt
         .query_map([id, tip], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (&index, model) in &session.responders {
+        if let Some(node) = path.get(index) {
+            conn.execute("INSERT INTO tree_models(node,responder) VALUES(?,?) ON CONFLICT(node) DO UPDATE SET responder=excluded.responder",params![node,serde_json::to_string(model)?])?;
+        }
+    }
+    for (&through, selection) in &session.preferences {
+        if let Some(node) = through.checked_sub(1).and_then(|idx| path.get(idx)) {
+            conn.execute(
+                "INSERT INTO tree_models(node,preference) VALUES(?,?) ON CONFLICT(node) DO NOTHING",
+                params![node, serde_json::to_string(selection)?],
+            )?;
+            conn.execute(
+                "UPDATE tree_models SET preference=coalesce(preference,?) WHERE node=?",
+                params![serde_json::to_string(selection)?, node],
+            )?;
+        }
+    }
     for usage in &session.usage {
         if let Some(node) = usage.through.checked_sub(1).and_then(|i| path.get(i)) {
             conn.execute(
@@ -116,6 +134,38 @@ pub(super) fn archive(conn: &Connection, id: i64, session: &Session) -> Result<i
             }
         }
     }
+    if tip != 0 {
+        let pref = serde_json::to_string(&(&session.model, &session.reasoning))?;
+        let previous: Option<String> = conn.query_row(&(ANCESTORS.to_owned()+"SELECT m.preference FROM path JOIN tree_models m ON m.node=path.id WHERE m.preference IS NOT NULL ORDER BY m.node DESC LIMIT 1"),[id,tip],|r|r.get(0)).optional()?;
+        if previous.as_deref() != Some(&pref)
+            && (previous.is_some() || session.model.is_some() || session.reasoning.is_some())
+        {
+            if session.history.len() == depth {
+                conn.execute(
+                    "INSERT INTO tree_nodes(session,parent,depth,message) VALUES(?,?,?,'null')",
+                    params![id, tip, depth],
+                )?;
+                tip = conn.last_insert_rowid();
+            }
+            conn.execute("INSERT INTO tree_models(node,preference) VALUES(?,?) ON CONFLICT(node) DO UPDATE SET preference=excluded.preference",params![tip,pref])?;
+        }
+        // Only append attempts that are absent from this path. A new checkpoint
+        // or a late branch summary can carry a charge at an existing history depth.
+        let archived:usize = conn.query_row(&(ANCESTORS.to_owned()+"SELECT coalesce(sum(json_array_length(m.attempts)),0) FROM path JOIN tree_models m ON m.node=path.id"),[id,tip],|r|r.get(0))?;
+        for attempt in session.attempts.iter().skip(archived) {
+            let node = if attempt.through == session.history.len() {
+                tip
+            } else {
+                attempt
+                    .through
+                    .checked_sub(1)
+                    .and_then(|idx| path.get(idx))
+                    .copied()
+                    .unwrap_or(tip)
+            };
+            conn.execute("INSERT INTO tree_models(node,attempts) VALUES(?1,json_array(json(?2))) ON CONFLICT(node) DO UPDATE SET attempts=json_insert(coalesce(attempts,'[]'),'$[#]',json(?2))",params![node,serde_json::to_string(attempt)?])?;
+        }
+    }
     set_head(conn, id, tip)?;
     Ok(tip)
 }
@@ -131,16 +181,38 @@ pub(super) fn restore_path(
     tip: i64,
     session: &mut Session,
 ) -> Result<()> {
+    session.model = None;
+    session.reasoning = None;
+    session.preferences.clear();
+    session.responders.clear();
+    session.attempts.clear();
     session.history.clear();
     session.context_edits.clear();
     session.usage.clear();
     session.checkpoint = None;
     {
-        let mut stmt=conn.prepare(&(ANCESTORS.to_owned()+"SELECT n.message,n.usage,n.checkpoint,e.start,e.end,e.replacement FROM path p JOIN tree_nodes n ON n.id=p.id LEFT JOIN pi_context_edits e ON e.node=n.id ORDER BY n.id"))?;
+        let mut stmt=conn.prepare(&(ANCESTORS.to_owned()+"SELECT n.message,n.usage,n.checkpoint,e.start,e.end,e.replacement,m.responder,m.preference,m.attempts FROM path p JOIN tree_nodes n ON n.id=p.id LEFT JOIN tree_models m ON m.node=p.id LEFT JOIN pi_context_edits e ON e.node=n.id ORDER BY n.id"))?;
         let mut rows = stmt.query([id, tip])?;
         while let Some(r) = rows.next()? {
             if let Some(message) = serde_json::from_str(&r.get::<_, String>(0)?)? {
                 session.history.push(message);
+            }
+            if let Some(raw) = r.get::<_, Option<String>>(6)?
+                && let Some(i) = session.history.len().checked_sub(1)
+            {
+                session.responders.insert(i, serde_json::from_str(&raw)?);
+            }
+            if let Some(raw) = r.get::<_, Option<String>>(7)? {
+                (session.model, session.reasoning) = serde_json::from_str(&raw)?;
+                session.preferences.insert(
+                    session.history.len(),
+                    (session.model.clone(), session.reasoning.clone()),
+                );
+            }
+            if let Some(raw) = r.get::<_, Option<String>>(8)? {
+                session
+                    .attempts
+                    .extend(serde_json::from_str::<Vec<panda_core::Attempt>>(&raw)?);
             }
             if let Some(start) = r.get::<_, Option<usize>>(3)? {
                 let end: usize = r.get(4)?;
@@ -389,6 +461,74 @@ mod tests {
         Message::Assistant {
             text: text.into(),
             calls: vec![],
+        }
+    }
+
+    #[test]
+    fn branch_models_thinking_and_attempts_restore_on_each_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Disk::open(dir.path(), dir.path(), None).unwrap();
+        let append = |db: &mut Disk, model: &str, effort: &str| {
+            let id = panda_core::ModelId {
+                provider: "fixture".into(),
+                model: model.into(),
+            };
+            let mut s = db.load().unwrap();
+            s.model = Some(id.clone());
+            s.reasoning = Some(effort.into());
+            s.history.push(Message::User(format!("ask {model}")));
+            s.preferences
+                .insert(s.history.len(), (s.model.clone(), s.reasoning.clone()));
+            s.responders.insert(s.history.len(), id.clone());
+            s.history.push(answer(model));
+            s.attempts.push(panda_core::Attempt {
+                through: s.history.len(),
+                model: Some(id),
+                purpose: "turn".into(),
+                outcome: "ok".into(),
+                usage: None,
+                cost: None,
+                cost_source: "unknown".into(),
+                timestamp: 1,
+            });
+            db.save(&mut s).unwrap();
+            db.tree()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.current)
+                .unwrap()
+                .id
+        };
+        let common = append(&mut db, "root", "low");
+        let left = append(&mut db, "left", "medium");
+        db.navigate(common).unwrap();
+        let right = append(&mut db, "right", "high");
+        let id = db.id();
+        drop(db);
+        let mut db = Disk::open(dir.path(), dir.path(), Some(id)).unwrap();
+        for (node, name, effort) in [
+            (left, "left", "medium"),
+            (right, "right", "high"),
+            (left, "left", "medium"),
+        ] {
+            db.navigate(node).unwrap();
+            let s = db.load().unwrap();
+            assert_eq!(s.model.unwrap().model, name);
+            assert_eq!(s.reasoning.as_deref(), Some(effort));
+            assert_eq!(
+                s.responders
+                    .values()
+                    .map(|id| id.model.as_str())
+                    .collect::<Vec<_>>(),
+                ["root", name]
+            );
+            assert_eq!(
+                s.attempts
+                    .iter()
+                    .map(|a| a.model.as_ref().unwrap().model.as_str())
+                    .collect::<Vec<_>>(),
+                ["root", name]
+            );
         }
     }
 

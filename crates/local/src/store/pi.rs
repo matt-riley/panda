@@ -216,6 +216,51 @@ fn import_entry(
             params![pos.node, last.then_some(id), last.then_some(line)],
         )?;
     }
+    let responder = if e["message"]["role"] == "assistant" {
+        e["message"]["provider"]
+            .as_str()
+            .zip(e["message"]["model"].as_str())
+            .filter(|(p, m)| *p != "panda" || *m != "unknown")
+            .map(|(p, m)| panda_core::ModelId {
+                provider: p.into(),
+                model: m.into(),
+            })
+    } else {
+        None
+    };
+    if matches!(kind, "model_change" | "thinking_level_change") || responder.is_some() {
+        let previous: Option<String> = conn.query_row(&(tree::ANCESTORS.to_owned()+"SELECT preference FROM path JOIN tree_models m ON m.node=path.id WHERE preference IS NOT NULL ORDER BY m.node DESC LIMIT 1"),[sid,pos.node],|r|r.get(0)).optional()?;
+        let mut preference: (Option<panda_core::ModelId>, Option<String>) = previous
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()?
+            .unwrap_or_default();
+        match kind {
+            "model_change" => {
+                if let Some((p, m)) = e["provider"].as_str().zip(e["modelId"].as_str()) {
+                    preference.0 = Some(panda_core::ModelId {
+                        provider: p.into(),
+                        model: m.into(),
+                    });
+                }
+            }
+            "thinking_level_change" => {
+                preference.1 = e["thinkingLevel"]
+                    .as_str()
+                    .filter(|v| *v != "off" && *v != "default")
+                    .map(str::to_owned)
+            }
+            _ if preference.0.is_none() => preference.0 = responder.clone(),
+            _ => {}
+        }
+        conn.execute(
+            "INSERT INTO tree_models(node,preference,responder) VALUES(?,?,?)",
+            params![
+                pos.node,
+                serde_json::to_string(&preference)?,
+                responder.as_ref().map(serde_json::to_string).transpose()?
+            ],
+        )?;
+    }
     if let Some((target, replacement)) = edit {
         conn.execute(
             "INSERT INTO pi_context_edits VALUES (?,?,?,?)",

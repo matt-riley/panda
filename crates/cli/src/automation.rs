@@ -42,6 +42,7 @@ pub struct Options {
     pub no_session: bool,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub scope: Option<String>,
     pub thinking: Option<String>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
@@ -160,6 +161,14 @@ impl Options {
                     } else {
                         out.append_system_prompt.push(value.clone());
                     }
+                }
+                "--models" => {
+                    out.scope = Some(
+                        it.next()
+                            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                            .context("expected comma-separated model patterns after --models")?
+                            .clone(),
+                    )
                 }
                 "--provider" | "--model" | "--thinking" => {
                     let value = it
@@ -490,6 +499,15 @@ struct FixedEffort {
     level: Option<String>,
 }
 impl Provider for FixedEffort {
+    fn default_model(&self) -> Option<ModelId> {
+        self.provider.default_model()
+    }
+    fn model(&self) -> Option<ModelId> {
+        self.provider.model()
+    }
+    fn prices(&self) -> Option<TokenPrices> {
+        self.provider.prices()
+    }
     fn reply(
         &mut self,
         system: &str,
@@ -548,7 +566,7 @@ mod tests {
     fn rejects_invalid_one_shot_options() {
         for args in [
             "--print --provider deepseek",
-            "--print --provider unknown --model foo",
+            "--print --provider ../invalid --model foo",
             "--print --model",
             "--print --thinking --no-session",
             "--no-session --continue --mode json",

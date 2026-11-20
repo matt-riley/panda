@@ -76,7 +76,7 @@ pub struct Vim(Arc<Mutex<State>>);
 
 impl Vim {
     pub fn new(
-        insert: reedline::Keybindings,
+        mut insert: reedline::Keybindings,
         mut normal: reedline::Keybindings,
         visual: reedline::Keybindings,
     ) -> Self {
@@ -85,6 +85,13 @@ impl Vim {
                 modifiers,
                 KeyCode::Char(':'),
                 ReedlineEvent::ExecuteHostCommand("command-line".into()),
+            );
+        }
+        for bindings in [&mut insert, &mut normal] {
+            bindings.add_binding(
+                KeyModifiers::CONTROL,
+                KeyCode::Char('p'),
+                ReedlineEvent::ExecuteHostCommand(":cycle".into()),
             );
         }
         Self(Arc::new(Mutex::new(State {

@@ -221,7 +221,12 @@ def test_manual_compaction(repo, state):
         send(":compact Fail this summary\r")
         expect("summary unavailable")
         expect("deepseek-flash")
-        assert saved_session(state) == before_failure
+        failed_state = saved_session(state)
+        failed_attempt = failed_state["attempts"][-1]
+        assert failed_attempt["purpose"] == "compaction" and failed_attempt["outcome"] == "failed"
+        assert failed_state["attempts"][:-1] == before_failure["attempts"]
+        assert {k:v for k,v in failed_state.items() if k not in ("attempts", "revision")} == {
+            k:v for k,v in before_failure.items() if k not in ("attempts", "revision")}
         send(":compact\r")
         expect("4 messages")
         expect("deepseek-flash")
