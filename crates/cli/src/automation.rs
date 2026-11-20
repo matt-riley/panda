@@ -18,10 +18,19 @@ pub enum Interface {
     Json,
     Rpc,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CodemodeExposure {
+    #[default]
+    Off,
+    Alongside,
+    Only,
+}
+
 #[derive(Default)]
 pub struct Options {
     pub interface: Interface,
-    pub codemode: bool,
+    pub codemode: CodemodeExposure,
     pub tools: Option<BTreeSet<String>>,
     pub resume: bool,
     pub session_id: Option<i64>,
@@ -40,7 +49,12 @@ impl Options {
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "--codemode" => out.codemode = true,
+                "--codemode" => {
+                    if out.codemode == CodemodeExposure::Off {
+                        out.codemode = CodemodeExposure::Alongside;
+                    }
+                }
+                "--codemode-only" => out.codemode = CodemodeExposure::Only,
                 "--tools" | "--no-tools" => {
                     ensure!(out.tools.is_none(), "specify --tools or --no-tools once");
                     let mut names = BTreeSet::new();
@@ -126,7 +140,8 @@ impl Options {
             out.interface != Interface::Rpc || out.prompt.is_empty(),
             "RPC reads requests on stdin"
         );
-        let one_shot = out.no_session
+        let one_shot = out.codemode == CodemodeExposure::Only
+            || out.no_session
             || out.session_id.is_some()
             || out.session_dir.is_some()
             || out.model.is_some()
@@ -160,7 +175,15 @@ impl Options {
             "--provider requires --model"
         );
         if let Some(names) = &mut out.tools {
-            out.codemode = names.remove("codemode");
+            let only = out.codemode == CodemodeExposure::Only && !names.is_empty();
+            let listed = names.remove("codemode");
+            out.codemode = if only {
+                CodemodeExposure::Only
+            } else if listed {
+                CodemodeExposure::Alongside
+            } else {
+                CodemodeExposure::Off
+            };
         }
         Ok(out)
     }
@@ -468,6 +491,8 @@ mod tests {
             "--print --session-dir one --session-dir two",
             "--mode rpc --model foo",
             "--no-session",
+            "--codemode-only",
+            "--mode rpc --codemode-only",
             "--tools read",
             "--mode rpc --no-tools",
             "--print --tools",
@@ -498,6 +523,30 @@ mod tests {
     }
 
     proptest::proptest! {
+        #[test]
+        fn codemode_only_accepts_nested_selections(
+            include_codemode in proptest::bool::ANY, read in proptest::bool::ANY,
+            search in proptest::bool::ANY, selection_first in proptest::bool::ANY,
+        ) {
+            let helpers: BTreeSet<_> = [("read", read), ("search", search)]
+                .into_iter().filter(|(_, enabled)| *enabled).map(|(name, _)| name.to_owned()).collect();
+            let mut names = helpers.clone();
+            if include_codemode { names.insert("codemode".into()); }
+            let mut args = if names.is_empty() {
+                vec!["--no-tools".into()]
+            } else {
+                vec!["--tools".into(), names.iter().cloned().collect::<Vec<_>>().join(",")]
+            };
+            if selection_first { args.push("--codemode-only".into()); }
+            else { args.insert(0, "--codemode-only".into()); }
+            args.push("prompt".into());
+            let options = Options::parse(&args, true).unwrap();
+            proptest::prop_assert!(matches!(options.interface, Interface::Print));
+            let expected = if names.is_empty() { CodemodeExposure::Off } else { CodemodeExposure::Only };
+            proptest::prop_assert_eq!(options.codemode, expected);
+            proptest::prop_assert_eq!(options.tools, Some(helpers));
+        }
+
         #[test]
         fn inline_prompts_preserve_text(text in r"[^\x00]{0,650}") {
             // A single path component longer than NAME_MAX is still a valid inline prompt.

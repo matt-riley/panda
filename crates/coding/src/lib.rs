@@ -3,7 +3,7 @@ use panda_core::*;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// A per-invocation restriction applied before any optional tool composition.
+/// Restricts both declarations and dispatch on the wrapped toolset.
 pub struct SelectedTools<'a> {
     inner: &'a (dyn Toolset + Sync),
     names: BTreeSet<String>,
