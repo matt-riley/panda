@@ -108,6 +108,22 @@ fn native_workspace_enforces_policy() {
         );
         assert!(!root.join("alias").exists(), "{path}");
     }
+    for dir in ["one/.agents", "one/two/.pi"] {
+        let skill = format!("{dir}/skills/sample/SKILL.md");
+        let file = root.join(&skill);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "original").unwrap();
+        assert!(run("write", json!({"path":skill,"text":"changed"})).is_err());
+        let new_skill = format!("{dir}/skills/new");
+        assert!(run("shell", json!({"command":format!("mkdir {new_skill}")})).is_err());
+        assert!(!root.join(&new_skill).exists());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+        run(
+            "write",
+            json!({"path": format!("{dir}/skills-notes"), "text":"ordinary"}),
+        )
+        .unwrap();
+    }
     assert!(run("shell", json!({"command":"ln ../private hard-link"})).is_err());
     assert!(!root.join("hard-link").exists());
     assert_eq!(std::fs::read_to_string(private).unwrap(), "sentinel");

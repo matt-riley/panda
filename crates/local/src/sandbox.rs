@@ -20,6 +20,20 @@ pub struct Native {
     scratch: tempfile::TempDir,
     toolchains: Vec<PathBuf>,
 }
+fn private_scratch(project: &Path, state: &Path) -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    // TMPDIR may itself be inside the checkout. Keep scratch out of the workspace grant.
+    let temp = std::env::temp_dir().canonicalize()?;
+    let parent = if temp.starts_with(project) {
+        state
+    } else {
+        &temp
+    };
+    Ok(tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)?)
+}
+
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
@@ -54,11 +68,12 @@ impl Native {
                 toolchains.push(dir);
             }
         }
+        let scratch = private_scratch(crate::resources::project_root(&root), &state)?;
         Ok(Self {
             root,
             mcp: Default::default(),
             worker: worker.canonicalize()?,
-            scratch: tempfile::tempdir()?,
+            scratch,
             toolchains,
         })
     }
@@ -74,14 +89,14 @@ impl Native {
         );
         Ok(dir)
     }
-    fn profile(&self, workspace: &Path, write: bool) -> Result<String> {
+    fn profile(&self, workspace: &Path, scratch: &Path, write: bool) -> Result<String> {
         let quoted = |p: &Path| -> Result<String> {
             Ok(serde_json::to_string(
                 p.to_str().context("non UTF-8 sandbox path")?,
             )?)
         };
         let root = quoted(workspace)?;
-        let scratch = quoted(&self.scratch.path().canonicalize()?)?;
+        let scratch = quoted(scratch)?;
         let worker = quoted(&self.worker)?;
         let mut rules = format!(
             r#"(version 1)(deny default)(import "dyld-support.sb")
@@ -103,34 +118,42 @@ impl Native {
             let path = quoted(&workspace.join(name))?;
             rules.push_str(&format!("(deny file-write* file-link (subpath {path}))"))
         }
+        // A later launch in a subdirectory discovers its ancestor skill directories.
+        // Protect the container names as well so they cannot be replaced by rename.
+        rules.push_str(r##"(deny file-write* file-link
+            (regex #"/[.]([aA][gG][eE][nN][tT][sS]|[pP][iI])($|/[sS][kK][iI][lL][lL][sS]($|/))"))"##);
         Ok(rules)
     }
     fn command(&self, cmd: &Path, args: &[&str], write: bool) -> Result<Command> {
-        self.command_in(&self.root, cmd, args, write)
+        self.command_in(&self.root, self.scratch.path(), cmd, args, write)
     }
     pub(crate) fn project_server_command(
         &self,
         workspace: &Path,
         cmd: &Path,
         args: &[&str],
-    ) -> Result<Command> {
+    ) -> Result<(Command, tempfile::TempDir)> {
+        let state = state_dir()?;
         ensure!(
-            !overlaps(workspace, &state_dir()?)
+            !overlaps(workspace, &state)
                 && !Path::new(&std::env::var_os("HOME").context("missing HOME")?)
                     .canonicalize()?
                     .starts_with(workspace),
             "workspace overlaps private state or home"
         );
-        self.command_in(workspace, cmd, args, false)
+        let scratch = private_scratch(workspace, &state)?;
+        let command = self.command_in(workspace, scratch.path(), cmd, args, false)?;
+        Ok((command, scratch))
     }
     fn command_in(
         &self,
         workspace: &Path,
+        scratch: &Path,
         cmd: &Path,
         args: &[&str],
         write: bool,
     ) -> Result<Command> {
-        let scratch = self.scratch.path().canonicalize()?;
+        let scratch = scratch.canonicalize()?;
         let bins = self
             .toolchains
             .iter()
@@ -141,7 +164,7 @@ impl Native {
         let path = std::env::join_paths(bins)?;
         let mut proc = Command::new("/usr/bin/sandbox-exec");
         proc.arg("-p")
-            .arg(self.profile(workspace, write)?)
+            .arg(self.profile(workspace, &scratch, write)?)
             .arg(cmd)
             .args(args)
             .current_dir(workspace)
@@ -305,4 +328,38 @@ fn private_dir(p: &Path, label: &str) -> Result<PathBuf> {
         "{label} must be a private directory owned by the current user (0700)"
     );
     Ok(p.canonicalize()?)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires native macOS Seatbelt"]
+    fn project_server_can_write_only_its_own_scratch() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let native = Native::new(workspace.path(), &std::env::current_exe()?)?;
+        let (_, peer) = native.project_server_command(&native.root, Path::new("/bin/true"), &[])?;
+        let (mut server, own) = native.project_server_command(
+            &native.root,
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                r#"touch "$HOME/own" && ! touch "$1/foreign" && ! touch "$2/foreign""#,
+                "probe",
+                native.scratch.path().to_str().unwrap(),
+                peer.path().to_str().unwrap(),
+            ],
+        )?;
+        let result = server.output()?;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(own.path().join("own").is_file());
+        assert!(!native.scratch.path().join("foreign").exists());
+        assert!(!peer.path().join("foreign").exists());
+        Ok(())
+    }
 }

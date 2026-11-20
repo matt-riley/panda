@@ -120,19 +120,22 @@ def exercise(root, port):
 use strict;
 use JSON::PP;
 $|=1;
+open(my $marker, ">", "$ENV{HOME}/server-marker") or die "scratch unavailable";
+close $marker;
 while (<STDIN>) {
     my $q=decode_json($_);
     next unless exists $q->{id};
     my $method=$q->{method};
     my $r=$method eq "initialize" ? {protocolVersion=>"2025-06-18",capabilities=>{tools=>{}},serverInfo=>{name=>"sentinel",version=>"1"}} :
         $method eq "tools/list" ? {tools=>[{name=>"double",inputSchema=>{type=>"object",properties=>{n=>{type=>"integer"}},required=>["n"]}}]} :
-        {content=>[{type=>"text",text=>"sentinel"}],structuredContent=>{value=>2*$q->{params}{arguments}{n},pid=>$$}};
+        {content=>[{type=>"text",text=>"sentinel"}],structuredContent=>{value=>2*$q->{params}{arguments}{n},pid=>$$,home=>$ENV{HOME},tmp=>$ENV{TMPDIR}}};
     print encode_json({jsonrpc=>"2.0",id=>$q->{id},result=>$r}),"\n";
 }
 ''')
-    config = {"mcpServers":{"stdio":{"command":"/usr/bin/perl","args":["fixture.pl"],
-                                     "readOnlyTools":["double"]},"http":{"url":base+"/mcp"}}}
-    (repo/".panda/mcp.json").write_text(json.dumps(config))
+    stdio = {"command":"/usr/bin/perl","args":["fixture.pl"],"readOnlyTools":["double"]}
+    project_config = repo/".panda/mcp.json"
+    project_config.write_text(json.dumps({"mcpServers":{"stdio":stdio,"peer":stdio}}))
+    http_config = json.dumps({"mcpServers":{"http":{"url":base+"/mcp"}}})
 
     def schemas():
         run("--print","--no-session","inventory")
@@ -144,6 +147,17 @@ while (<STDIN>) {
     assert "denied" in run("--trust") and "mcp_stdio_double" not in schemas() and not mcp_messages
     run("--trust","allow",cwd=link)
     assert "allowed" in run("--trust")
+    assert {"mcp_stdio_double","mcp_peer_double"} <= schemas()
+    # Simulate a new config revision in an already trusted checkout.
+    project_config.write_text(http_config)
+    run("--print","--no-session","inventory",error="project MCP configuration supports only local stdio")
+    assert not mcp_messages
+    for name in ("HOME", "TMPDIR"):
+        project_config.write_text(json.dumps({"mcpServers":{"stdio":dict(stdio, env={name:str(repo)})}}))
+        run("--print","--no-session","inventory",error="Panda sets HOME and TMPDIR")
+    project_config.write_text(json.dumps({"mcpServers":{"stdio":stdio,"peer":stdio}}))
+    personal_config = state/"mcp.json"
+    personal_config.write_text(http_config)
     assert {"mcp_stdio_double","mcp_http_resources_list","mcp_http_resources_templates","mcp_http_resources_read"} <= schemas()
     assert mcp_messages[-1][0]=="DELETE"
 
@@ -153,6 +167,23 @@ while (<STDIN>) {
         message=wire[-1]["messages"][-1]
         assert message["role"]=="tool",message
         return message["content"]
+
+    chat_calls.extend([("mcp_stdio_double",{"n":1}),("mcp_peer_double",{"n":1}),
+                       ("shell",{"command":'test ! -e "$HOME/server-marker" && echo "$HOME" && echo "$TMPDIR"'})])
+    tmpdir = env.get("TMPDIR")
+    env["TMPDIR"] = str(repo)
+    run("--print","--no-session","--tools","mcp_stdio_double,mcp_peer_double,shell","compare scratch directories")
+    if tmpdir is None:
+        del env["TMPDIR"]
+    else:
+        env["TMPDIR"] = tmpdir
+    results = [m["content"] for m in wire[-1]["messages"] if m["role"] == "tool"]
+    first, peer = [json.loads(content)["structuredContent"] for content in results[:2]]
+    shell_home, shell_tmp = results[2].splitlines()
+    assert first["home"] == first["tmp"] and peer["home"] == peer["tmp"] and shell_home == shell_tmp
+    homes = {first["home"], peer["home"], shell_home}
+    assert len(homes) == 3
+    assert all(not Path(home).is_relative_to(repo) and not Path(home).exists() for home in homes)
 
     result=json.loads(call("mcp_stdio_double",{"n":21},"mcp_stdio_double"))
     assert result["structuredContent"]["value"]==42 and result["content"][0]["text"]=="sentinel"
@@ -180,6 +211,7 @@ while (<STDIN>) {
         out,err=child.communicate(timeout=8)
         assert child.returncode and b"cancel" in err.lower() and cancelled.is_set(),(out,err)
     assert mcp_messages[-1][0]=="DELETE"
+    personal_config.unlink()
     run("--trust","revoke")
     count=len(mcp_messages)
     assert "mcp_stdio_double" not in schemas() and len(mcp_messages)==count
