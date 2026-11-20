@@ -37,12 +37,15 @@ fn run_script(ctx: &Ctx<'_>, code: &str) -> rquickjs::Result<()> {
     Ok(())
 }
 
-fn finish(result: Result<String>) -> Result<()> {
-    let message = WorkerMessage::Finished(result.map_err(|err| err.to_string()));
-    send(&mut io::stdout().lock(), &message)
+fn finish(result: Result<ScriptOutput>) -> Result<()> {
+    let output = result.unwrap_or_else(|err| ScriptOutput {
+        text: String::new(),
+        error: Some(err.to_string()),
+    });
+    send(&mut io::stdout().lock(), &WorkerMessage::Finished(output))
 }
 
-fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
+fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
     let runtime = Runtime::new()?;
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(256 * 1024);
@@ -50,7 +53,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
     // None latches an overflow, even if the script catches the text() error.
     let output = Rc::new(RefCell::new(Some(String::new())));
     let buffer = output.clone();
-    context.with(|ctx| -> Result<()> {
+    context.with(|ctx| -> Result<ScriptOutput> {
         ctx.globals()
             .set("__catalog", ctx.json_parse(catalog.get())?)?;
         ctx.globals().set(
@@ -123,19 +126,26 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
                 }
                 // The worker serves one script. Finish its protocol before stopping, so
                 // catch/finally blocks and queued jobs cannot run tools after exit().
-                let sent = finish(exit_output.take().context(OUTPUT_LIMIT_ERROR));
+                let sent = finish(
+                    exit_output
+                        .take()
+                        .context(OUTPUT_LIMIT_ERROR)
+                        .map(|text| ScriptOutput { text, error: None }),
+                );
                 std::process::exit(if sent.is_ok() { 0 } else { 1 });
             })?,
         )?;
         ctx.eval::<(), _>(include_str!("bindings.js"))?;
         let result = run_script(&ctx, code);
-        // Formatting a thrown Error can run JS getters after the script has failed.
+        // Freeze output before formatting an exception, which may run JS getters.
         running.set(false);
-        result.catch(&ctx).map_err(|err| {
-            anyhow::anyhow!("{}", err.to_string().chars().take(1024).collect::<String>())
-        })
-    })?;
-    output.take().context(OUTPUT_LIMIT_ERROR)
+        let text = output.take().context(OUTPUT_LIMIT_ERROR)?;
+        let error = result
+            .catch(&ctx)
+            .err()
+            .map(|err| err.to_string().chars().take(MAX_ERROR_CHARS).collect());
+        Ok(ScriptOutput { text, error })
+    })
 }
 
 pub fn worker() -> Result<()> {
@@ -152,11 +162,19 @@ mod tests {
 
     proptest! {
         #[test]
-        fn returned_text_follows_emitted_items(items in prop::collection::vec(".{0,32}", 1..8)) {
+        fn completion_preserves_emitted_items(items in prop::collection::vec(".{0,32}", 1..8), fails in any::<bool>()) {
             let values = json!(items);
-            let script = format!("const values = {values}; const last = values.pop(); for (const value of values) text(value); return last;");
+            let completion = if fails { "throw Error('unfinished')" } else { "return last" };
+            let script = format!("const values = {values}; const last = values.pop(); for (const value of values) text(value); {completion};");
             let catalog = serde_json::value::to_raw_value(&json!([])).unwrap();
-            prop_assert_eq!(evaluate(&script, &catalog).unwrap(), items.join("\n"));
+            let output = evaluate(&script, &catalog).unwrap();
+            if fails {
+                prop_assert!(output.error.unwrap().contains("unfinished"));
+                prop_assert_eq!(output.text, items[..items.len()-1].join("\n"));
+            } else {
+                prop_assert_eq!(output.error, None);
+                prop_assert_eq!(output.text, items.join("\n"));
+            }
         }
 
         #[test]
@@ -185,7 +203,8 @@ mod tests {
             "#, json!(query));
             let output = evaluate(&code, &catalog).unwrap();
             let names: Vec<_> = entries.iter().map(|tool| &tool["name"]).collect();
-            prop_assert_eq!(output, serde_json::to_string(&names).unwrap());
+            prop_assert_eq!(output.error, None);
+            prop_assert_eq!(output.text, serde_json::to_string(&names).unwrap());
         }
     }
 }

@@ -520,6 +520,10 @@ fn reads_limits_and_cancellation() -> Result<()> {
             .contains("1 MiB")
     );
     // Even worst-case JSON escaping must fit in the worker protocol frame.
+    let failed = run(r#"text("\u0001".repeat(1048576)); throw Error("\u0002".repeat(1024))"#)
+        .unwrap_err()
+        .to_string();
+    assert!(failed.starts_with('\x01') && failed.contains("\nScript error: Error: \x02"));
     let exact = run(r#"return "\u0001".repeat(1048576)"#)?;
     assert!(exact.len() <= 16 * 1024);
     assert!(exact.starts_with('\x01'));
@@ -775,14 +779,23 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
         serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
         cursor
     );
-    assert!(
-        run(
-            &mut db,
-            &format!(r#"store("rank", {{cursor:999}}); {report} throw Error("abandoned")"#)
-        )?
-        .contains("abandoned")
+    let failed = run(
+        &mut db,
+        &format!(r#"store("rank", {{cursor:999}}); {report} throw Error("abandoned")"#),
+    )?;
+    let (preview, diagnostic) = failed
+        .split_once("\nScript error: ")
+        .expect("failure diagnostic");
+    assert_eq!(diagnostic.matches("abandoned").count(), 1);
+    let preview = preview.strip_prefix("tool error: ").unwrap();
+    assert!(preview.starts_with("HEAD\n") && preview.contains("\nTAIL\n"));
+    assert!(!preview.contains("MIDDLE") && preview.len() <= 16 * 1024);
+    let (_, path) = preview.rsplit_once("\nFull output: ").unwrap();
+    let read = call("read", json!({"path":path,"offset":3,"limit":1}));
+    assert_eq!(
+        tools.run(Mode::Plan, &read, &Cancel::default())?,
+        "MIDDLE\n"
     );
-    assert_eq!(fs::read_dir(root.path().join(".panda"))?.count(), 1);
     assert_eq!(
         serde_json::from_str::<Value>(&run(&mut db, inspect)?)?,
         cursor
@@ -810,6 +823,7 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
             cursor
         );
     }
+    assert_eq!(fs::read_dir(root.path().join(".panda"))?.count(), 2);
 
     let mut archive = Vec::new();
     db.export_pi(&mut archive)?;
