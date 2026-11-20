@@ -563,8 +563,9 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         requests.clear()
         for body in (first, followup):
             assert {t["function"]["name"] for t in body.get("tools", [])} == declared, body.get("tools")
-        result = followup["messages"][-1]
-        assert result["role"] == "tool", result
+        results = [m for m in followup["messages"] if m["role"] == "tool"]
+        assert len(results) == 1, results
+        result = results[0]
         events = [json.loads(line) for line in output if line.startswith("{")]
         calls = [e["event"]["data"]["call"] for e in events
                  if e["type"] == "event" and e["event"]["type"] == "nested_call"]
@@ -593,6 +594,12 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     """
     selected = {"codemode", "read", "search"}
     for interface in (["--mode", "json"], ["--print"]):
+        read_once = ("codemode", {"code": 'return tools.read({path: "version.txt"});'})
+        version, nested = exercise_tools(interface, ["--codemode-only", "--tools", "read"],
+                                         {"codemode"}, read_once, "Read version.txt")
+        assert version == "1.2.3", version
+        if interface == ["--mode", "json"]:
+            assert nested == [("read", {"path": "version.txt"})], nested
         for flag in ("--codemode", "--codemode-only"):
             only = flag == "--codemode-only"
             flags = [flag, "--tools", "codemode,read,search"]

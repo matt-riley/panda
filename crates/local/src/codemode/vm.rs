@@ -1,7 +1,14 @@
 use super::*;
-use rquickjs::{CatchResultExt, Context as JsContext, Ctx, Exception, Function, Runtime};
+use rquickjs::{
+    CatchResultExt, Context as JsContext, Ctx, Exception, Function, Promise, Runtime,
+    function::Constructor,
+};
 use serde_json::value::RawValue;
-use std::{cell::RefCell, io, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    io,
+    rc::Rc,
+};
 
 fn invoke(name: String, arguments: String) -> Result<String> {
     ensure!(
@@ -16,6 +23,23 @@ fn exchange(message: WorkerMessage) -> Result<String> {
     send(&mut io::stdout().lock(), &message)?;
     let result: Result<String, String> = receive(&mut io::stdin().lock(), REPLY_FRAME)?;
     result.map_err(anyhow::Error::msg)
+}
+
+fn run_script(ctx: &Ctx<'_>, code: &str) -> rquickjs::Result<()> {
+    let text: Function = ctx.globals().get("text")?;
+    let async_function: Constructor = ctx.eval("(async () => {}).constructor")?;
+    let script: Function = async_function.construct((format!("\"use strict\";\n{code}"),))?;
+    let promise: Promise = script.call(())?;
+    let value: rquickjs::Value = promise.finish()?;
+    if !value.is_undefined() {
+        text.call::<_, ()>((value,))?;
+    }
+    Ok(())
+}
+
+fn finish(result: Result<String>) -> Result<()> {
+    let message = WorkerMessage::Finished(result.map_err(|err| err.to_string()));
+    send(&mut io::stdout().lock(), &message)
 }
 
 fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
@@ -68,6 +92,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
                 invoke(name, args).map_err(|e| Exception::throw_message(&ctx, &e.to_string()))
             })?,
         )?;
+        let emitted = Cell::new(false);
         ctx.globals().set(
             "__text",
             Function::new(ctx.clone(), move |ctx: Ctx<'_>, value: String| {
@@ -75,7 +100,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
                 let Some(out) = slot.as_mut() else {
                     return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
                 };
-                let newline = !out.is_empty();
+                let newline = emitted.replace(true);
                 if out.len() + usize::from(newline) + value.len() > MAX_OUTPUT_BYTES {
                     *slot = None;
                     return Err(Exception::throw_message(&ctx, OUTPUT_LIMIT_ERROR));
@@ -87,13 +112,28 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<String> {
                 Ok(())
             })?,
         )?;
+        let running = Rc::new(Cell::new(true));
+        let exit_enabled = running.clone();
+        let exit_output = output.clone();
+        ctx.globals().set(
+            "exit",
+            Function::new(ctx.clone(), move || {
+                if !exit_enabled.get() {
+                    return;
+                }
+                // The worker serves one script. Finish its protocol before stopping, so
+                // catch/finally blocks and queued jobs cannot run tools after exit().
+                let sent = finish(exit_output.take().context(OUTPUT_LIMIT_ERROR));
+                std::process::exit(if sent.is_ok() { 0 } else { 1 });
+            })?,
+        )?;
         ctx.eval::<(), _>(include_str!("bindings.js"))?;
-        ctx.eval_promise(code)
-            .and_then(|p| p.finish::<()>())
-            .catch(&ctx)
-            .map_err(|err| {
-                anyhow::anyhow!("{}", err.to_string().chars().take(1024).collect::<String>())
-            })
+        let result = run_script(&ctx, code);
+        // Formatting a thrown Error can run JS getters after the script has failed.
+        running.set(false);
+        result.catch(&ctx).map_err(|err| {
+            anyhow::anyhow!("{}", err.to_string().chars().take(1024).collect::<String>())
+        })
     })?;
     output.take().context(OUTPUT_LIMIT_ERROR)
 }
@@ -102,8 +142,7 @@ pub fn worker() -> Result<()> {
     let (script, catalog): (String, Box<RawValue>) =
         receive(&mut io::stdin().lock(), REQUEST_FRAME)?;
     ensure!(script.len() <= SCRIPT_BYTES, "script exceeds 64 KiB");
-    let result = evaluate(&script, &catalog).map_err(|err| err.to_string());
-    send(&mut io::stdout().lock(), &WorkerMessage::Finished(result))
+    finish(evaluate(&script, &catalog))
 }
 
 #[cfg(test)]
@@ -112,6 +151,14 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn returned_text_follows_emitted_items(items in prop::collection::vec(".{0,32}", 1..8)) {
+            let values = json!(items);
+            let script = format!("const values = {values}; const last = values.pop(); for (const value of values) text(value); return last;");
+            let catalog = serde_json::value::to_raw_value(&json!([])).unwrap();
+            prop_assert_eq!(evaluate(&script, &catalog).unwrap(), items.join("\n"));
+        }
+
         #[test]
         fn discovery_respects_catalog_and_limit(
             mask in 0u8..16, query in ".{0,64}", limit in 1usize..9,
