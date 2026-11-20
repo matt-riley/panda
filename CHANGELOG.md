@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.20](https://github.com/matt-riley/panda/compare/v0.1.19...v0.1.20) (2026-11-20)
+
+
+### Features
+
+* add allowlist-aware tool discovery to Codemode ([#62](https://github.com/matt-riley/panda/issues/62)) ([88e0f0a](https://github.com/matt-riley/panda/commit/88e0f0aac3dc2c8621cdd84a15245db1eafafd88))
+* add Codemode-only tool exposure for print and JSON runs ([#63](https://github.com/matt-riley/panda/issues/63)) ([f892481](https://github.com/matt-riley/panda/commit/f892481d7d11ac33e268596585e7a482f1e8cbc3))
+* export sessions as standalone HTML ([#59](https://github.com/matt-riley/panda/issues/59)) ([8974d44](https://github.com/matt-riley/panda/commit/8974d44bf73a90d8d938f2a57a06de81f2911efc))
+* guide branch summaries from the session tree ([#54](https://github.com/matt-riley/panda/issues/54)) ([8f54d71](https://github.com/matt-riley/panda/commit/8f54d7106a7268b16add5fc8695e7fa5193c3b37))
+* persist Codemode values on session branches ([#60](https://github.com/matt-riley/panda/issues/60)) ([0d7e7a4](https://github.com/matt-riley/panda/commit/0d7e7a4e6387a0dba5d1b52489bd5e92e379c257))
+* preserve full Codemode output with bounded previews ([#61](https://github.com/matt-riley/panda/issues/61)) ([65d5df7](https://github.com/matt-riley/panda/commit/65d5df79f6a466f4f30c72e5340b17bba647a845))
+* recover from early provider length stops ([#57](https://github.com/matt-riley/panda/issues/57)) ([b1e123a](https://github.com/matt-riley/panda/commit/b1e123a8b100737f63cf1c378a32a7b3ecd91092))
+* retain recent exchanges during compaction ([#56](https://github.com/matt-riley/panda/issues/56)) ([1781132](https://github.com/matt-riley/panda/commit/17811329f03f45bbc25f271ef1fe11b3294cc837))
+* track file activity across compactions ([#58](https://github.com/matt-riley/panda/issues/58)) ([fca444e](https://github.com/matt-riley/panda/commit/fca444e1630b9a8231f41d2fbd812d98783b9126))
+
 ## [0.1.19](https://github.com/matt-riley/panda/compare/v0.1.18...v0.1.19) (2026-11-19)
 
 
