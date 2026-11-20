@@ -1,6 +1,9 @@
 use anyhow::{Result, ensure};
 use panda_coding::Coding;
-use panda_core::{Call, Cancel, Emit, Event, Message, Mode, Provider, Store, Toolset, turn};
+use panda_core::{
+    Call, Cancel, Emit, Event, Message, Mode, Provider, Session, Store, StoreWrites, ToolOutput,
+    Toolset, turn,
+};
 use panda_local::{codemode::Codemode, sandbox::Native};
 use panda_memory::{EmptySkills, MemoryStore};
 use serde_json::{Value, json};
@@ -22,6 +25,16 @@ do {
 } while (offset !== null);
 text([...counts].sort((a,b) => b[1]-a[1]).slice(0,5));
 "#;
+
+fn run_text(tools: &dyn Toolset, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
+    let session = Session {
+        mode,
+        ..Session::default()
+    };
+    tools
+        .run(&session, call, cancel, &mut |_| {})
+        .map(|(output, _)| output.text)
+}
 
 fn call(name: &str, args: Value) -> Call {
     Call {
@@ -105,7 +118,7 @@ fn selected_tools_restrict_direct_and_nested_dispatch() -> Result<()> {
     let base = coding(root.path())?;
     let read_only = panda_coding::SelectedTools::new(&base, ["read".to_owned()].into())?;
     let enabled = Codemode::new(&read_only, EXE.as_ref(), &base.workspace.root);
-    let run = |name, args| enabled.run(Mode::Code, &call(name, args), &Cancel::default());
+    let run = |name, args| run_text(&enabled, Mode::Code, &call(name, args), &Cancel::default());
     let schema = enabled.schemas(Mode::Code);
     assert_eq!(
         schema
@@ -141,13 +154,13 @@ fn selected_tools_restrict_direct_and_nested_dispatch() -> Result<()> {
     let writes = panda_coding::SelectedTools::new(&base, ["write".to_owned()].into())?;
     assert!(writes.schemas(Mode::Plan).is_empty());
     assert!(
-        writes
-            .run(
-                Mode::Plan,
-                &call("write", json!({"path":"note","text":"modified"})),
-                &Cancel::default()
-            )
-            .is_err()
+        run_text(
+            &writes,
+            Mode::Plan,
+            &call("write", json!({"path":"note","text":"modified"})),
+            &Cancel::default()
+        )
+        .is_err()
     );
     assert_eq!(fs::read_to_string(root.path().join("note"))?, "original");
     Ok(())
@@ -248,9 +261,15 @@ fn plan_search_patterns_work_directly_and_in_codemode() -> Result<()> {
         for key in args.as_object().unwrap().keys() {
             assert!(properties.get(key).is_some(), "{name} lacks {key}");
         }
-        let direct = base.run(Mode::Plan, &call(name, args.clone()), &Cancel::default())?;
+        let direct = run_text(
+            &base,
+            Mode::Plan,
+            &call(name, args.clone()),
+            &Cancel::default(),
+        )?;
         let code = format!("text(tools.{name}({args}))");
-        let nested = enabled.run(
+        let nested = run_text(
+            &enabled,
             Mode::Plan,
             &call("codemode", json!({ "code": code })),
             &Cancel::default(),
@@ -324,13 +343,15 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
         let code = format!(
             "const first = tools.{name}({args}); text([first, tools.{name}({{...{args}, offset:first.next_offset}})]);"
         );
-        let nested = enabled.run(
+        let nested = run_text(
+            &enabled,
             Mode::Plan,
             &call("codemode", json!({"code":code})),
             &Cancel::default(),
         )?;
         let direct_page = |args: &Value| -> Result<Value> {
-            Ok(serde_json::from_str(&base.run(
+            Ok(serde_json::from_str(&run_text(
+                &base,
                 Mode::Plan,
                 &call(name, args.clone()),
                 &Cancel::default(),
@@ -350,7 +371,8 @@ fn gitignore_pages_match_in_plan_and_codemode() -> Result<()> {
         assert_eq!(serde_json::from_str::<Value>(&nested)?, pages, "{name}");
     }
     let query = |path: &str| {
-        base.run(
+        run_text(
+            &base,
             Mode::Plan,
             &call("search", json!({"path":path,"query":"match"})),
             &Cancel::default(),
@@ -411,7 +433,8 @@ fn search_context_pages_count_only_hits_in_plan_and_codemode() -> Result<()> {
         json!({"items":expected[50..],"next_offset":null}),
     ];
     for expected_page in &expected_pages {
-        let direct = base.run(
+        let direct = run_text(
+            &base,
             Mode::Plan,
             &call("search", args.clone()),
             &Cancel::default(),
@@ -420,7 +443,8 @@ fn search_context_pages_count_only_hits_in_plan_and_codemode() -> Result<()> {
         assert_eq!(&direct, expected_page);
         args["offset"] = direct["next_offset"].clone();
     }
-    let nested = enabled.run(
+    let nested = run_text(
+        &enabled,
         Mode::Plan,
         &call("codemode", json!({"code":code})),
         &Cancel::default(),
@@ -454,9 +478,10 @@ fn ls_pages_match_in_plan_and_codemode() -> Result<()> {
 
     let base = coding(dir)?;
     let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
-    let direct = |args| base.run(Mode::Plan, &call("ls", args), &Cancel::default());
+    let direct = |args| run_text(&base, Mode::Plan, &call("ls", args), &Cancel::default());
     let nested = |code: &str| {
-        enabled.run(
+        run_text(
+            &enabled,
             Mode::Plan,
             &call("codemode", json!({"code":code})),
             &Cancel::default(),
@@ -505,14 +530,16 @@ fn reads_limits_and_cancellation() -> Result<()> {
     let base = coding(root.path())?;
     let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
     let run = |code: &str| {
-        enabled.run(
+        run_text(
+            &enabled,
             Mode::Code,
             &call("codemode", json!({"code":code})),
             &Cancel::default(),
         )
     };
     assert!(
-        base.run(
+        run_text(
+            &base,
             Mode::Code,
             &call("codemode", json!({"code":"text(1)"})),
             &Cancel::default()
@@ -592,8 +619,11 @@ fn reads_limits_and_cancellation() -> Result<()> {
         });
         let script = "tools.read({path:'note'}); const end = Date.now()+5000; while(Date.now()<end){}; tools.repo_map()";
         let start = Instant::now();
-        let result = enabled.run_stream(
-            Mode::Plan,
+        let result = enabled.run(
+            &Session {
+                mode: Mode::Plan,
+                ..Session::default()
+            },
             &call("codemode", json!({"code":script})),
             &cancel,
             &mut |e| {
@@ -619,14 +649,14 @@ fn noisy_shell_failure_can_be_read_in_plan_and_codemode() -> Result<()> {
     let nested = Codemode::new(&tools, EXE.as_ref(), &tools.workspace.root);
     let cancel = Cancel::default();
     let command = "echo EARLY_MARKER; awk 'BEGIN { for (i=0;i<100000;i++) print \"long-output-line\" }'; echo final-stdout; echo FINAL_FAILURE >&2; exit 7";
-    let failure = tools
-        .run(
-            Mode::Code,
-            &call("shell", json!({"command":command})),
-            &cancel,
-        )
-        .unwrap_err()
-        .to_string();
+    let failure = run_text(
+        &tools,
+        Mode::Code,
+        &call("shell", json!({"command":command})),
+        &cancel,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(failure.contains("exit status: 7") && failure.contains("FINAL_FAILURE"));
     assert!(!failure.contains("EARLY_MARKER") && failure.len() < 100_000);
     let path = failure
@@ -635,12 +665,12 @@ fn noisy_shell_failure_can_be_read_in_plan_and_codemode() -> Result<()> {
         .expect("full log path");
     let args = json!({"path":path,"offset":1,"limit":1});
     assert_eq!(
-        tools.run(Mode::Plan, &call("read", args.clone()), &cancel)?,
+        run_text(&tools, Mode::Plan, &call("read", args.clone()), &cancel)?,
         "EARLY_MARKER\n"
     );
     let js = json!({"code":format!("text(tools.read({args}))")});
     assert_eq!(
-        nested.run(Mode::Plan, &call("codemode", js), &cancel)?,
+        run_text(&nested, Mode::Plan, &call("codemode", js), &cancel)?,
         "EARLY_MARKER\n"
     );
     let log = fs::read_to_string(root.path().join(path))?;
@@ -662,7 +692,8 @@ fn shell_timeout_stops_process_group() -> Result<()> {
     let cancel = Cancel::default();
     let command = "sleep 6 & echo $$ $! > pids; wait; echo survived > late";
     let start = Instant::now();
-    let result = tools.run(
+    let result = run_text(
+        &tools,
         Mode::Code,
         &call("shell", json!({"command":command,"timeout":1})),
         &cancel,
@@ -806,7 +837,7 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
     );
     for read in [call("read", args), nested] {
         assert_eq!(
-            tools.run(Mode::Plan, &read, &Cancel::default())?,
+            run_text(&tools, Mode::Plan, &read, &Cancel::default())?,
             "MIDDLE\n"
         );
     }
@@ -837,7 +868,7 @@ fn stored_ranking_resumes_on_its_own_branch() -> Result<()> {
     let (_, path) = preview.rsplit_once("\nFull output: ").unwrap();
     let read = call("read", json!({"path":path,"offset":4,"limit":1}));
     assert_eq!(
-        tools.run(Mode::Plan, &read, &Cancel::default())?,
+        run_text(&tools, Mode::Plan, &read, &Cancel::default())?,
         "MIDDLE\n"
     );
     assert_eq!(
@@ -915,7 +946,13 @@ fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
         fn schemas(&self, _: Mode) -> Vec<Value> {
             vec![json!({"function":{"name":"read","description":"Test read","parameters":{}}})]
         }
-        fn run(&self, _: Mode, _: &Call, cancel: &Cancel) -> Result<String> {
+        fn run(
+            &self,
+            _: &Session,
+            _: &Call,
+            cancel: &Cancel,
+            _: &mut Emit,
+        ) -> Result<(ToolOutput, StoreWrites)> {
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(5) {
                 cancel.check()?;
@@ -929,7 +966,7 @@ fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
     let enabled = Codemode::new(&PendingRead, EXE.as_ref(), &workspace);
     let cancel = Cancel::default();
     let script = |code: &str| call("codemode", json!({"code":code}));
-    let run = |code: &str| enabled.run(Mode::Plan, &script(code), &cancel);
+    let run = |code: &str| run_text(&enabled, Mode::Plan, &script(code), &cancel);
     let preview = run("// @options: {\"max_output_tokens\":64}\nreturn '海'.repeat(300)")?;
     assert!(preview.len() <= 256 && preview.starts_with('海'));
     let (_, path) = preview.rsplit_once("\nFull output: ").unwrap();
@@ -955,14 +992,22 @@ fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
     ] {
         assert!(
             enabled
-                .run_stream(Mode::Plan, &script(invalid), &cancel, &mut seen)
+                .run(
+                    &Session {
+                        mode: Mode::Plan,
+                        ..Session::default()
+                    },
+                    &script(invalid),
+                    &cancel,
+                    &mut seen
+                )
                 .is_err()
         );
     }
     assert_eq!(calls, 0);
 
     let mut session = panda_core::Session::default();
-    let (_, writes) = enabled.run_in_session(
+    let (_, writes) = enabled.run(
         &session,
         &script("store('cursor',50)"),
         &cancel,
@@ -970,11 +1015,11 @@ fn script_options_bound_output_and_cancel_nested_calls() -> Result<()> {
     )?;
     session.history.push(Message::CodemodeStore(writes));
     let start = Instant::now();
-    let err = enabled.run_in_session(&session, &script("// @options: {\"timeout_ms\":1500}\nstore('cursor',null);tools.read({path:'pending'})"),
+    let err = enabled.run(&session, &script("// @options: {\"timeout_ms\":1500}\nstore('cursor',null);tools.read({path:'pending'})"),
         &cancel, &mut |e| if matches!(e, Event::NestedCall { .. }) { calls += 1; }).unwrap_err();
     assert!(err.to_string().contains("time limit") && start.elapsed() < Duration::from_secs(4));
     assert_eq!(calls, 1);
-    let (reopened, _) = enabled.run_in_session(
+    let (reopened, _) = enabled.run(
         &session,
         &script("return load('cursor')"),
         &cancel,

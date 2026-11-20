@@ -224,14 +224,14 @@ pub struct PromptedTools<'a> {
     pub index: &'a std::sync::RwLock<String>,
 }
 impl Toolset for PromptedTools<'_> {
-    fn run_in_session(
+    fn run(
         &self,
         session: &Session,
         call: &Call,
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<(panda_core::ToolOutput, panda_core::StoreWrites)> {
-        self.tools.run_in_session(session, call, cancel, emit)
+        self.tools.run(session, call, cancel, emit)
     }
     fn system(&self) -> Result<String> {
         let mut prompt = match &self.prompt {
@@ -247,18 +247,6 @@ impl Toolset for PromptedTools<'_> {
     }
     fn schemas(&self, mode: Mode) -> Vec<Value> {
         self.tools.schemas(mode)
-    }
-    fn run(&self, mode: Mode, call: &Call, cancel: &Cancel) -> Result<String> {
-        self.tools.run(mode, call, cancel)
-    }
-    fn run_stream(
-        &self,
-        mode: Mode,
-        call: &Call,
-        cancel: &Cancel,
-        emit: &mut Emit,
-    ) -> Result<panda_core::ToolOutput> {
-        self.tools.run_stream(mode, call, cancel, emit)
     }
 }
 
