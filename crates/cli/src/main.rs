@@ -33,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES] · :transcript [POINTER] · :compact [instructions] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES|info] · :transcript [POINTER] · :compact [instructions|preview [guidance]|info] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -438,7 +438,11 @@ fn configure_context(
         None
     };
     let mut s = db.load()?;
-    if s.model_window != window || s.keep_recent_tokens != keep_recent_tokens {
+    if s.model_window != window
+        || s.keep_recent_tokens != keep_recent_tokens
+        || s.compaction_thresholds != settings.thresholds()
+    {
+        s.compaction_thresholds = settings.thresholds();
         s.keep_recent_tokens = keep_recent_tokens;
         s.model_window = window;
         db.save(&mut s)?;
@@ -609,7 +613,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
@@ -740,6 +744,7 @@ fn run(
     options.trust_project |= saved_trust == Some(true);
     let packages = panda_local::packages::active(&state, project, options.trust_project)?;
     let mut settings = settings::Settings::read(&state, project)?;
+    settings.invocation_controls = options.compaction;
     let cli_recent = options.recent_override;
     let templates = panda_local::prompts::Templates::with_packages(
         &state,
@@ -1004,13 +1009,12 @@ fn run(
                 prices: routing::prices(state, &configured, p, m)?,
             })
         };
-        if std::env::var("PANDA_NATIVE_COMPACTION").as_deref() == Ok("1") {
-            Ok(Box::new(panda_providers::jev::NativeProvider {
+        match panda_providers::jev::Jev::from_env() {
+            Ok(judge) => Ok(Box::new(panda_providers::jev::NativeProvider {
                 inner,
-                judge: panda_providers::jev::Jev::from_env()?,
-            }))
-        } else {
-            Ok(inner)
+                judge,
+            })),
+            Err(_) => Ok(inner), // An unusable optional judge still permits provider compaction.
         }
     };
     configure_context(store, &state, &p, &model, &settings)?;
@@ -1234,7 +1238,8 @@ fn run(
                     match words.collect::<Vec<_>>().as_slice() {
                         [] => {}
                         ["reload"] => {
-                            let next = settings::Settings::read(&state, project)?;
+                            let mut next = settings::Settings::read(&state, project)?;
+                            next.invocation_controls = options.compaction;
                             configure_context(&mut db, &state, &p, &model, &next)?;
                             *index.write().unwrap() = if next.skill_index {
                                 coding.skills.startup_index()?
@@ -1410,7 +1415,33 @@ fn run(
                     }
                 }
                 ":context" | ":compact" => {
-                    if first == ":compact" {
+                    let action = line[first.len()..].trim();
+                    if (first == ":compact" || first == ":context")
+                        && (action == "info" || (first == ":context" && action.is_empty()))
+                    {
+                        let session = db.load()?;
+                        let info = native_compaction::context_info(
+                            &session,
+                            &tools.system()?,
+                            &tools.schemas_for(&session),
+                        );
+                        screen.line(Tone::Dim, &format!("Context info: {info}"));
+                    }
+                    if first == ":compact"
+                        && (action == "preview" || action.starts_with("preview "))
+                    {
+                        cancel.reset();
+                        screen.line(Tone::Dim, "Preparing compaction preview. Esc cancels.");
+                        let preview = active::preview(
+                            make_provider(&state, &p, &model)?,
+                            db.load()?,
+                            db.compaction_scope(),
+                            action.strip_prefix("preview").unwrap().trim(),
+                            &cancel,
+                            &screen,
+                        )?;
+                        screen.line(Tone::Dim, &format!("Compaction preview:\n{preview}"));
+                    } else if first == ":compact" && action != "info" {
                         cancel.reset();
                         panda_core::sdk::SessionSdk { host: &mut db }.compact(
                             make_provider(&state, &p, &model)?.as_mut(),
@@ -1423,6 +1454,7 @@ fn run(
                         screen.line(Tone::Dim, outcome);
                     }
                     if first == ":context"
+                        && action != "info"
                         && let Some(arg) = words.next()
                     {
                         let bytes: usize = arg.parse()?;

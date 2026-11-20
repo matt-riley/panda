@@ -91,7 +91,14 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
 | Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
-The opt-in native compactor (set `PANDA_NATIVE_COMPACTION=1`) builds an extractive handoff at a clean turn boundary or with `:compact`. Its planner retains recent whole exchanges, using a 20,000-token default. The optional Jev judge uses `TYPESAFE_API_KEY` and masks credentials in outgoing requests. Without a key, it makes no judge requests and preserves unscored source material. `:context` shows the latest native compaction outcome.
+Panda first tries a verified extractive handoff for manual, automatic and overflow checkpoints. It uses the optional `TYPESAFE_API_KEY` for Jev judgments and masks credentials before sending any text. Without a key, or if judging fails, times out or rejects the handoff, a manual or hard checkpoint uses the current chat provider’s summarizer. Soft pressure can defer to the next clean boundary. Both strategies preserve the branch and save a private recovery transcript only when a new checkpoint commits.
+
+- `:compact [guidance]` adopts a checkpoint. `:compact preview [guidance]` displays the candidate and leaves session history and recovery storage untouched. Esc cancels a preview in the terminal.
+- `:compact info` and `:context` report usage, effective thresholds, prompt section estimates and the visible tool declarations. Looking at context makes no judge requests.
+- `view_context()` returns the same diagnostics. `self_compact({note?})` schedules a checkpoint at the next safe boundary. Panda records the note as model-authored data. Both tools follow the selected tool policy, including `--tools` and `--no-tools`.
+- Set `compaction.softAt`, `hardAt`, `cacheAt` (percentages) and `cacheForMinutes` in user or project settings. Their defaults are 50, 70, 70 and 30. The hard threshold is capped at 90% of an effective window of at most 300,000 tokens. A cache duration of zero disables the warm-cache hold. Override one invocation with `--compact-soft-at`, `--compact-at`, `--compact-cache-at` or `--compact-cache-for`.
+
+The paired synthetic fixtures measure instruction retention, factual accuracy, recoverable pointers, size and request costs. [Compaction comparison](docs/compaction-comparison.md)
 
 To keep recent exchanges verbatim during manual and automatic compaction, set an estimated token budget in `$PANDA_HOME/settings.json` and restart Panda. This example keeps up to 20,000 estimated tokens.
 
@@ -101,7 +108,7 @@ To keep recent exchanges verbatim during manual and automatic compaction, set an
 
 The active provider/model override takes precedence over the global setting, including an explicit zero. An invocation-level `--keep-recent-tokens` overrides both.
 
-Panda keeps the newest whole user exchanges that fit, including their tool calls and results, and summarizes the older messages. When all eligible messages fit, compaction skips the summary request. A budget of `0` summarizes all eligible messages. With the setting omitted, manual compaction covers the full history and automatic threshold compaction uses its model-based retention budget.
+The verified planner uses a 20,000-token retention target by default and keeps the latest exchange intact, including tool calls and results. It advances older history in groups of up to 400 visible segments. A zero target keeps only the latest whole exchange. Provider fallback preserves the existing retention behavior. A bare manual request can cover all eligible history, and automatic requests use the model-based budget.
 
 Compaction keeps a sorted list of files read and files modified alongside the summary. A successful edit or write moves a path into the modified list. Successful reads inside Codemode count too. The lists survive reopening and Pi JSONL export and import.
 

@@ -112,6 +112,39 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
     }
 }
 
+pub fn preview(
+    mut p: Box<dyn Provider + Send>,
+    session: Session,
+    scope: Option<String>,
+    guidance: &str,
+    cancel: &Cancel,
+    screen: &Screen,
+) -> Result<String> {
+    let work = move || native_compaction::preview(p.as_mut(), &session, scope, guidance, cancel);
+    if !screen.active {
+        return work();
+    }
+    terminal::enable_raw_mode()?;
+    let _raw = Raw;
+    let mut terminal = crate::renderer::terminal()?;
+    let start = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(work);
+        while !worker.is_finished() {
+            terminal.draw(|f| screen.draw_working(f, "", 0, None, start.elapsed()))?;
+            if event::poll(Duration::from_millis(25))?
+                && let event::Event::Key(k) = event::read()?
+                && k.code == event::KeyCode::Esc
+            {
+                cancel.stop();
+            }
+        }
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("preview worker stopped"))?
+    })
+}
+
 pub fn run(
     p: &mut (dyn Provider + Send),
     db: &mut dyn panda_core::sdk::SessionHost,

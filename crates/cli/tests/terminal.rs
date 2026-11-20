@@ -260,3 +260,18 @@ fn workspace_trust_packages_and_mcp_transports() {
             .success()
     );
 }
+
+#[test]
+fn native_compaction_controls_and_paired_synthetic_checkpoints() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/compaction_comparison.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

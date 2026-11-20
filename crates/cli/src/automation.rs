@@ -49,6 +49,7 @@ pub struct Options {
     pub append_system_prompt: Vec<String>,
     pub trust_project: bool,
     pub recent_override: Option<u64>,
+    pub compaction: crate::settings::Controls,
     pub prompt: String,
 }
 impl Options {
@@ -77,6 +78,16 @@ impl Options {
                     }
                 }
                 "--trust-project" => out.trust_project = true,
+                "--compact-soft-at"
+                | "--compact-at"
+                | "--compact-cache-at"
+                | "--compact-cache-for" => {
+                    let value = it
+                        .next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .with_context(|| format!("expected unsigned number after {arg}"))?;
+                    out.compaction.set(arg, value)?;
+                }
                 "--keep-recent-tokens" => {
                     out.recent_override =
                         Some(it.next().and_then(|v| v.parse().ok()).context(
@@ -315,6 +326,26 @@ impl Toolset for PromptedTools<'_> {
         cancel: &Cancel,
         emit: &mut Emit,
     ) -> Result<(panda_core::ToolOutput, panda_core::StoreWrites)> {
+        if call.name == "view_context" {
+            let schemas = self.schemas_for(session);
+            if let Some(schema) = schemas
+                .iter()
+                .find(|s| s["function"]["name"] == "view_context")
+            {
+                cancel.check()?;
+                panda_core::validate_tool_args(
+                    &schema["function"]["parameters"],
+                    &call.args,
+                    "view_context",
+                )?;
+                return Ok((
+                    panda_core::native_compaction::context_info(session, &self.system()?, &schemas)
+                        .to_string()
+                        .into(),
+                    Default::default(),
+                ));
+            }
+        }
         self.tools.run(session, call, cancel, emit)
     }
     fn system(&self) -> Result<String> {

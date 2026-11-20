@@ -6,6 +6,61 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Controls {
+    soft_at: Option<u64>,
+    hard_at: Option<u64>,
+    cache_at: Option<u64>,
+    cache_for_minutes: Option<u64>,
+}
+impl Controls {
+    fn values(&self) -> [(&'static str, &'static str, Option<u64>); 4] {
+        [
+            ("softAt", "--compact-soft-at", self.soft_at),
+            ("hardAt", "--compact-at", self.hard_at),
+            ("cacheAt", "--compact-cache-at", self.cache_at),
+            (
+                "cacheForMinutes",
+                "--compact-cache-for",
+                self.cache_for_minutes,
+            ),
+        ]
+    }
+    pub fn set(&mut self, flag: &str, n: u64) -> Result<()> {
+        let target = match flag {
+            "--compact-soft-at" => &mut self.soft_at,
+            "--compact-at" => &mut self.hard_at,
+            "--compact-cache-at" => &mut self.cache_at,
+            "--compact-cache-for" => &mut self.cache_for_minutes,
+            _ => anyhow::bail!("unknown compaction control {flag}"),
+        };
+        *target = Some(n);
+        self.validate()
+    }
+    fn validate(self) -> Result<()> {
+        for n in [self.soft_at, self.hard_at, self.cache_at]
+            .into_iter()
+            .flatten()
+        {
+            anyhow::ensure!(
+                (1..=100).contains(&n),
+                "compaction percentages must be 1 to 100"
+            );
+        }
+        anyhow::ensure!(
+            self.cache_for_minutes.is_none_or(|n| n <= u64::MAX / 60),
+            "cache duration is too large"
+        );
+        Ok(())
+    }
+    fn overlay(&mut self, other: Self) {
+        self.soft_at = other.soft_at.or(self.soft_at);
+        self.hard_at = other.hard_at.or(self.hard_at);
+        self.cache_at = other.cache_at.or(self.cache_at);
+        self.cache_for_minutes = other.cache_for_minutes.or(self.cache_for_minutes);
+    }
+}
 #[derive(Default, Deserialize)]
 struct Retention {
     #[serde(rename = "keepRecentTokens")]
@@ -13,6 +68,8 @@ struct Retention {
 }
 #[derive(Default, Deserialize)]
 struct Compaction {
+    #[serde(flatten)]
+    controls: Controls,
     #[serde(default, rename = "modelOverrides")]
     models: BTreeMap<String, Retention>,
     #[serde(rename = "keepRecentTokens")]
@@ -28,6 +85,9 @@ struct SettingsFile {
 
 #[derive(Default)]
 pub struct Settings {
+    controls: Controls,
+    control_sources: BTreeMap<&'static str, PathBuf>,
+    pub invocation_controls: Controls,
     keep: Option<u64>,
     models: BTreeMap<String, (u64, PathBuf)>,
     keep_source: Option<PathBuf>,
@@ -47,6 +107,17 @@ impl Settings {
             };
             let layer: SettingsFile = serde_json::from_str(&text)
                 .with_context(|| format!("reading {}", path.display()))?;
+            layer
+                .compaction
+                .controls
+                .validate()
+                .with_context(|| format!("reading {}", path.display()))?;
+            for (name, _, value) in layer.compaction.controls.values() {
+                if value.is_some() {
+                    settings.control_sources.insert(name, path.clone());
+                }
+            }
+            settings.controls.overlay(layer.compaction.controls);
             if let Some(value) = layer.compaction.keep {
                 settings.keep = Some(value);
                 settings.keep_source = Some(path.clone());
@@ -64,6 +135,17 @@ impl Settings {
         Ok(settings)
     }
 
+    pub fn thresholds(&self) -> panda_core::native_compaction::Thresholds {
+        let mut c = self.controls;
+        c.overlay(self.invocation_controls);
+        let hard = c.hard_at.unwrap_or(70).min(90);
+        panda_core::native_compaction::Thresholds {
+            soft: c.soft_at.unwrap_or(50).min(hard.saturating_sub(1)) as f64 / 100.,
+            hard: hard as f64 / 100.,
+            cache_share: c.cache_at.unwrap_or(70) as f64 / 100.,
+            cache_age_secs: c.cache_for_minutes.unwrap_or(30) * 60,
+        }
+    }
     fn model_keep(&self, provider: &str, model: &str) -> Option<&(u64, PathBuf)> {
         self.models.get(&format!("{provider}/{model}"))
     }
@@ -86,11 +168,32 @@ impl Settings {
         } else {
             source(self.keep_source.as_deref())
         };
-        format!(
-            "compaction.keepRecentTokens = {keep} ({origin})\nskillIndex = {} ({})",
-            self.skill_index,
-            source(self.index_source.as_deref())
-        )
+        let controls = self.thresholds();
+        let effective = [
+            format!("{:.0}%", controls.soft * 100.),
+            format!("{:.0}%", controls.hard * 100.),
+            format!("{:.0}%", controls.cache_share * 100.),
+            (controls.cache_age_secs / 60).to_string(),
+        ];
+        let mut lines = vec![
+            format!("compaction.keepRecentTokens = {keep} ({origin})"),
+            format!(
+                "skillIndex = {} ({})",
+                self.skill_index,
+                source(self.index_source.as_deref())
+            ),
+        ];
+        for ((name, flag, invocation), value) in
+            self.invocation_controls.values().into_iter().zip(effective)
+        {
+            let origin = if invocation.is_some() {
+                flag.into()
+            } else {
+                source(self.control_sources.get(name).map(PathBuf::as_path))
+            };
+            lines.push(format!("compaction.{name} = {value} ({origin})"));
+        }
+        lines.join("\n")
     }
 }
 

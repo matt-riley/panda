@@ -14,6 +14,7 @@ pub struct Schedule {
     pub warm_notified: bool,
     pub last_outcome: Option<String>,
     pub rule_sources: Vec<String>,
+    pub agent_note: Option<String>,
 }
 impl Schedule {
     pub fn is_empty(&self) -> bool {
@@ -29,15 +30,26 @@ pub enum Pressure {
     Hard,
     Explicit,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Thresholds {
     pub soft: f64,
     pub hard: f64,
+    pub cache_share: f64,
+    pub cache_age_secs: u64,
+}
+impl Thresholds {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
             soft: 0.5,
             hard: 0.7,
+            cache_share: 0.7,
+            cache_age_secs: 1800,
         }
     }
 }
@@ -48,8 +60,21 @@ pub struct CacheSample {
     pub timestamp: Option<u64>,
 }
 impl CacheSample {
+    pub fn last(s: &Session) -> Self {
+        s.usage
+            .last()
+            .map(|u| Self {
+                input: u.input,
+                read: u.cache_read,
+                timestamp: u.timestamp,
+            })
+            .unwrap_or_default()
+    }
     pub fn warm(self, now: u64) -> bool {
-        matches!((self.read,self.timestamp), (Some(read),Some(at)) if self.input>0 && at<=now && now-at<1800 && u128::from(read)*10 >= u128::from(self.input)*7)
+        self.is_warm(now, &Thresholds::default())
+    }
+    pub fn is_warm(self, now: u64, policy: &Thresholds) -> bool {
+        matches!((self.read,self.timestamp),(Some(read),Some(at)) if self.input>0 && at<=now && now-at<policy.cache_age_secs && read as f64 / self.input as f64 >= policy.cache_share)
     }
 }
 
@@ -84,7 +109,7 @@ pub fn trigger(
         s.native_schedule.warm_notified = false;
         return Pressure::Below;
     }
-    if cache.warm(clock.now().as_secs()) {
+    if cache.is_warm(clock.now().as_secs(), thresholds) {
         let notify = !s.native_schedule.warm_notified;
         s.native_schedule.warm_notified = true;
         return Pressure::Warm { notify };
@@ -97,6 +122,9 @@ pub fn trigger(
         return Pressure::Deferred;
     }
     s.native_schedule.last_soft_tokens = Some(used);
+    if !judge.available() {
+        return Pressure::Deferred;
+    }
     let recent = visible(s, s.history.len());
     let recent_text = recent
         .iter()

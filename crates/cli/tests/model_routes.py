@@ -69,7 +69,7 @@ def exercise(port, root):
     repo.mkdir()
     state.mkdir(mode=0o700)
     env = {k: v for k, v in os.environ.items()
-           if k not in {"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"}}
+           if k not in {"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "TYPESAFE_API_KEY", "LORE_TYPESAFE_API_KEY"}}
     env.update(PANDA_HOME=str(state), HOME=str(root), TERM="xterm-256color",
                MODELS_A_KEY="key-a", MODELS_B_KEY="key-b")
     repo.joinpath("test.png").write_bytes(base64.b64decode(
@@ -199,9 +199,9 @@ def exercise(port, root):
     run(stdin=":login local-a\n:q\n")
     run("--print", "--no-session", "--provider", "local-a", "--model", "vision", "restored")
     check_route("a", "vision")
-    # Opting in keeps the wrapper's resolved model identity and price table. A real
+    # Default compaction keeps the wrapper's resolved model identity and price table. A real
     # native checkpoint records a recoverable transcript and the active model override.
-    env.update(PANDA_NATIVE_COMPACTION="1", TYPESAFE_API_KEY="fixture-judge-key",
+    env.update(TYPESAFE_API_KEY="fixture-judge-key",
                TYPESAFE_BASE_URL=f"http://127.0.0.1:{port}/jev")
     (state / "settings.json").write_text(json.dumps({"compaction": {
         "keepRecentTokens": 24000, "modelOverrides": {"local-a/gpt-text": {"keepRecentTokens": 0}}}}))
