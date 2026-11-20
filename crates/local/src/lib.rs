@@ -10,3 +10,7 @@ pub mod worker;
 
 pub mod prompts;
 pub mod resources;
+
+pub mod catalog;
+pub mod mcp;
+pub mod packages;

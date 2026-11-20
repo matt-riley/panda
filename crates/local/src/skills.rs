@@ -22,9 +22,11 @@ struct Entry {
 }
 
 fn entry(path: &Path) -> Result<Entry> {
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{BufReader, Read};
     let file = crate::resources::open_resource(path)?.context("skill disappeared")?;
-    let mut reader = BufReader::new(file.take(16 * 1024));
+    from_reader(path, BufReader::new(file.take(16 * 1024)))
+}
+fn from_reader(path: &Path, mut reader: impl std::io::BufRead) -> Result<Entry> {
     let mut raw = String::new();
     reader.read_line(&mut raw)?;
     if raw.trim_end() == "---" {
@@ -75,7 +77,7 @@ fn entry(path: &Path) -> Result<Entry> {
     })
 }
 
-pub struct Library(Vec<PathBuf>);
+pub struct Library(Vec<PathBuf>, BTreeMap<PathBuf, String>);
 impl Library {
     pub fn new(roots: Vec<PathBuf>) -> Self {
         Self(
@@ -83,7 +85,19 @@ impl Library {
                 .into_iter()
                 .map(|p| p.canonicalize().unwrap_or(p))
                 .collect(),
+            BTreeMap::new(),
         )
+    }
+
+    pub fn with_packages(mut self, resources: BTreeMap<PathBuf, String>) -> Self {
+        self.1 = resources;
+        self
+    }
+    fn body(&self, path: &Path) -> Result<String> {
+        if let Some(body) = self.1.get(path) {
+            return Ok(body.clone());
+        }
+        crate::resources::optional_text(path)?.context("skill disappeared")
     }
 
     fn catalog(&self) -> Result<(Vec<Entry>, Vec<String>)> {
@@ -121,6 +135,16 @@ impl Library {
                         }
                     }
                     Err(e) => diagnostics.push(format!("Invalid skill {}: {e:#}", path.display())),
+                }
+            }
+        }
+        for (id, body) in &self.1 {
+            match from_reader(id, std::io::Cursor::new(body.as_bytes())) {
+                Ok(item) => {
+                    catalog.entry(item.name.clone()).or_insert(item);
+                }
+                Err(e) => {
+                    diagnostics.push(format!("Invalid package skill {}: {e:#}", id.display()))
                 }
             }
         }
@@ -175,7 +199,7 @@ impl Library {
             .into_iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))
             .with_context(|| format!("unknown skill {name}"))?;
-        let body = crate::resources::optional_text(&e.path)?.context("skill disappeared")?;
+        let body = self.body(&e.path)?;
         Ok((e.path, body))
     }
     pub fn startup_index(&self) -> Result<String> {
@@ -211,7 +235,7 @@ impl Skills for Library {
             self.catalog()?.0.iter().any(|e| e.path == p && !e.disabled),
             "unknown or explicitly invoked skill path"
         );
-        crate::resources::optional_text(p)?.context("skill disappeared")
+        self.body(p)
     }
 }
 #[cfg(test)]
