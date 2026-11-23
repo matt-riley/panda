@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.23](https://github.com/matt-riley/panda/compare/v0.1.22...v0.1.23) (2026-11-23)
+
+
+### Bug Fixes
+
+* isolate project MCP servers and protect nested skills ([#84](https://github.com/matt-riley/panda/issues/84)) ([b89b75b](https://github.com/matt-riley/panda/commit/b89b75be3514d75104a616f0ba82580b500e908c))
+
 ## [0.1.22](https://github.com/matt-riley/panda/compare/v0.1.21...v0.1.22) (2026-11-20)
 
 
