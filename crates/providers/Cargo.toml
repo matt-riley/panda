@@ -6,13 +6,13 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-rusqlite = { version = "0.37", features = ["bundled"] }
-base64 = "0.22"
+rusqlite = { version = "0.43", features = ["bundled"] }
+base64 = "0.23"
 regex = "1"
 ring = "0.17"
 serde_json.workspace = true
 panda-core = { path = "../core" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking","json","rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking","json","rustls-tls"] }
 tokio = { version = "1", features = ["rt","time","macros"] }
 httpdate = "1"
 
