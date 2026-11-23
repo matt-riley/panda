@@ -24,7 +24,9 @@ Use `--project` on mutations for a checkout-scoped install. Personal installs ar
 
 ## MCP servers
 
-Put personal server configuration in `$PANDA_HOME/mcp.json` (default `~/.panda/mcp.json`) or trusted project configuration in `.panda/mcp.json`.
+Put personal server configuration in `$PANDA_HOME/mcp.json` (default `~/.panda/mcp.json`) and local stdio commands for a trusted checkout in `.panda/mcp.json`. Remote HTTP servers belong in personal configuration, including loopback servers.
+
+For example, a personal configuration can contain both transports.
 
 ```json
 {
@@ -39,6 +41,6 @@ Put personal server configuration in `$PANDA_HOME/mcp.json` (default `~/.panda/m
 }
 ```
 
-Panda negotiates MCP revision `2025-06-18` at startup. Stdio servers exchange newline-delimited JSON-RPC. Streamable HTTP accepts JSON and SSE responses and carries the negotiated session ID until shutdown. Project stdio programs run in the native read-only workspace sandbox. Install their runtimes in an allowed toolchain directory if needed. Personal stdio servers receive a minimal process environment plus values explicitly supplied in the server’s `env` object.
+Panda negotiates MCP revision `2025-06-18` at startup. Stdio servers exchange newline-delimited JSON-RPC. Streamable HTTP accepts JSON and SSE responses and carries the negotiated session ID until shutdown. Project stdio programs run in the native read-only workspace sandbox. Each server gets its own temporary directory for both `HOME` and `TMPDIR`, separate from the agent shell and other servers. Panda removes it at shutdown. Project configuration cannot override these two variables. Install their runtimes in an allowed toolchain directory if needed. Personal stdio servers receive a minimal process environment plus values explicitly supplied in the server’s `env` object.
 
 A server's `lookup` tool appears as `mcp_docs_lookup`. Declaring it in `readOnlyTools` exposes it in plan mode and in the `mcp.docs` Codemode namespace. Other server tools require code mode. Resource-capable servers expose `mcp_catalog_resources_list`, `mcp_catalog_resources_templates` and `mcp_catalog_resources_read`. List calls accept an optional cursor. Reads take a URI. Tool and resource results preserve their MCP JSON structure, including content blocks and structured data. Existing tool allowlists, hidden/deferred exposure and cancellation apply to these calls.
