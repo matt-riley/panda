@@ -1,6 +1,6 @@
 # Pi feature map
 
-Each row names the upstream behavior and the Panda regression that checks it. The tree cases use [Pi’s navigation tests at 9428424](https://github.com/earendil-works/pi/blob/942842439e1f1d65f68a61857ddb7590b80c5a92/packages/coding-agent/test/agent-session-tree-navigation.test.ts). Panda exercises the equivalent behavior with Rust assertions, a scripted provider and SQLite.
+Panda’s tree regressions check the behavior from [Pi’s navigation tests at 9428424](https://github.com/earendil-works/pi/blob/942842439e1f1d65f68a61857ddb7590b80c5a92/packages/coding-agent/test/agent-session-tree-navigation.test.ts) with Rust assertions, a scripted provider and SQLite.
 
 | Pi behavior | Panda coverage |
 |---|---|
@@ -18,7 +18,7 @@ Each row names the upstream behavior and the Panda regression that checks it. Th
 | Portable sessions and offline HTML | Pi JSONL import and export preserve the tree and active head. An [offline browser test](../crates/cli/tests/html_export.mjs) checks the initial branch, labels, literal tool output and switching branches. Shipped in [#48](https://github.com/matt-riley/panda/pull/48) and [#59](https://github.com/matt-riley/panda/pull/59). |
 | Codemode console | Print and JSON loopback tests in the one-shot suite check ordered offsets 0 and 50 and cursor rollback on failure. Present on main after [#67](https://github.com/matt-riley/panda/pull/67). |
 
-**Release coverage, 20 November 2026.** The machine’s installed Homebrew keg reported 0.1.14. The five behaviors from #54 through #59 above are in the 0.1.21 formula binary and on main. Console output was on main only at the audited revision (`18fb82e`). The linked regressions exercise fixtures. The separate [daily-use record](daily-use-verification.md) describes the live provider, Pi and Chrome runs. [Release 0.1.21](https://github.com/matt-riley/panda/releases/tag/v0.1.21) · [Audited main](https://github.com/matt-riley/panda/commit/18fb82e25df15bfd8e150883aea22a580cd1af85)
+**Release coverage, 20 November 2026.** The installed Homebrew keg reported 0.1.14. The five behaviors from #54 through #59 above are in the 0.1.21 formula binary and on main. At the audited revision (`18fb82e`), console output was available only on main. The linked regressions use fixtures; the [daily-use record](daily-use-verification.md) covers the live provider, Pi and Chrome runs. [Release 0.1.21](https://github.com/matt-riley/panda/releases/tag/v0.1.21) · [Audited main](https://github.com/matt-riley/panda/commit/18fb82e25df15bfd8e150883aea22a580cd1af85)
 
 Panda’s picker offers user messages, completed assistant answers and saved branch summaries as navigation targets. Tool calls, results and reasoning stay in the selected path.
 
