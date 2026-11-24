@@ -21,7 +21,7 @@ pub struct ToolDefinition {
     pub schema: Value,
     pub access: Access,
     pub output: OutputKind,
-    /// A namespace opts a read-only handler into sandboxed code composition.
+    /// Namespace used for discovery of composable handlers.
     pub namespace: Option<String>,
 }
 impl ToolDefinition {
@@ -30,6 +30,14 @@ impl ToolDefinition {
     }
     pub fn allowed(&self, mode: Mode) -> bool {
         self.access != Access::Mutate || mode == Mode::Code
+    }
+    pub fn composable(&self, mode: Mode) -> bool {
+        self.namespace.is_some()
+            && (self.access == Access::Read
+                || (mode == Mode::Code
+                    && self.access == Access::Mutate
+                    && self.namespace.as_deref() == Some("workspace")
+                    && matches!(self.name(), "write" | "edit")))
     }
     pub fn validate(&self, args: &Value) -> Result<()> {
         validate(&self.schema["function"]["parameters"], args, self.name())

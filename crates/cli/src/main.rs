@@ -627,7 +627,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--scrollback uses normal terminal scrollback and inline image previews.\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--scrollback uses normal terminal scrollback and inline image previews.\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\nCodemode is enabled by default and can write and edit files in code mode. --no-codemode disables it. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
@@ -860,6 +860,9 @@ fn run(
             &provider_tools
         }
     };
+    let codemode_filtered =
+        options.hidden.contains("codemode") || options.deferred.contains("codemode");
+    let codemode_visible = options.codemode != CodemodeExposure::Off && !codemode_filtered;
     let provider_exposure = panda_coding::Exposure::new(
         tools,
         std::mem::take(&mut options.deferred),
@@ -881,17 +884,17 @@ fn run(
         || appended.is_some()
         || !options.append_system_prompt.is_empty()
         || options.codemode == CodemodeExposure::Only
+        || codemode_filtered
     {
         let mut prompt = if let Some(value) = &replacement {
-            let mut prompt = coding.system_with_base(value)?;
-            if options.codemode != CodemodeExposure::Off {
-                codemode.append_guidance(&mut prompt);
-            }
-            prompt
+            coding.system_with_base(value)?
         } else {
-            tools.system()?
+            base.system()?
         };
-        if options.codemode == CodemodeExposure::Only {
+        if codemode_visible {
+            codemode.append_guidance(&mut prompt);
+        }
+        if options.codemode == CodemodeExposure::Only && codemode_visible {
             prompt.push_str("\nUse codemode for every tool call. Follow tool-selection guidance inside the script using the available helpers.");
         }
         if let Some(text) = appended {

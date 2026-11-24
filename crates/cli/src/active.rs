@@ -73,7 +73,11 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
             }
         }
         Event::ResultDetails { details, .. } => pending.details = Some(details),
-        Event::NestedRead(_) | Event::Responder(_) | Event::BackingModel(_) | Event::Replay(_) => {}
+        Event::NestedRead(_)
+        | Event::NestedWrite(_)
+        | Event::Responder(_)
+        | Event::BackingModel(_)
+        | Event::Replay(_) => {}
         Event::NestedCall { call, .. } => {
             let line = format!("  {}", ui::header(&call));
             if screen.active {

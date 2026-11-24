@@ -117,6 +117,7 @@ fn exports_native_checkpoint_images_and_matching_tool_name() -> Result<()> {
             images: vec!["data:image/png;base64,YQ==".into()],
             is_error: false,
             nested_reads: vec![],
+            nested_writes: vec![],
         },
         Message::Assistant {
             text: "done".into(),

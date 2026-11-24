@@ -21,8 +21,8 @@ pub enum Interface {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum CodemodeExposure {
-    #[default]
     Off,
+    #[default]
     Alongside,
     Only,
 }
@@ -116,6 +116,7 @@ impl Options {
                         names.insert(name.to_owned());
                     }
                 }
+                "--no-codemode" => out.codemode = CodemodeExposure::Off,
                 "--codemode-only" => out.codemode = CodemodeExposure::Only,
                 "--tools" | "--no-tools" => {
                     ensure!(out.tools.is_none(), "specify --tools or --no-tools once");
@@ -489,6 +490,20 @@ mod tests {
         io::Write,
         process::{Command, Stdio},
     };
+
+    #[test]
+    fn ordinary_invocations_enable_codemode() {
+        for flags in ["", "--print hello", "--mode json hello", "--mode rpc"] {
+            let flags = flags
+                .split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                Options::parse(&flags, true).unwrap().codemode,
+                CodemodeExposure::Alongside
+            );
+        }
+    }
 
     #[test]
     fn rejects_invalid_one_shot_options() {

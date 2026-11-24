@@ -168,6 +168,36 @@ fn selected_tools_restrict_direct_and_nested_dispatch() -> Result<()> {
 
 #[test]
 #[ignore = "requires native macOS Seatbelt"]
+fn code_mode_orders_nested_writes_edits_and_reads() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let base = coding(root.path())?;
+    let enabled = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
+    let script = r#"// @options: {"async":true}
+const results = await Promise.all([
+    tools.write({path:"note",text:"first"}),
+    tools.edit({path:"note",old:"first",new:"second"}),
+    tools.read({path:"note"})
+]);
+return results[2];"#;
+    let request = call("codemode", json!({"code":script}));
+    for mode in [Mode::Plan, Mode::Code] {
+        let selected = panda_coding::SelectedTools::new(&base, ["read".to_owned()].into())?;
+        let restricted = Codemode::new(&selected, EXE.as_ref(), &base.workspace.root);
+        assert!(run_text(&restricted, mode, &request, &Cancel::default()).is_err());
+        assert!(!root.path().join("note").exists());
+    }
+    assert!(run_text(&enabled, Mode::Plan, &request, &Cancel::default()).is_err());
+    assert!(!root.path().join("note").exists());
+    assert_eq!(
+        run_text(&enabled, Mode::Code, &request, &Cancel::default())?,
+        "second"
+    );
+    assert_eq!(fs::read_to_string(root.path().join("note"))?, "second");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
 fn paginated_todo_ranking() -> Result<()> {
     let root = tempfile::tempdir()?;
     for (file, count) in [
@@ -532,7 +562,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
     let run = |code: &str| {
         run_text(
             &enabled,
-            Mode::Code,
+            Mode::Plan,
             &call("codemode", json!({"code":code})),
             &Cancel::default(),
         )
@@ -540,7 +570,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
     assert!(
         run_text(
             &base,
-            Mode::Code,
+            Mode::Plan,
             &call("codemode", json!({"code":"text(1)"})),
             &Cancel::default()
         )
@@ -552,7 +582,7 @@ fn reads_limits_and_cancellation() -> Result<()> {
     );
     assert_eq!(
         run("text([typeof process,typeof fetch,typeof require,Object.keys(tools).sort()])")?,
-        r#"["undefined","undefined","undefined",["ls","read","repo_map","search"]]"#
+        r#"["undefined","undefined","undefined",["ls","read","repo_map","search","shell_result"]]"#
     );
     assert!(run("tools.write({path:'note', text:'bad'})").is_err());
     assert_eq!(fs::read_to_string(root.path().join("note"))?, "hello");
@@ -681,6 +711,59 @@ fn noisy_shell_failure_can_be_read_in_plan_and_codemode() -> Result<()> {
             "long-output-line\n".repeat(100000)
         )
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native macOS Seatbelt"]
+fn scripts_inspect_a_completed_shell_call_by_id() -> Result<()> {
+    struct Inspect;
+    impl Provider for Inspect {
+        fn reply(
+            &mut self,
+            _: &str,
+            history: &[Message],
+            _: &[Value],
+            _: &Cancel,
+            _: &mut Emit,
+        ) -> Result<(String, Vec<Call>)> {
+            let next = match history.last().unwrap() {
+                Message::User(_) => Call {
+                    id: "test-log".into(),
+                    name: "shell".into(),
+                    args: json!({"command": "awk 'BEGIN { for(i=1;i<=20000;i++) print i }'; exit 7"}),
+                },
+                Message::Result { id, .. } if id == "test-log" => call(
+                    "codemode",
+                    json!({"code": r#"
+const result = tools.shell_result({id:"test-log"});
+return [result.exitCode, result.elapsedMs >= 0 && Number.isInteger(result.elapsedMs),
+        result.truncated, tools.read({path:result.fullOutputPath,offset:10000,limit:1})];
+"#}),
+                ),
+                Message::Result { text, .. } => return Ok((text.clone(), vec![])),
+                _ => anyhow::bail!("unexpected provider input"),
+            };
+            Ok((String::new(), vec![next]))
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let base = coding(root.path())?;
+    let tools = Codemode::new(&base, EXE.as_ref(), &base.workspace.root);
+    let mut db = MemoryStore::default();
+    turn(
+        &mut Inspect,
+        &mut db,
+        &tools,
+        "inspect the test log".into(),
+        &Cancel::default(),
+        &mut |_| {},
+    )?;
+    let session = db.load()?;
+    let Some(Message::Assistant { text, .. }) = session.history.last() else {
+        anyhow::bail!("missing final answer");
+    };
+    assert_eq!(text, r#"[7,true,true,"10000\n"]"#);
     Ok(())
 }
 

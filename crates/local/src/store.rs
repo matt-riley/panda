@@ -380,6 +380,7 @@ mod tests {
                 images: vec![],
                 is_error: false,
                 nested_reads: vec![],
+                nested_writes: vec![],
             },
             Message::Assistant {
                 text: "visible reply".into(),

@@ -26,6 +26,19 @@ impl CheckpointFiles {
         }
     }
 
+    pub(crate) fn record_nested(&mut self, reads: &[String], writes: &[String]) {
+        for path in writes {
+            self.read_files.remove(path);
+            self.modified_files.insert(path.clone());
+        }
+        self.read_files.extend(
+            reads
+                .iter()
+                .filter(|p| !self.modified_files.contains(*p))
+                .cloned(),
+        );
+    }
+
     pub fn summary_suffix(&self) -> String {
         let mut suffix = String::new();
         for (tag, paths) in [
@@ -81,17 +94,12 @@ impl Session {
                     id,
                     is_error,
                     nested_reads,
+                    nested_writes,
                     ..
                 } => {
                     if let Some(call) = calls.iter().find(|c| c.id == *id) {
                         if call.name == "codemode" {
-                            // Successful nested reads remain real even if the script later fails.
-                            files.read_files.extend(
-                                nested_reads
-                                    .iter()
-                                    .filter(|p| !files.modified_files.contains(*p))
-                                    .cloned(),
-                            );
+                            files.record_nested(nested_reads, nested_writes);
                         } else if !is_error {
                             files.record(call);
                         }
@@ -125,7 +133,7 @@ mod tests {
                     calls: vec![Call { id: "reused".into(), name: name.into(), args: serde_json::json!({"path": path}) }],
                 });
                 session.history.push(Message::Result {
-                    details: None, id: "reused".into(), text: String::new(), images: vec![], nested_reads: vec![], is_error: !success,
+                    details: None, id: "reused".into(), text: String::new(), images: vec![], nested_reads: vec![], nested_writes: vec![], is_error: !success,
                 });
                 if success {
                     match name {
