@@ -541,13 +541,11 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
 
 fn transfer_session(args: &[String]) -> Result<()> {
     let root = std::env::current_dir()?.canonicalize()?;
-    let native = Native::new(&root, &std::env::current_exe()?)?;
-    let (args, dir) = match args {
-        [args @ .., flag, dir] if flag == "--session-dir" => {
-            (args, native.session_dir(Path::new(dir))?)
-        }
-        _ => (args, state_dir()?),
+    let (args, override_dir) = match args {
+        [args @ .., flag, dir] if flag == "--session-dir" => (args, Some(Path::new(dir))),
+        _ => (args, None),
     };
+    let dir = panda_local::sandbox::transfer_dir(&root, override_dir)?;
     match args {
         [flag, id, pointer] if flag == "--recover-transcript" => {
             let disk = Disk::open(

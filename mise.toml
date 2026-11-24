@@ -14,7 +14,17 @@ description = "Run the complete suite on native macOS, including Seatbelt isolat
 run = 'pi_bin=$(command -v pi) && PANDA_TEST_PI="$pi_bin" cargo test --locked --workspace -- --include-ignored'
 
 [tasks.linux-ci]
-depends = ["lint", "portable-test"]
+depends = ["lint", "portable-test", "linux-session-transfer"]
+
+[tasks.linux-session-transfer]
+description = "Install Panda and round-trip offline sessions on the Linux runner"
+run = '''
+set -eu
+install_dir=$(mktemp -d)
+trap 'rm -rf "$install_dir"' EXIT
+cargo install --locked --debug --path crates/cli --root "$install_dir"
+python3 crates/cli/tests/offline_transfer.py "$install_dir/bin/panda"
+'''
 
 [tasks.portable-test]
 description = "Exercise the reusable host, agent loop, and providers on Linux"
