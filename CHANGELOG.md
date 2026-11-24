@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.25](https://github.com/matt-riley/panda/compare/v0.1.24...v0.1.25) (2026-11-24)
+
+
+### Features
+
+* configure provider retries, deadlines and streaming transport ([#97](https://github.com/matt-riley/panda/issues/97)) ([adcf6be](https://github.com/matt-riley/panda/commit/adcf6bec215a98e20ad6af403fb39d5d37f6f905))
+* enable writable Codemode by default ([#93](https://github.com/matt-riley/panda/issues/93)) ([f833f64](https://github.com/matt-riley/panda/commit/f833f6486ae6724c40de6b0fb70752553c949628))
+* expose metered classification and image generation to Codemode ([#98](https://github.com/matt-riley/panda/issues/98)) ([5f9c458](https://github.com/matt-riley/panda/commit/5f9c458b9f503d019d6c66ff0cb5c16141f95698))
+* extend deployment-specific model provider coverage ([#96](https://github.com/matt-riley/panda/issues/96)) ([50843d1](https://github.com/matt-riley/panda/commit/50843d12d23389d0cf4abbe25fa09afb8ae49593))
+* manage MCP authentication, reconnect and tool exposure ([#95](https://github.com/matt-riley/panda/issues/95)) ([90e582f](https://github.com/matt-riley/panda/commit/90e582f071cf9464598f8c5137557794a8ff2094))
+
 ## [0.1.24](https://github.com/matt-riley/panda/compare/v0.1.23...v0.1.24) (2026-11-24)
 
 
