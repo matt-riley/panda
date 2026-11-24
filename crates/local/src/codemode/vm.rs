@@ -12,8 +12,8 @@ use std::{
 
 fn invoke(name: String, arguments: String) -> Result<String> {
     ensure!(
-        arguments.len() <= ARG_BYTES,
-        "nested arguments exceed 16 KiB"
+        arguments.len() <= argument_limit(&name),
+        "nested arguments exceed size limit (16 KiB for ordinary calls)"
     );
     let args = serde_json::from_str(&arguments)?;
     exchange(WorkerMessage::Invoke { name, args })
@@ -182,7 +182,7 @@ fn evaluate(code: &str, catalog: &RawValue) -> Result<ScriptOutput> {
             Function::new(ctx.clone(), |ctx: Ctx<'_>, json: String| {
                 let result = (|| -> Result<String> {
                     ensure!(
-                        json.len() <= 4 * (ARG_BYTES + 128),
+                        json.len() <= MAX_IMAGE_URL_BYTES,
                         "nested batch exceeds argument limit"
                     );
                     exchange(WorkerMessage::Batch(serde_json::from_str(&json)?))

@@ -73,7 +73,8 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
             }
         }
         Event::ResultDetails { details, .. } => pending.details = Some(details),
-        Event::NestedRead(_)
+        Event::ModelAttempt(_)
+        | Event::NestedRead(_)
         | Event::NestedWrite(_)
         | Event::Responder(_)
         | Event::BackingModel(_)

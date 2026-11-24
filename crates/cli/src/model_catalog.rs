@@ -30,6 +30,8 @@ pub struct Endpoint {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Model {
+    #[serde(default)]
+    pub inference: BTreeSet<String>,
     pub id: String,
     pub name: Option<String>,
     pub context_window: u64,
@@ -91,6 +93,17 @@ impl Catalog {
             ensure!(!ep.models.is_empty(), "no models for {id} in models.json");
             let mut seen = BTreeSet::new();
             for model in &ep.models {
+                ensure!(
+                    model
+                        .inference
+                        .iter()
+                        .all(|t| matches!(t.as_str(), "generate_image" | "classify"))
+                        && (model.inference.is_empty()
+                            || ep.api.as_deref().is_none_or(|a| a == "openai-completions")),
+                    "unsupported inference capability or API family for {id}/{}",
+                    model.id
+                );
+
                 ensure!(
                     !model.id.is_empty()
                         && !model.id.chars().any(char::is_whitespace)

@@ -160,39 +160,59 @@ pub(crate) fn tracked(
     {
         report = Some(value.clone());
     }
-    let mut usage = report.as_ref().and_then(UsageRecord::from_event);
-    let reported = report.as_ref().and_then(|u| {
-        u["cost"]
-            .as_f64()
-            .or_else(|| u.pointer("/cost/total").and_then(Value::as_f64))
-    });
-    let calculated = usage
-        .as_ref()
-        .filter(|_| model == backing)
-        .and_then(|reading| p.prices().and_then(|prices| prices.price(reading)));
-    let cost = reported.or(calculated);
-    let source = if reported.is_some() {
-        "reported"
-    } else if calculated.is_some() {
-        "catalog"
-    } else {
-        "unknown"
-    };
-    if let Some(reading) = &mut usage {
-        reading.through = through;
-        reading.cost = cost;
-    }
-    attempts.push(Attempt {
-        cost,
-        through,
+    let prices = (model == backing).then(|| p.prices()).flatten();
+    attempts.push(Attempt::from_report(
         model,
-        purpose: purpose.into(),
-        outcome: if result.is_ok() { "ok" } else { "failed" }.into(),
-        usage,
-        cost_source: source.into(),
-        timestamp: timestamp(),
-    });
+        purpose,
+        through,
+        report.as_ref(),
+        prices.as_ref(),
+        result.is_ok(),
+    ));
     result
+}
+
+impl Attempt {
+    pub fn from_report(
+        model: Option<ModelId>,
+        purpose: &str,
+        through: usize,
+        report: Option<&Value>,
+        prices: Option<&TokenPrices>,
+        ok: bool,
+    ) -> Self {
+        let mut usage = report.and_then(UsageRecord::from_event);
+        let reported = report.and_then(|u| {
+            u["cost"]
+                .as_f64()
+                .or_else(|| u.pointer("/cost/total").and_then(Value::as_f64))
+        });
+        let calculated = usage
+            .as_ref()
+            .and_then(|reading| prices.and_then(|p| p.price(reading)));
+        let cost = reported.or(calculated);
+        let source = if reported.is_some() {
+            "reported"
+        } else if calculated.is_some() {
+            "catalog"
+        } else {
+            "unknown"
+        };
+        if let Some(reading) = &mut usage {
+            reading.through = through;
+            reading.cost = cost;
+        }
+        Self {
+            cost,
+            through,
+            model,
+            purpose: purpose.into(),
+            outcome: if ok { "ok" } else { "failed" }.into(),
+            usage,
+            cost_source: source.into(),
+            timestamp: timestamp(),
+        }
+    }
 }
 pub struct IdentifiedProvider {
     pub persist_default: bool,

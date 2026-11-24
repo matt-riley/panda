@@ -7,6 +7,7 @@ mod html;
 mod markdown;
 mod model_catalog;
 use model_catalog::{Catalog, available_models, scope_effort};
+mod inference;
 mod picker;
 mod renderer;
 mod routing;
@@ -858,14 +859,19 @@ fn run(
         workspace: native,
         skills: Library::new(roots).with_packages(packages.skills),
     };
+    let inference = inference::Models {
+        inner: &coding,
+        state: &state,
+        catalog: &catalog,
+    };
     let selected_tools = options
         .tools
         .take()
-        .map(|names| panda_coding::SelectedTools::new(&coding, names))
+        .map(|names| panda_coding::SelectedTools::new(&inference, names))
         .transpose()?;
     let base: &(dyn Toolset + Sync) = match &selected_tools {
         Some(selected) => selected,
-        None => &coding,
+        None => &inference,
     };
     // Native and script dispatch share the same policy. The outer projection
     // additionally controls the synthetic codemode tool itself.

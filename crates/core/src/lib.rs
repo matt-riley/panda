@@ -25,7 +25,7 @@ pub struct Cancel {
     response_started: Arc<AtomicBool>,
 }
 impl Cancel {
-    fn attempt(&self, timeout_ms: Option<u32>) -> Self {
+    pub fn for_request(&self, timeout_ms: Option<u32>) -> Self {
         let deadline = timeout_ms
             .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms.into()));
         Self {
@@ -568,7 +568,7 @@ pub fn warm(
     input.push(Message::User("Reply OK without calling tools.".into()));
     let schemas = tools.schemas_for(&session);
     let system = tools.system()?;
-    let attempt = cancel.attempt(session.request_policy.timeout_ms);
+    let attempt = cancel.for_request(session.request_policy.timeout_ms);
     let result = tracked(
         p,
         &mut session.attempts,
@@ -627,6 +627,7 @@ pub enum Event {
     AssistantComplete(String),
     Usage(Value),
     Calling(Call),
+    ModelAttempt(Attempt),
     NestedRead(String),
     NestedWrite(String),
     NestedCall { parent: String, call: Call },
@@ -729,13 +730,22 @@ pub fn run_nested(
     call: &Call,
     cancel: &Cancel,
 ) -> Result<ToolOutput> {
+    run_nested_with_events(tools, session, call, cancel, &mut |_| {})
+}
+pub fn run_nested_with_events(
+    tools: &dyn Toolset,
+    session: &Session,
+    call: &Call,
+    cancel: &Cancel,
+    emit: &mut Emit,
+) -> Result<ToolOutput> {
     let definition = tools
         .nested_definitions(session)
         .into_iter()
         .find(|d| d.name() == call.name && d.composable(session.mode))
         .ok_or_else(|| anyhow::anyhow!("unavailable nested tool {}", call.name))?;
     definition.validate(&call.args)?;
-    let (output, writes) = tools.run(session, call, cancel, &mut |_| {})?;
+    let (output, writes) = tools.run(session, call, cancel, emit)?;
     anyhow::ensure!(
         writes.is_empty(),
         "nested tool returned unexpected session store writes"
@@ -1041,7 +1051,9 @@ fn drive_turn(
                 let mut nested_reads = std::collections::BTreeSet::new();
                 let mut nested_writes = std::collections::BTreeSet::new();
                 let started = std::time::Instant::now();
+                let mut model_attempts = Vec::new();
                 let mut handle = |event| match event {
+                    Event::ModelAttempt(a) => model_attempts.push(a),
                     Event::NestedRead(path) => {
                         nested_reads.insert(path);
                     }
@@ -1059,6 +1071,10 @@ fn drive_turn(
                     }
                     None => tools.run(&s, &call, cancel, &mut handle),
                 };
+                if !model_attempts.is_empty() {
+                    s.attempts.extend(model_attempts);
+                    store.save(&mut s)?;
+                }
                 let is_error = result.is_err();
                 let (mut output, writes) = result.unwrap_or_else(|e| {
                     let mut output = ToolOutput::from(format!("tool error: {e}"));

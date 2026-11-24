@@ -49,7 +49,7 @@ pub(crate) fn request<T>(
     for attempt in 0.. {
         cancel.check()?;
         let mut streamed = false;
-        let token = cancel.attempt(policy.timeout_ms);
+        let token = cancel.for_request(policy.timeout_ms);
         let result = send(&token, &mut |event| {
             streamed = true;
             emit(event);
