@@ -1,6 +1,6 @@
 [tools]
 # CI installs repository tools before running tasks with --skip-tools.
-pi = { version = "1.5.2", os = ["macos"] }
+pi = { version = "1.6.0", os = ["macos"] }
 rust = { version = "1.100.0", components = ["rustfmt", "clippy"] }
 
 [tasks.fmt]
