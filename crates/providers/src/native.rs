@@ -1,5 +1,6 @@
 //! API-key streaming endpoints. Codex subscriptions keep their own OAuth transport.
 mod history;
+mod pi;
 mod stream;
 use crate::{Api, checked, subscription::cancellable, transport_error, wire};
 use anyhow::{Result, bail, ensure};
@@ -12,6 +13,9 @@ pub enum Family {
     Anthropic,
     Responses,
     Gemini,
+    Azure,
+    Vertex,
+    Pi,
 }
 impl Family {
     pub fn parse(name: &str) -> Result<Self> {
@@ -19,7 +23,17 @@ impl Family {
             "anthropic-messages" => Ok(Self::Anthropic),
             "openai-responses" => Ok(Self::Responses),
             "google-generative-ai" => Ok(Self::Gemini),
+            "azure-openai-responses" => Ok(Self::Azure),
+            "google-vertex" => Ok(Self::Vertex),
+            "pi-messages" => Ok(Self::Pi),
             _ => bail!("unknown native API family {name}"),
+        }
+    }
+    fn wire(self) -> Self {
+        match self {
+            Self::Azure => Self::Responses,
+            Self::Vertex => Self::Gemini,
+            other => other,
         }
     }
     pub fn name(self) -> &'static str {
@@ -27,6 +41,9 @@ impl Family {
             Self::Anthropic => "anthropic-messages",
             Self::Responses => "openai-responses",
             Self::Gemini => "google-generative-ai",
+            Self::Azure => "azure-openai-responses",
+            Self::Vertex => "google-vertex",
+            Self::Pi => "pi-messages",
         }
     }
 }
@@ -59,13 +76,13 @@ impl NativeApi {
                 .map_err(|_| anyhow::anyhow!("invalid provider URL"))?;
             segments.pop_if_empty();
             match self.family {
-                Family::Anthropic => {
+                Family::Anthropic | Family::Pi => {
                     segments.push("messages");
                 }
-                Family::Responses => {
+                Family::Responses | Family::Azure => {
                     segments.push("responses");
                 }
-                Family::Gemini => {
+                Family::Gemini | Family::Vertex => {
                     let model = self
                         .api
                         .model
@@ -77,7 +94,7 @@ impl NativeApi {
                 }
             }
         }
-        if self.family == Family::Gemini {
+        if self.family.wire() == Family::Gemini {
             url.query_pairs_mut().append_pair("alt", "sse");
         }
         Ok(url)
@@ -87,7 +104,7 @@ impl NativeApi {
             emit(Event::Replay(ProviderReplay {
                 provider: self.provider.clone(),
                 model: self.api.model.clone(),
-                family: self.family.name().into(),
+                family: self.family.wire().name().into(),
                 blocks,
             }));
         }
@@ -114,7 +131,11 @@ impl Provider for NativeApi {
         effort: Option<&str>,
     ) -> Result<(String, Vec<Call>)> {
         cancel.check()?;
-        let body = history::body(self, s, h, tools, effort)?;
+        let body = if self.family == Family::Pi {
+            pi::body(self, s, h, tools, effort)?
+        } else {
+            history::body(self, s, h, tools, effort)?
+        };
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -127,7 +148,10 @@ impl Provider for NativeApi {
         if !self.api.key.is_empty() {
             request = match self.family {
                 Family::Anthropic => request.header("x-api-key", &self.api.key),
-                Family::Responses => request.bearer_auth(&self.api.key),
+                Family::Azure => request.header("api-key", &self.api.key),
+                Family::Responses | Family::Vertex | Family::Pi => {
+                    request.bearer_auth(&self.api.key)
+                }
                 Family::Gemini => request.header("x-goog-api-key", &self.api.key),
             };
         }
@@ -137,7 +161,7 @@ impl Provider for NativeApi {
         rt.block_on(cancellable(cancel, async {
             let mut response =
                 checked(request.json(&body).send().await.map_err(transport_error)?).await?;
-            if self.family == Family::Responses {
+            if self.family.wire() == Family::Responses {
                 let mut decoder = wire::Responses::default();
                 while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
                     decoder.push(&chunk, emit)?;
@@ -148,7 +172,7 @@ impl Provider for NativeApi {
                 return Ok(result);
             }
             let mut lines = wire::Lines::default();
-            let mut decoder = stream::Decoder::new(self.family, h.len(), self.max_tokens);
+            let mut decoder = stream::Decoder::new(self.family.wire(), h.len(), self.max_tokens);
             while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
                 lines.feed(&chunk, |v| decoder.push(v, emit))?;
             }

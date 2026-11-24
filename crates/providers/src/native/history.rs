@@ -45,7 +45,7 @@ fn anthropic_id(id: &str) -> String {
         .collect()
 }
 fn turns(api: &NativeApi, h: &[Message]) -> Result<Vec<Value>> {
-    let f = api.family;
+    let f = api.family.wire();
     let blocks = if f == Family::Anthropic {
         "content"
     } else {
@@ -227,7 +227,7 @@ pub(super) fn body(
     effort: Option<&str>,
 ) -> Result<Value> {
     let max = api.max_tokens;
-    if api.family == Family::Responses {
+    if api.family.wire() == Family::Responses {
         let mut body =
             wire::responses_history(&api.api.model, system, h, tools, Some(&api.provider));
         body["max_output_tokens"] = json!(max);
