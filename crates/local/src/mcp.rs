@@ -1,4 +1,8 @@
 //! Namespaced Model Context Protocol resources and tools share the ordinary Panda dispatcher.
+mod auth;
+mod management;
+mod policy;
+pub use management::manage;
 mod transport;
 use anyhow::{Context, Result, ensure};
 use panda_core::{Access, Cancel, OutputKind, ToolDefinition, ToolOutput};
@@ -21,6 +25,11 @@ struct FileConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ServerSpec {
+    #[serde(default)]
+    exposure: Visibility,
+    #[serde(default)]
+    tool_exposure: BTreeMap<String, Visibility>,
+    oauth: Option<auth::OAuth>,
     command: Option<String>,
     url: Option<String>,
     #[serde(default)]
@@ -30,48 +39,75 @@ struct ServerSpec {
     #[serde(default)]
     read_only_tools: BTreeSet<String>,
 }
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Visibility {
+    #[default]
+    Direct,
+    Deferred,
+    Hidden,
+}
+impl ServerSpec {
+    fn visibility(&self, tool: &str) -> Visibility {
+        self.tool_exposure
+            .get(tool)
+            .copied()
+            .unwrap_or(self.exposure)
+    }
+}
+
 struct Server {
     runtime: Runtime,
     connection: Mutex<Connection>,
     id: std::sync::atomic::AtomicU64,
 }
+fn initialize_request(id: u64) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{
+        "protocolVersion": VERSION, "capabilities": {},
+        "clientInfo": {"name": "panda", "version": env!("CARGO_PKG_VERSION")}
+    }})
+}
 impl Server {
     fn connect(
         spec: &ServerSpec,
+        credentials: Option<auth::Credentials>,
         root: &Path,
         sandbox: Option<&crate::sandbox::Native>,
     ) -> Result<(Self, Value)> {
         let runtime = Builder::new_current_thread().enable_all().build()?;
         let connection = {
             let _guard = runtime.enter();
-            Connection::open(spec, root, sandbox)?
+            Connection::open(spec, root, sandbox, credentials)?
         };
         let server = Self {
             runtime,
             connection: Mutex::new(connection),
             id: 1.into(),
         };
-        let hello = json!({
-            "protocolVersion": VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "panda", "version": env!("CARGO_PKG_VERSION")}
-        });
-        let init = server.call("initialize", hello, &Cancel::default())?;
+        let capabilities = {
+            let mut conn = server.connection.lock().unwrap();
+            server.runtime.block_on(server.initialize(&mut conn))?
+        };
+        Ok((server, capabilities))
+    }
+
+    async fn initialize(&self, conn: &mut Connection) -> Result<Value> {
+        let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let init = tokio_timeout(conn, initialize_request(id), Some(id)).await?;
         ensure!(
             init["protocolVersion"] == VERSION,
-            "unsupported MCP protocol {}",
-            init["protocolVersion"]
+            "unsupported MCP protocol version"
         );
-        let mut conn = server.connection.lock().unwrap();
-        server.runtime.block_on(tokio_timeout(
-            &mut conn,
+        tokio_timeout(
+            conn,
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             None,
-        ))?;
-        drop(conn);
-        Ok((server, init["capabilities"].clone()))
+        )
+        .await?;
+        Ok(init["capabilities"].clone())
     }
-    fn call(&self, method: &str, params: Value, cancel: &Cancel) -> Result<Value> {
+
+    fn call(&self, method: &str, params: Value, cancel: &Cancel, read_only: bool) -> Result<Value> {
         cancel.check()?;
         let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut conn = loop {
@@ -91,8 +127,24 @@ impl Server {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             };
+            let exchange = async {
+                let first = tokio_timeout(&mut conn, body.clone(), Some(id)).await;
+                if read_only
+                    && first
+                        .as_ref()
+                        .is_err_and(|err| err.is::<transport::Disconnected>())
+                    && let Connection::Http { session, .. } = &mut *conn
+                {
+                    *session = None;
+                    cancel.check()?;
+                    self.initialize(&mut conn).await?;
+                    cancel.check()?;
+                    return tokio_timeout(&mut conn, body, Some(id)).await;
+                }
+                first
+            };
             let outcome = tokio::select! {
-                result = tokio_timeout(&mut conn, body, Some(id)) => result,
+                result = exchange => result,
                 _ = cancelled => Err(anyhow::anyhow!("cancelled")),
             };
             if cancel.check().is_err()
@@ -123,6 +175,7 @@ impl Drop for Server {
     }
 }
 struct Operation {
+    visibility: Visibility,
     definition: ToolDefinition,
     server: String,
     method: &'static str,
@@ -141,88 +194,115 @@ impl Servers {
         native: &crate::sandbox::Native,
     ) -> Result<Self> {
         let mut registry = Self::default();
-        for (path, sandbox) in std::iter::once((state.join("mcp.json"), None))
-            .chain(trusted.then(|| (project.join(".panda/mcp.json"), Some(native))))
-        {
-            let Some(raw) = crate::resources::optional_text(&path)? else {
-                continue;
-            };
-            let file: FileConfig = serde_json::from_str(&raw)
-                .with_context(|| format!("invalid {}", path.display()))?;
-            for (name, spec) in file.mcp_servers {
-                ensure!(
-                    !registry.servers.contains_key(&name),
-                    "duplicate MCP server {name}"
-                );
-                ensure!(valid(&name), "invalid MCP server name {name}");
-                let (server, caps) = Server::connect(&spec, project, sandbox)
-                    .with_context(|| format!("connecting MCP server {name}"))?;
-                if caps["tools"].is_object() {
-                    let mut params = json!({});
-                    let mut cursors = BTreeSet::new();
-                    loop {
-                        let page = server.call("tools/list", params, &Cancel::default())?;
-                        for t in page["tools"]
-                            .as_array()
-                            .context("invalid MCP tools response")?
-                        {
-                            let tool = t["name"]
-                                .as_str()
-                                .filter(|s| valid(s))
-                                .context("invalid MCP tool name")?;
-                            ensure!(
-                                t["inputSchema"]["type"] == "object",
-                                "MCP tool {tool} needs object inputSchema"
-                            );
-                            registry.add(
-                                &name,
-                                "tools/call",
-                                Some(tool),
-                                tool,
-                                t["description"].as_str().unwrap_or(tool),
-                                t["inputSchema"].clone(),
-                                spec.read_only_tools.contains(tool),
-                            )?;
-                        }
-                        let Some(cursor) = page["nextCursor"].as_str() else {
-                            break;
-                        };
-                        ensure!(
-                            cursors.len() < 256 && cursors.insert(cursor.to_owned()),
-                            "invalid MCP tool pagination"
-                        );
-                        params = json!({"cursor":cursor});
-                    }
+        for (name, (spec, local)) in management::configured(state, project, trusted)? {
+            if let Err(err) =
+                registry.connect(&name, &spec, state, project, local.then_some(native))
+            {
+                if !err.is::<transport::LoginRequired>() {
+                    return Err(err);
                 }
-                if caps["resources"].is_object() {
-                    for (name_part, method, arg, required) in [
-                        ("resources_list", "resources/list", "cursor", false),
-                        (
-                            "resources_templates",
-                            "resources/templates/list",
-                            "cursor",
-                            false,
-                        ),
-                        ("resources_read", "resources/read", "uri", true),
-                    ] {
-                        let schema = json!({
-                            "type": "object",
-                            "properties": {(arg): {"type":"string"}},
-                            "required": if required {vec![arg]} else {vec![]},
-                            "additionalProperties": false
-                        });
-                        registry.add(&name, method, None, name_part, method, schema, true)?;
-                    }
-                }
-                registry.servers.insert(name, server);
+                registry.operations.retain(|_, op| op.server != name);
             }
         }
         Ok(registry)
+    }
+
+    fn connect(
+        &mut self,
+        name: &str,
+        spec: &ServerSpec,
+        state: &Path,
+        project: &Path,
+        sandbox: Option<&crate::sandbox::Native>,
+    ) -> Result<()> {
+        let credentials = auth::Credentials::new(state, name, spec, sandbox.is_some())?;
+        if let Some(auth) = &credentials
+            && auth.token()?.is_none()
+        {
+            return Ok(());
+        }
+        let (server, caps) = Server::connect(spec, credentials, project, sandbox)
+            .with_context(|| format!("connecting MCP server {name}"))?;
+        if caps["tools"].is_object() {
+            let mut params = json!({});
+            let mut cursors = BTreeSet::new();
+            loop {
+                let page = server.call("tools/list", params, &Cancel::default(), true)?;
+                for t in page["tools"]
+                    .as_array()
+                    .context("invalid MCP tools response")?
+                {
+                    let tool = t["name"]
+                        .as_str()
+                        .filter(|s| valid(s))
+                        .context("invalid MCP tool name")?;
+                    ensure!(
+                        t["inputSchema"]["type"] == "object",
+                        "MCP tool {tool} needs object inputSchema"
+                    );
+                    self.add(
+                        name,
+                        spec.visibility(tool),
+                        "tools/call",
+                        Some(tool),
+                        tool,
+                        t["description"].as_str().unwrap_or(tool),
+                        t["inputSchema"].clone(),
+                        spec.read_only_tools.contains(tool),
+                    )?;
+                }
+                let Some(cursor) = page["nextCursor"].as_str() else {
+                    break;
+                };
+                ensure!(
+                    cursors.len() < 256 && cursors.insert(cursor.to_owned()),
+                    "invalid MCP tool pagination"
+                );
+                params = json!({"cursor":cursor});
+            }
+        }
+        if caps["resources"].is_object() {
+            for (name_part, method, arg, required) in [
+                ("resources_list", "resources/list", "cursor", false),
+                (
+                    "resources_templates",
+                    "resources/templates/list",
+                    "cursor",
+                    false,
+                ),
+                ("resources_read", "resources/read", "uri", true),
+            ] {
+                let schema = json!({
+                    "type": "object",
+                    "properties": {(arg): {"type":"string"}},
+                    "required": if required {vec![arg]} else {vec![]},
+                    "additionalProperties": false
+                });
+                self.add(
+                    name,
+                    spec.visibility(name_part),
+                    method,
+                    None,
+                    name_part,
+                    method,
+                    schema,
+                    true,
+                )?;
+            }
+        }
+        self.servers.insert(name.into(), server);
+        Ok(())
+    }
+    pub fn deferred(&self, name: &str) -> bool {
+        self.operations
+            .get(name)
+            .is_some_and(|op| op.visibility == Visibility::Deferred)
     }
     #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         server: &str,
+        visibility: Visibility,
         method: &'static str,
         remote: Option<&str>,
         suffix: &str,
@@ -246,6 +326,7 @@ impl Servers {
         self.operations.insert(
             name,
             Operation {
+                visibility,
                 definition,
                 server: server.into(),
                 method,
@@ -257,17 +338,27 @@ impl Servers {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.operations
             .values()
+            .filter(|op| op.visibility != Visibility::Hidden)
             .map(|o| o.definition.clone())
             .collect()
     }
     pub fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<ToolOutput> {
-        let op = self.operations.get(name).context("unknown MCP operation")?;
+        let op = self
+            .operations
+            .get(name)
+            .filter(|op| op.visibility != Visibility::Hidden)
+            .context("unknown MCP operation")?;
         let params = if let Some(remote) = &op.remote {
             json!({"name":remote,"arguments":args})
         } else {
             args.clone()
         };
-        let result = self.servers[&op.server].call(op.method, params, cancel)?;
+        let result = self.servers[&op.server].call(
+            op.method,
+            params,
+            cancel,
+            op.definition.access == Access::Read,
+        )?;
         ensure!(
             result["isError"] != true,
             "MCP tool error: {}",

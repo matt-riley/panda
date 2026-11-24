@@ -15,7 +15,7 @@ use std::{
 
 pub struct Native {
     pub root: PathBuf,
-    pub mcp: crate::mcp::Servers,
+    pub mcp: std::sync::RwLock<crate::mcp::Servers>,
     worker: PathBuf,
     scratch: tempfile::TempDir,
     toolchains: Vec<PathBuf>,
@@ -267,7 +267,7 @@ fn wait_group(
 
 impl Workspace for Native {
     fn registered_tools(&self) -> Vec<panda_core::ToolDefinition> {
-        self.mcp.definitions()
+        self.mcp.read().unwrap().definitions()
     }
     fn invoke(&self, name: &str, args: &Value, cancel: &Cancel) -> Result<String> {
         self.invoke_stream(name, args, cancel, &mut |_| {})
@@ -281,7 +281,7 @@ impl Workspace for Native {
         emit: &mut panda_core::Emit,
     ) -> Result<ToolOutput> {
         if name.starts_with("mcp_") {
-            return self.mcp.invoke(name, args, cancel);
+            return self.mcp.read().unwrap().invoke(name, args, cancel);
         }
         if name == "shell" {
             let timeout = panda_coding::shell_timeout(args)?;

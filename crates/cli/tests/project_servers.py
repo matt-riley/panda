@@ -10,12 +10,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+import mcp_auth
+
 binary = str(Path(sys.argv[1]).resolve())
 chat_calls = []
 wire = []
 mcp_messages = []
 waiting = threading.Event()
 cancelled = threading.Event()
+drop_read = threading.Event()
 
 
 class Server(BaseHTTPRequestHandler):
@@ -60,6 +64,8 @@ class Server(BaseHTTPRequestHandler):
             assert body["params"]["protocolVersion"] == "2025-06-18"
             result = {"protocolVersion":"2025-06-18","capabilities":{"resources":{}},
                       "serverInfo":{"name":"fixture","version":"1"}}
+            if getattr(self.server, "mutation_fixture", False):
+                result["capabilities"]["tools"] = {}
             self.reply(json.dumps({"jsonrpc":"2.0","id":body["id"],"result":result}).encode(), session=True)
             return
         assert self.headers["Mcp-Session-Id"] == "fixture-session"
@@ -70,17 +76,26 @@ class Server(BaseHTTPRequestHandler):
                 cancelled.set()
             self.reply(b"", status=202)
             return
-        if method == "resources/list":
+        if method == "tools/list":
+            payload = {"result":{"tools":[{"name":"mutate","inputSchema":{"type":"object"}}]}}
+        elif method == "tools/call":
+            self.connection.close()
+            return
+        elif method == "resources/list":
             payload = {"result":{"resources":[{"uri":"fixture://one","name":"one"}]}}
         elif method == "resources/templates/list":
             payload = {"result":{"resourceTemplates":[{"uriTemplate":"fixture://{key}","name":"key"}]}}
         elif method == "resources/read":
             uri=body["params"]["uri"]
+            if uri.endswith("lost") or (uri.endswith("reconnect") and drop_read.is_set()):
+                drop_read.clear()
+                self.connection.close()
+                return
             if uri.endswith("slow"):
                 waiting.set()
                 assert cancelled.wait(8), "MCP client did not notify server of cancellation"
             if uri.endswith("absent"):
-                payload={"error":{"code":-32002,"message":"missing fixture resource"}}
+                payload={"error":{"code":-32002,"message": self.headers.get("Authorization") or "missing fixture resource"}}
             else:
                 payload={"result":{"contents":[{"uri":uri,"mimeType":"text/plain","text":"evidence"}]}}
         else:
@@ -89,7 +104,8 @@ class Server(BaseHTTPRequestHandler):
         self.reply((": keep-alive\r\n\r\nevent: message\r\ndata: " + json.dumps(payload) + "\r\n\r\n").encode(), "text/event-stream")
 
 
-def exercise(root, port):
+def exercise(root, http):
+    port = http.server_port
     repo, state = root / "repo", root / "state"
     repo.mkdir()
     state.mkdir(mode=0o700)
@@ -168,6 +184,28 @@ while (<STDIN>) {
         assert message["role"]=="tool",message
         return message["content"]
 
+    drop_read.set()
+    mcp_messages.clear()
+    recovered = call("mcp_http_resources_read", {"uri":"fixture://reconnect"}, "mcp_http_resources_read")
+    assert "evidence" in recovered, recovered
+    assert [m for m, _ in mcp_messages].count("initialize") == 2
+    assert [m for m, _ in mcp_messages].count("resources/read") == 2
+
+    mcp_messages.clear()
+    read = "mcp_http_resources_read"
+    lost = call(read, {"uri":"fixture://lost"}, read)
+    assert "tool error" in lost
+    assert [m for m, _ in mcp_messages].count("initialize") == 2
+    assert [m for m, _ in mcp_messages].count("resources/read") == 2
+
+    http.mutation_fixture = True
+    mcp_messages.clear()
+    mutation = "mcp_http_mutate"
+    assert "tool error" in call(mutation, {}, mutation)
+    assert [m for m, _ in mcp_messages].count("initialize") == 1
+    assert [m for m, _ in mcp_messages].count("tools/call") == 1
+    http.mutation_fixture = False
+
     chat_calls.extend([("mcp_stdio_double",{"n":1}),("mcp_peer_double",{"n":1}),
                        ("shell",{"command":'test ! -e "$HOME/server-marker" && echo "$HOME" && echo "$TMPDIR"'})])
     tmpdir = env.get("TMPDIR")
@@ -211,6 +249,7 @@ while (<STDIN>) {
         out,err=child.communicate(timeout=8)
         assert child.returncode and b"cancel" in err.lower() and cancelled.is_set(),(out,err)
     assert mcp_messages[-1][0]=="DELETE"
+    mcp_auth.exercise(binary, repo, state, env, http, run, call, schemas, drop_read, mcp_messages, chat_calls, wire)
     personal_config.unlink()
     run("--trust","revoke")
     count=len(mcp_messages)
@@ -273,10 +312,14 @@ while (<STDIN>) {
     assert not marker.exists()
 
 
-with tempfile.TemporaryDirectory() as directory, ThreadingHTTPServer(("127.0.0.1",0),Server) as http:
+class TestServer(mcp_auth.OAuthFixture, Server):
+    pass
+
+
+with tempfile.TemporaryDirectory() as directory, ThreadingHTTPServer(("127.0.0.1",0),TestServer) as http:
     thread=threading.Thread(target=http.serve_forever,daemon=True)
     thread.start()
     try:
-        exercise(Path(directory).resolve(),http.server_port)
+        exercise(Path(directory).resolve(),http)
     finally:
         http.shutdown()

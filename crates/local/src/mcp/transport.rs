@@ -10,6 +10,24 @@ use tokio::{
 pub(super) const VERSION: &str = "2025-06-18";
 const LIMIT: usize = 4 * 1024 * 1024;
 
+#[derive(Debug)]
+pub(super) struct Disconnected;
+impl std::fmt::Display for Disconnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP HTTP connection or session ended")
+    }
+}
+impl std::error::Error for Disconnected {}
+
+#[derive(Debug)]
+pub(super) struct LoginRequired;
+impl std::fmt::Display for LoginRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP login required")
+    }
+}
+impl std::error::Error for LoginRequired {}
+
 pub(super) enum Connection {
     Stdio {
         child: Child,
@@ -23,6 +41,7 @@ pub(super) enum Connection {
         client: Client,
         url: Url,
         session: Option<HeaderValue>,
+        credentials: Option<auth::Credentials>,
     },
 }
 
@@ -31,6 +50,7 @@ impl Connection {
         spec: &ServerSpec,
         root: &Path,
         sandbox: Option<&crate::sandbox::Native>,
+        credentials: Option<auth::Credentials>,
     ) -> Result<Self> {
         match (&spec.command, &spec.url) {
             (Some(program), None) => {
@@ -88,6 +108,7 @@ impl Connection {
                         .build()?,
                     url,
                     session: None,
+                    credentials,
                 })
             }
             _ => bail!("specify one MCP command or url"),
@@ -134,7 +155,7 @@ impl Connection {
                             json!({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"Unsupported client method"}})
                         };
                         Self::write(input, &reply).await?;
-                    } else if let Some(payload) = response(&message, id)? {
+                    } else if let Some(payload) = response(&message, id, false)? {
                         return Ok(payload);
                     }
                 }
@@ -143,6 +164,7 @@ impl Connection {
                 client,
                 url,
                 session,
+                credentials,
             } => {
                 let mut req = client
                     .post(url.clone())
@@ -154,7 +176,19 @@ impl Connection {
                 if let Some(s) = session.as_ref() {
                     req = req.header("Mcp-Session-Id", s);
                 }
-                let mut res = req.send().await.context("MCP HTTP request failed")?;
+                if let Some(auth) = credentials {
+                    req = req.header(
+                        reqwest::header::AUTHORIZATION,
+                        auth.token()?.ok_or(LoginRequired)?,
+                    );
+                }
+                let mut res = req.send().await.map_err(|_| Disconnected)?;
+                if res.status() == reqwest::StatusCode::UNAUTHORIZED && credentials.is_some() {
+                    return Err(LoginRequired.into());
+                }
+                if res.status() == reqwest::StatusCode::NOT_FOUND && session.is_some() {
+                    return Err(Disconnected.into());
+                }
                 ensure!(
                     res.status().is_success(),
                     "MCP HTTP status {}",
@@ -171,7 +205,7 @@ impl Connection {
                     .is_some_and(|s| s.split(';').next() == Some("text/event-stream"));
                 let mut bytes = Vec::new();
                 let mut event = String::new();
-                while let Some(chunk) = res.chunk().await? {
+                while let Some(chunk) = res.chunk().await.map_err(|_| Disconnected)? {
                     ensure!(
                         bytes.len() + event.len() + chunk.len() <= LIMIT,
                         "MCP HTTP response too large"
@@ -184,7 +218,9 @@ impl Connection {
                             if line.is_empty() && !event.is_empty() {
                                 let message = serde_json::from_str(&event)?;
                                 event.clear();
-                                if let Some(payload) = response(&message, id)? {
+                                if let Some(payload) =
+                                    response(&message, id, credentials.is_some())?
+                                {
                                     return Ok(payload);
                                 }
                             } else if let Some(data) = line.strip_prefix("data:") {
@@ -195,9 +231,10 @@ impl Connection {
                     }
                 }
                 if sse {
-                    bail!("MCP event stream ended before response")
+                    return Err(Disconnected.into());
                 }
-                response(&serde_json::from_slice(&bytes)?, id)?.context("MCP response ID mismatch")
+                response(&serde_json::from_slice(&bytes)?, id, credentials.is_some())?
+                    .context("MCP response ID mismatch")
             }
         }
     }
@@ -214,9 +251,16 @@ impl Connection {
                 client,
                 url,
                 session: Some(id),
+                credentials,
             } => {
-                let _ = client
-                    .delete(url.clone())
+                let mut req = client.delete(url.clone());
+                if let Some(auth) = credentials {
+                    let Ok(Some(token)) = auth.token() else {
+                        return;
+                    };
+                    req = req.header(reqwest::header::AUTHORIZATION, token);
+                }
+                let _ = req
                     .header("Mcp-Session-Id", id.clone())
                     .header("MCP-Protocol-Version", VERSION)
                     .timeout(Duration::from_secs(2))
@@ -227,18 +271,28 @@ impl Connection {
         }
     }
 }
-fn response(msg: &Value, id: u64) -> Result<Option<Value>> {
+fn response(msg: &Value, id: u64, authenticated: bool) -> Result<Option<Value>> {
     ensure!(msg["jsonrpc"] == "2.0", "invalid MCP JSON-RPC version");
     if msg.get("method").is_some() || msg["id"].as_u64() != Some(id) {
         return Ok(None);
     }
     if let Some(err) = msg.get("error") {
+        if authenticated {
+            bail!(
+                "MCP server reported a request error (code {})",
+                err["code"].as_i64().unwrap_or(-32603)
+            );
+        }
         bail!(
             "MCP error {}: {}",
             err["code"],
             err["message"].as_str().unwrap_or("request failed")
         )
     }
+    ensure!(
+        !authenticated || msg["result"]["isError"] != true,
+        "authenticated MCP tool reported an error"
+    );
     Ok(Some(
         msg.get("result")
             .context("MCP response missing result")?
