@@ -72,6 +72,8 @@ pub trait SessionHost: Store + Send {
 pub struct ShellOutcome {
     pub output: String,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
     pub cancelled: bool,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,6 +269,7 @@ impl SessionSdk<'_> {
                     _ => ShellOutcome {
                         output: out.text,
                         exit_code: Some(0),
+                        elapsed_ms: None,
                         cancelled: false,
                         truncated: false,
                         full_output_path: None,

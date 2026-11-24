@@ -1,4 +1,4 @@
-//! Optional read-only JavaScript composition for the native host.
+//! Sandboxed JavaScript composition for the native host.
 mod admission;
 mod images;
 mod storage;
@@ -29,6 +29,21 @@ const MAX_CALLS: usize = 64;
 // Bound the total retained across nested calls, including base64 expansion.
 const MAX_IMAGE_URL_BYTES: usize = 12 * 1024 * 1024;
 const HELPERS: &[(&str, &str, &str)] = &[
+    (
+        "write",
+        "string",
+        "tools.write({path,text}) writes UTF-8 text in the workspace.",
+    ),
+    (
+        "edit",
+        "string",
+        "tools.edit({path,old,new}) or tools.edit({path,edits}) applies exact replacements.",
+    ),
+    (
+        "shell_result",
+        "{output: string, exitCode: number | null, elapsedMs?: number, cancelled: boolean, truncated: boolean, fullOutputPath?: string}",
+        "tools.shell_result({id}) returns a completed shell result on this branch.",
+    ),
     (
         "ls",
         "{items: {name: string, type: string}[], next_offset: number | null}",
@@ -197,7 +212,11 @@ impl NestedHelper<'_> {
         ToolEntry {
             name: self.name.into(),
             namespace: "workspace".into(),
-            output: if self.name == "read" { "file" } else { "json" },
+            output: match self.name {
+                "read" => "file",
+                "write" | "edit" => "text",
+                _ => "json",
+            },
             description: format!(
                 "{} {}\n{declaration}",
                 self.function["description"].as_str().unwrap_or_default(),
@@ -330,19 +349,9 @@ impl<'a> Codemode<'a> {
         let deadline = started + Duration::from_millis(options.timeout_ms);
         let definitions = self.inner.nested_definitions(session);
         let schemas: Vec<_> = definitions.iter().map(|d| d.schema.clone()).collect();
-        let mut catalog: Vec<_> = Self::helpers(&schemas)
-            .filter(|h| {
-                definitions.iter().any(|d| {
-                    d.name() == h.name
-                        && d.namespace.is_some()
-                        && d.access == panda_core::Access::Read
-                })
-            })
-            .map(|h| h.entry())
-            .collect();
-        for d in definitions {
+        let mut catalog: Vec<_> = Self::helpers(&schemas).map(|h| h.entry()).collect();
+        for d in &definitions {
             if let Some(namespace) = &d.namespace
-                && d.access == panda_core::Access::Read
                 && !catalog.iter().any(|entry| entry.name == d.name())
             {
                 catalog.push(ToolEntry {
@@ -456,42 +465,55 @@ impl<'a> Codemode<'a> {
                                 });
                                 calls.push(child);
                             }
-                            let results = std::thread::scope(|scope| {
-                                let handles: Vec<_> = calls
-                                    .iter()
-                                    .map(|c| {
-                                        scope.spawn(|| {
-                                            nested.check().and_then(|()| {
-                                                panda_core::run_nested(
-                                                    self.inner, session, c, &nested,
-                                                )
+                            let run = |c: &Call| {
+                                nested.check()?;
+                                panda_core::run_nested(self.inner, session, c, &nested)
+                            };
+                            // A mixed batch must observe writes in submission order.
+                            let parallel = calls.len() > 1
+                                && calls.iter().all(|c| {
+                                    definitions.iter().any(|d| {
+                                        d.name() == c.name && d.access == panda_core::Access::Read
+                                    })
+                                });
+                            let results: Vec<_> = if parallel {
+                                std::thread::scope(|scope| {
+                                    let workers: Vec<_> =
+                                        calls.iter().map(|c| scope.spawn(|| run(c))).collect();
+                                    workers
+                                        .into_iter()
+                                        .map(|h| {
+                                            h.join().unwrap_or_else(|_| {
+                                                Err(anyhow::anyhow!("nested worker panicked"))
                                             })
                                         })
-                                    })
-                                    .collect();
-                                handles
-                                    .into_iter()
-                                    .map(|h| {
-                                        h.join().unwrap_or_else(|_| {
-                                            Err(anyhow::anyhow!("nested worker panicked"))
-                                        })
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
+                                        .collect()
+                                })
+                            } else {
+                                calls.iter().map(run).collect()
+                            };
                             let mut replies = Vec::new();
                             for (c, result) in calls.iter().zip(results) {
-                                let reply=result.and_then(|out|{
-                                    ensure!(out.text.len()<=crate::MAX_TOOL_RESULT_BYTES,"nested result exceeds 1 MiB");
-                                    let added:usize=out.images.iter().map(String::len).sum();
-                                    ensure!(image_bytes+added<=MAX_IMAGE_URL_BYTES,"Codemode image budget exceeded");
-                                    image_bytes+=added;
-                                    if c.name=="read" && let Some(path)=c.args["path"].as_str(){emit(Event::NestedRead(path.to_owned()));}
-                                    if catalog.iter().any(|entry|entry.name==c.name && entry.output=="file"){
-                                        let response=serde_json::to_string(&json!({"text":out.text,"image":out.images.first()}))?;
+                                let reply = result.and_then(|out| {
+                                    if let Some(path) = c.args["path"].as_str() {
+                                        match c.name.as_str() {
+                                            "read" => emit(Event::NestedRead(path.to_owned())),
+                                            "write" | "edit" => emit(Event::NestedWrite(path.to_owned())),
+                                            _ => {}
+                                        }
+                                    }
+                                    ensure!(out.text.len() <= crate::MAX_TOOL_RESULT_BYTES, "nested result exceeds 1 MiB");
+                                    let added: usize = out.images.iter().map(String::len).sum();
+                                    ensure!(image_bytes + added <= MAX_IMAGE_URL_BYTES, "Codemode image budget exceeded");
+                                    image_bytes += added;
+                                    if catalog.iter().any(|entry| entry.name == c.name && entry.output == "file") {
+                                        let response = serde_json::to_string(&json!({"text":out.text,"image":out.images.first()}))?;
                                         images.extend(out.images);
                                         Ok(response)
-                                    }else{Ok(out.text)}
-                                }).map_err(|e|e.to_string());
+                                    } else {
+                                        Ok(out.text)
+                                    }
+                                }).map_err(|e| e.to_string());
                                 replies.push(reply);
                             }
                             if batch {
@@ -566,7 +588,7 @@ For per-file results, group the items by their path in the same loop and emit on
 impl Toolset for Codemode<'_> {
     fn definitions(&self, m: Mode) -> Vec<panda_core::ToolDefinition> {
         let mut definitions = self.inner.definitions(m);
-        let schema = codemode_schema(&definitions, &self.inner.schemas(m));
+        let schema = codemode_schema(&definitions, &self.inner.schemas(m), m);
         definitions.push(panda_core::ToolDefinition {
             schema,
             access: panda_core::Access::Stateful,
@@ -577,7 +599,11 @@ impl Toolset for Codemode<'_> {
     }
     fn schemas_for(&self, s: &Session) -> Vec<Value> {
         let mut schemas = self.inner.schemas_for(s);
-        schemas.push(codemode_schema(&self.inner.definitions(s.mode), &schemas));
+        schemas.push(codemode_schema(
+            &self.inner.definitions(s.mode),
+            &schemas,
+            s.mode,
+        ));
         schemas
     }
     fn run(
@@ -601,11 +627,14 @@ impl Toolset for Codemode<'_> {
     }
 }
 
-fn codemode_schema(definitions: &[panda_core::ToolDefinition], schemas: &[Value]) -> Value {
+fn codemode_schema(
+    definitions: &[panda_core::ToolDefinition],
+    schemas: &[Value],
+    mode: Mode,
+) -> Value {
     let mut helpers = String::new();
     for d in definitions.iter().filter(|d| {
-        d.namespace.is_some()
-            && d.access == panda_core::Access::Read
+        d.composable(mode)
             && schemas
                 .iter()
                 .any(|schema| schema["function"]["name"] == d.name())
@@ -631,7 +660,7 @@ fn codemode_schema(definitions: &[panda_core::ToolDefinition], schemas: &[Value]
     }
     json!({"type":"function","function":{
         "name":"codemode",
-        "description":format!("Run isolated JavaScript to compose read-only workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending writes are discarded. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+        "description":format!("Run isolated JavaScript to compose permitted workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending store() values are discarded. Completed file edits persist. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
         "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
     }})
 }

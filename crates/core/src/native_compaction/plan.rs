@@ -289,16 +289,14 @@ pub(super) fn plan_before(session: &Session, limit: usize) -> Result<Plan, &'sta
         if s.tool.as_deref() == Some("codemode") {
             for message in session.resolved_at(s.index) {
                 if let Message::Result {
-                    id, nested_reads, ..
+                    id,
+                    nested_reads,
+                    nested_writes,
+                    ..
                 } = message
                     && s.call.as_ref() == Some(id)
                 {
-                    files.read_files.extend(
-                        nested_reads
-                            .iter()
-                            .filter(|path| !files.modified_files.contains(*path))
-                            .cloned(),
-                    );
+                    files.record_nested(nested_reads, nested_writes);
                 }
             }
         } else if !s.error

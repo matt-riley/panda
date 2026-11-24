@@ -346,6 +346,7 @@ mod tests {
                 images: vec![url.into()],
                 is_error: false,
                 nested_reads: vec![],
+                nested_writes: vec![],
             },
             // Transcripts saved before image reads have no images field.
             serde_json::from_value(json!({"Result":{"id":"b","text":"plain","isError":false}}))?,
@@ -412,6 +413,7 @@ mod tests {
                 images: vec![],
                 is_error: true,
                 nested_reads: vec![],
+                nested_writes: vec![],
             },
         ];
         let body = responses_body("m", "s", &history, &[]);

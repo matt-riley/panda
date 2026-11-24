@@ -56,6 +56,7 @@ impl Capture {
         mut self,
         status: Result<std::process::ExitStatus>,
         cancelled: bool,
+        elapsed: Duration,
     ) -> Result<ToolOutput> {
         let output = String::from_utf8_lossy(self.tail.make_contiguous()).into_owned();
         let truncated = self.log.is_some();
@@ -75,12 +76,16 @@ impl Capture {
             exit_code: status.as_ref().ok().and_then(|s| s.code()),
             cancelled,
             truncated,
+            elapsed_ms: Some(elapsed.as_millis() as u64),
             full_output_path,
         };
         match status {
-            Ok(s) if s.success() && !truncated => Ok(outcome.output.into()),
             Ok(s) if s.success() => Ok(ToolOutput {
-                text: format!("command {s}\n{}{note}", outcome.output),
+                text: if truncated {
+                    format!("command {s}\n{}{note}", outcome.output)
+                } else {
+                    outcome.output.clone()
+                },
                 images: vec![],
                 details: Some(ToolDetails::Shell { outcome }),
             }),
@@ -111,6 +116,7 @@ pub(super) fn run(
     let (mut reader, writer) = io::pipe()?;
     rustix::io::ioctl_fionbio(&reader, true)?;
     cancel.check()?;
+    let started = std::time::Instant::now();
     let child = proc
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
@@ -145,7 +151,7 @@ pub(super) fn run(
         }
         capture.append(&buf[..n], &root, emit);
     }
-    capture.finish(status, cancel.check().is_err())
+    capture.finish(status, cancel.check().is_err(), started.elapsed())
 }
 
 #[cfg(test)]

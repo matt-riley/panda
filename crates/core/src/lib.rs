@@ -94,6 +94,12 @@ pub enum Message {
         is_error: bool,
         #[serde(default, rename = "nestedReads", skip_serializing_if = "Vec::is_empty")]
         nested_reads: Vec<String>,
+        #[serde(
+            default,
+            rename = "nestedWrites",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        nested_writes: Vec<String>,
     },
 }
 
@@ -237,7 +243,7 @@ impl Session {
                     outcome,
                     exclude,
                 } => (!exclude).then(|| Message::User(outcome.context(command))),
-                other => Some(other.clone()),
+                other => Some(other.for_context().into_owned()),
             })
             .collect()
     }
@@ -278,6 +284,7 @@ impl Session {
             let tail: Vec<_> = self.history[u.through..]
                 .iter()
                 .filter(|m| !matches!(m, Message::CodemodeStore(_)))
+                .map(Message::for_context)
                 .collect();
             let bytes = serde_json::to_vec(&tail).map_or(0, |v| v.len().saturating_sub(2));
             return u
@@ -314,7 +321,8 @@ impl Session {
                 let visible = self.resolved_at(i);
                 starts_exchange = visible.first().is_some_and(Message::user);
                 for m in visible {
-                    let size = serde_json::to_vec(m).map_or(u64::MAX, |v| v.len() as u64 + 1);
+                    let size = serde_json::to_vec(&m.for_context())
+                        .map_or(u64::MAX, |v| v.len() as u64 + 1);
                     bytes = bytes.saturating_add(size);
                 }
             } else {
@@ -475,6 +483,24 @@ fn summarize(
     Ok(summary)
 }
 impl Message {
+    // The model already sees the shell output in the result text. Its structured
+    // copy is for session lookup and must not consume the context budget twice.
+    fn for_context(&self) -> std::borrow::Cow<'_, Self> {
+        if let Self::Result {
+            details: Some(ToolDetails::Shell { .. }),
+            ..
+        } = self
+        {
+            let mut message = self.clone();
+            if let Self::Result { details, .. } = &mut message {
+                *details = None;
+            }
+            std::borrow::Cow::Owned(message)
+        } else {
+            std::borrow::Cow::Borrowed(self)
+        }
+    }
+
     pub fn summary_text(&self) -> String {
         match self {
             Self::Bash {
@@ -486,7 +512,7 @@ impl Message {
             } if !images.is_empty() => {
                 format!("Tool {id}: {text} [{} images]", images.len())
             }
-            other => serde_json::to_string(other).unwrap_or_default(),
+            other => serde_json::to_string(&other.for_context()).unwrap_or_default(),
         }
     }
     pub fn user(&self) -> bool {
@@ -531,6 +557,7 @@ pub enum Event {
     Usage(Value),
     Calling(Call),
     NestedRead(String),
+    NestedWrite(String),
     NestedCall { parent: String, call: Call },
     ResultDetails { id: String, details: ToolDetails },
     // Local display attachments for the immediately following tool result.
@@ -599,8 +626,7 @@ pub trait Toolset: Sync {
         self.definitions(session.mode)
             .into_iter()
             .filter(|d| {
-                d.access == Access::Read
-                    && d.namespace.is_some()
+                d.composable(session.mode)
                     && visible
                         .iter()
                         .any(|schema| schema["function"]["name"] == d.name())
@@ -625,7 +651,7 @@ pub trait Toolset: Sync {
     }
 }
 
-/// Apply the nested read policy before entering the shared session dispatcher.
+/// Apply the nested tool policy before entering the shared session dispatcher.
 pub fn run_nested(
     tools: &dyn Toolset,
     session: &Session,
@@ -635,13 +661,13 @@ pub fn run_nested(
     let definition = tools
         .nested_definitions(session)
         .into_iter()
-        .find(|d| d.name() == call.name)
+        .find(|d| d.name() == call.name && d.composable(session.mode))
         .ok_or_else(|| anyhow::anyhow!("unavailable nested tool {}", call.name))?;
     definition.validate(&call.args)?;
     let (output, writes) = tools.run(session, call, cancel, &mut |_| {})?;
     anyhow::ensure!(
         writes.is_empty(),
-        "read-only nested tool returned store writes"
+        "nested tool returned unexpected session store writes"
     );
     Ok(output)
 }
@@ -937,10 +963,14 @@ fn drive_turn(
             for call in group.iter().cloned() {
                 cancel.check()?;
                 let mut nested_reads = std::collections::BTreeSet::new();
+                let mut nested_writes = std::collections::BTreeSet::new();
                 let started = std::time::Instant::now();
                 let mut handle = |event| match event {
                     Event::NestedRead(path) => {
                         nested_reads.insert(path);
+                    }
+                    Event::NestedWrite(path) => {
+                        nested_writes.insert(path);
                     }
                     other => emit(other),
                 };
@@ -955,7 +985,13 @@ fn drive_turn(
                 };
                 let is_error = result.is_err();
                 let (mut output, writes) = result.unwrap_or_else(|e| {
-                    (format!("tool error: {e}").into(), StoreWrites::default())
+                    let mut output = ToolOutput::from(format!("tool error: {e}"));
+                    if let Ok(shell) = e.downcast::<sdk::ShellFailure>() {
+                        output.details = Some(ToolDetails::Shell {
+                            outcome: shell.outcome,
+                        });
+                    }
+                    (output, StoreWrites::default())
                 });
                 cancel.check()?;
                 if !output.images.is_empty() && pending_image_exchange.is_none() {
@@ -987,6 +1023,7 @@ fn drive_turn(
                     id: call.id.clone(),
                     is_error,
                     nested_reads: nested_reads.into_iter().collect(),
+                    nested_writes: nested_writes.into_iter().collect(),
                     text: output.text.clone(),
                     images: output.images,
                 });
@@ -1060,6 +1097,7 @@ pub fn acknowledge(store: &mut dyn Store) -> Result<()> {
                         id,
                         is_error: true,
                         nested_reads: vec![],
+                        nested_writes: vec![],
                         images: vec![],
                         text: "Interrupted: outcome unknown; inspect workspace before retrying."
                             .into(),
@@ -1112,7 +1150,7 @@ mod tests {
                 Message::Assistant { text: String::new(), calls: vec![Call {
                     id: "c".into(), name: "shell".into(), args: serde_json::json!({}),
                 }] },
-                Message::Result { details: None, id: "c".into(), text, images: vec![], is_error: true, nested_reads: vec![] },
+                Message::Result { details: None, id: "c".into(), text, images: vec![], is_error: true, nested_reads: vec![], nested_writes: vec![] },
             ];
             // An imported edit can replace several raw messages at one index.
             let bytes = serde_json::to_vec(&exchange).unwrap().len() - 1;

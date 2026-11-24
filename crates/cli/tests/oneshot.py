@@ -125,8 +125,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
             "diff --git a/b b/b\n@@ -2,1 +2,0 @@\n-removed\n")
     prompt = "Review this change."
     for interface in (["--print"], ["--mode", "json"]):
-        for codemode in (False, True):
-            args = interface + (["--codemode"] if codemode else []) + [
+        for flags, codemode in (([], True), (["--codemode"], True), (["--no-codemode"], False)):
+            args = interface + flags + [
                 "--provider", "openrouter", "--model", "openai/gpt-fixture",
                 "--thinking", "high", "--no-session", prompt]
             output = run(args, diff)
@@ -151,8 +151,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     rubric = repo / "review rubric.md"
     rubric.write_text("Check boundary cases.\nCheck retries.\n")
     for interface in (["--print"], ["--mode", "json"]):
-        for codemode in (False, True):
-            common = interface + (["--codemode"] if codemode else []) + ["--no-session"]
+        for flags, codemode in (([], True), (["--codemode"], True), (["--no-codemode"], False)):
+            common = interface + flags + ["--no-session"]
 
             def capture(flags):
                 run(common + flags + [prompt], diff)
@@ -165,13 +165,16 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
                 if "--no-tools" in flags:
                     assert "tools" not in body
                 else:
-                    assert ("codemode" in names) == codemode
+                    assert ("codemode" in names) == (codemode and not any(f in flags for f in ("--hide-tools", "--defer-tools")))
                 return system["content"]
 
             default = capture([])
             assert default.startswith("You are Panda, a coding assistant.")
             assert default.count("Preserve fixture conventions.") == 1
             assert ("start with one codemode call" in default) == codemode
+            for policy in ("--hide-tools", "--defer-tools"):
+                for base in ([], ["--system-prompt", "Use only visible tools."]):
+                    assert "start with one codemode call" not in capture([policy, "codemode", *base])
             context = default[default.index("\nInstructions from "):]
             appended = ["--append-system-prompt", rubric.name,
                         "--append-system-prompt", "Report findings first."]
@@ -227,7 +230,9 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
          "--append-system-prompt", "Temporary rubric.", "follow up"], "")
     _, body = requests.pop()
     assert body["reasoning"]["effort"] == "high"
-    assert body["messages"][0]["content"] == "Temporary base.\n\nTemporary rubric."
+    system = body["messages"][0]["content"]
+    assert system.startswith("Temporary base.") and system.endswith("\n\nTemporary rubric.")
+    assert "start with one codemode call" in system
     run(["--continue", "--print", "last turn"], "")
     _, body = requests.pop()
     assert body["model"] == "saved-model" and "reasoning" not in body
@@ -677,7 +682,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
     catalog = ("codemode", {"code": "text(ALL_TOOLS.map(tool => tool.name).sort())"})
     available, _ = exercise_tools(["--print"], ["--codemode-only"], {"codemode"}, catalog, "List helpers")
-    assert json.loads(available) == ["ls", "read", "repo_map", "search"], available
+    assert json.loads(available) == ["edit", "ls", "read", "repo_map", "search", "shell_result", "write"], available
     available, _ = exercise_tools(["--print"], ["--codemode-only", "--tools", "read"], {"codemode"}, catalog, "List helpers")
     assert json.loads(available) == ["read"], available
     denied, _ = exercise_tools(["--print"], ["--codemode-only", "--no-tools"], set(), catalog, "List helpers")
@@ -696,7 +701,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     requests.clear()
     next_calls.extend([
         ("edit", {"path": "b.rs", "old": "before", "new": "after"}),
-        ("write", {"path": "c.rs", "text": "new"}),
+        ("codemode", {"code": 'store("pendingEdit", true); tools.write({path:"c.rs",text:"new"}); throw Error("after write")'}),
         ("edit", {"path": "a.rs", "old": "absent", "new": "bad"}),
     ])
     length_stops.append(("incomplete edit", 12, "edit", {"path": "d.rs", "old": "before", "new": "bad"}))
@@ -705,6 +710,8 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     run(["--continue"], ":compact\n:q\n")
     requests.clear()
 
+    assert saved_session(sid)["checkpoint"]["files"]["modifiedFiles"] == ["b.rs", "c.rs"]
+    assert not any("pendingEdit" in entry.get("CodemodeStore", {}).get("set", {}) for entry in saved_session(sid)["history"])
     summary = "Saved old exchange\n\n<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\nc.rs\n</modified-files>"
     def check_files(session_id):
         run(["--print", "--session", str(session_id), *model, "Continue"], "")
@@ -792,7 +799,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
         ("codemode", {"code":"return tools.edit({path:'note',old:'untouched',new:'changed'})"}),
         ("codemode", {"code":"return describeNamespace('workspace').map(t=>t.name)"}),
     ])
-    rpc = ["--mode","rpc","--continue","--codemode","--defer-tools","ls","--hide-tools","search"]
+    rpc = ["--mode","rpc","--continue","--defer-tools","ls","--hide-tools","search"]
     events = run(rpc, json.dumps({"type":"prompt","id":71,"text":"inspect"})+"\n", cwd=probe)
     assert done(events)["id"] == 71
     declared = [{t["function"]["name"] for t in request["tools"]} for _, request in requests]
@@ -802,7 +809,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
     assert "unavailable" in outcomes[0] and "tool error" in outcomes[1] and "expects an integer" in outcomes[3] and "unavailable" in outcomes[4]
     assert json.loads(outcomes[5]) == json.loads(outcomes[6])
     assert "expects an integer" in outcomes[7] and "tool error" in outcomes[8]
-    assert sorted(json.loads(outcomes[9])) == ["ls","read","repo_map"]
+    assert sorted(json.loads(outcomes[9])) == ["ls","read","repo_map","shell_result"]
     assert (probe / "note").read_text() == "untouched"
 
     from pi_rpc import check as check_pi_rpc

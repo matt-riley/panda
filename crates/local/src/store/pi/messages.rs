@@ -118,6 +118,8 @@ pub(super) fn project(entry: &Value) -> Result<Vec<Message>> {
                 details,
                 text,
                 images: c.images,
+                nested_writes: serde_json::from_value(m["details"]["pandaNestedWrites"].clone())
+                    .unwrap_or_default(),
                 nested_reads: serde_json::from_value(m["details"]["pandaNestedReads"].clone())
                     .unwrap_or_default(),
                 is_error: m["isError"].as_bool().unwrap_or(false),
@@ -197,12 +199,16 @@ pub fn encode(
             images,
             is_error,
             nested_reads,
+            nested_writes,
             details,
         } => {
             let mut result = json!({"role":"toolResult","toolCallId":id,"toolName":tool_name.context("tool result has no matching ancestor call")?,
             "content":ordered_blocks(text,images,details.as_ref())?,"isError":is_error});
             if !nested_reads.is_empty() {
-                result["details"] = json!({"pandaNestedReads":nested_reads});
+                result["details"]["pandaNestedReads"] = json!(nested_reads);
+            }
+            if !nested_writes.is_empty() {
+                result["details"]["pandaNestedWrites"] = json!(nested_writes);
             }
             if let Some(details) = details {
                 result["details"]["pandaToolDetails"] = json!(details);

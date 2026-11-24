@@ -27,6 +27,7 @@ fn result(id: &str, text: &str) -> Message {
         images: vec!["data:image/png;base64,SECRET_BINARY".into()],
         is_error: false,
         nested_reads: vec![],
+        nested_writes: vec![],
     }
 }
 fn many(n: usize, bulk: usize) -> Session {

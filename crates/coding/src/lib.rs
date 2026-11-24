@@ -129,6 +129,22 @@ impl<W: Workspace, S: Skills> Toolset for Coding<W, S> {
             .ok_or_else(|| anyhow::anyhow!("tool {} unavailable in {mode:?} mode", c.name))?;
         def.validate(&c.args)?;
         let output = match c.name.as_str() {
+            "shell_result" => {
+                let id = field(&c.args, "id")?;
+                let result = session
+                    .history
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m, Message::Result {id: key, ..} if key == id));
+                let Some(Message::Result {
+                    details: Some(panda_core::ToolDetails::Shell { outcome }),
+                    ..
+                }) = result
+                else {
+                    anyhow::bail!("no structured shell result for call {id} on this branch");
+                };
+                Ok(serde_json::to_string(outcome)?.into())
+            }
             "view_context" => Ok(panda_core::native_compaction::context_info(
                 session,
                 &self.system()?,
@@ -238,6 +254,12 @@ fn native_definitions() -> Vec<ToolDefinition> {
             true,
         ),
         (
+            "shell_result",
+            "Look up a completed shell tool call by id on this branch. Returns output, exitCode, elapsedMs when recorded, cancelled, truncated and fullOutputPath when available.",
+            &["id"],
+            false,
+        ),
+        (
             "shell",
             "Run a shell command in the workspace. Long output returns the tail and a full log path for line-range reads.",
             &["command"],
@@ -290,10 +312,10 @@ fn native_definitions() -> Vec<ToolDefinition> {
                 ]);
             }
             let output = match *name {
-                "read"=>OutputKind::File, "repo_map"|"ls"|"search"=>OutputKind::Json, _=>OutputKind::Text
+                "read"=>OutputKind::File, "repo_map"|"ls"|"search"|"shell_result"=>OutputKind::Json, _=>OutputKind::Text
             };
             ToolDefinition{schema,access:if *name=="self_compact"{Access::Stateful}else if *mutates{Access::Mutate}else{Access::Read},output,
-                namespace:matches!(output,OutputKind::File|OutputKind::Json).then(||"workspace".into())}
+                namespace:(matches!(output,OutputKind::File|OutputKind::Json) || matches!(*name,"write"|"edit")).then(||"workspace".into())}
         })
         .collect()
 }
