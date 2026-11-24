@@ -6,7 +6,11 @@ pub struct Status<'a>(pub &'a crate::screen::Screen);
 
 impl Prompt for Status<'_> {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        self.0.body().into()
+        if self.0.active {
+            self.0.body().into()
+        } else {
+            "".into()
+        }
     }
     fn render_prompt_right(&self) -> Cow<'_, str> {
         "".into()

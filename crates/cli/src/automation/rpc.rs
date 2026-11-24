@@ -435,6 +435,9 @@ pub(super) fn serve(host: Host<'_>, delivery: Delivery, pi: bool) -> Result<()> 
             let worker = scope.spawn(move || -> Result<Value> {
                 let mut sdk = SessionSdk { host: &mut worker_store };
                 let mut emit = |event: Event| {
+                    if matches!(event, Event::ResultImages(_)) {
+                        return;
+                    }
                     if let Some(stream) = stream {
                         stream.event(event, &snapshot);
                     } else if pi {

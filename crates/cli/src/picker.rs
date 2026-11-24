@@ -117,6 +117,7 @@ fn pick(
     mode: PickerMode<'_>,
     search: impl Fn(&str) -> Vec<Hit>,
 ) -> io::Result<Option<Picked>> {
+    let _alternate = crate::screen::AlternateScreen::enter()?;
     terminal::enable_raw_mode()?;
     struct Restore;
     impl Drop for Restore {

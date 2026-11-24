@@ -275,3 +275,17 @@ fn native_compaction_controls_and_paired_synthetic_checkpoints() {
             .success()
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires loopback and native Seatbelt for the image read"]
+fn scrollback_streams_images_and_restores_terminal() {
+    assert!(
+        Command::new("python3")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/scrollback.py"))
+            .arg(env!("CARGO_BIN_EXE_panda"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

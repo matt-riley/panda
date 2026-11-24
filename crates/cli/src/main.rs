@@ -11,6 +11,7 @@ mod picker;
 mod renderer;
 mod routing;
 mod screen;
+mod scrollback;
 mod settings;
 mod terminal_config;
 mod ui;
@@ -450,6 +451,9 @@ fn configure_context(
     Ok(())
 }
 fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
+    if let Some(scroll) = &mut screen.scrollback {
+        scroll.reset();
+    }
     let s = db.load()?;
     screen.footer.effort = s.reasoning.clone();
     screen.line(Tone::Dim, &format!("session {} ({:?})", db.id(), s.mode));
@@ -471,10 +475,15 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
                 screen.line(Tone::Dim, &format!("Branch summary · {}", safe(t)))
             }
             Message::Reasoning(t) => screen.line(Tone::Thought, t),
-            Message::Images { text, urls } => screen.line(
-                Tone::User,
-                &format!("you> {} [{} images]", safe(text), urls.len()),
-            ),
+            Message::Images { text, urls } => {
+                screen.line(
+                    Tone::User,
+                    &format!("you> {} [{} images]", safe(text), urls.len()),
+                );
+                if let Some(scroll) = &mut screen.scrollback {
+                    scroll.images(urls)?;
+                }
+            }
             Message::User(t) => screen.line(Tone::User, &format!("you> {}", safe(t))),
             Message::Assistant { text, calls } => {
                 if s.model.as_ref().is_some_and(|id| id.provider == "router")
@@ -500,8 +509,13 @@ fn show(db: &Disk, screen: &mut Screen) -> Result<Mode> {
                 text,
                 is_error,
                 details,
+                images,
                 ..
             } => {
+                if let Some(scroll) = &mut screen.scrollback {
+                    scroll.result(text, images, details.as_ref())?;
+                    continue;
+                }
                 let text = active::result_text(text, details.as_ref());
                 if screen.active {
                     screen.tool_result(calls_by_id.remove(id), &text, *is_error);
@@ -613,7 +627,7 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--scrollback uses normal terminal scrollback and inline image previews.\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\n--codemode enables read-only JavaScript tool composition. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
         );
         return Ok(());
     }
@@ -788,7 +802,10 @@ fn run(
     }
     let terminal_mode = options.interface == automation::Interface::Terminal;
     let interactive = terminal_mode && interactive_terminal;
-    let mut screen = Screen::open(interactive)?;
+    let mut screen = Screen::open(interactive && !options.scrollback)?;
+    if options.scrollback {
+        screen.scrollback = Some(scrollback::Scrollback::detect());
+    }
     if interactive {
         screen.footer.location = screen::Footer::location(&root, &home);
     }
@@ -1088,6 +1105,7 @@ fn run(
             screen.footer.session = format!("{mode:?} · session {}", db.id());
             screen.footer.model = format!("{p}/{model}");
         }
+        let echo_prompt = screen.active || initial_prompt.is_some();
         let (line, allow_commands) = if let Some(prompt) = initial_prompt.take() {
             (prompt, false)
         } else if let Some(command) = screen.commands.pop_front() {
@@ -1131,7 +1149,7 @@ fn run(
             }
             continue;
         }
-        if interactive {
+        if interactive && echo_prompt {
             screen.line(Tone::User, &format!("❯ {line}"));
         }
         if allow_commands && line == ":cancel" {
@@ -1431,7 +1449,14 @@ fn run(
                         && (action == "preview" || action.starts_with("preview "))
                     {
                         cancel.reset();
-                        screen.line(Tone::Dim, "Preparing compaction preview. Esc cancels.");
+                        screen.line(
+                            Tone::Dim,
+                            if screen.active {
+                                "Preparing compaction preview. Esc cancels."
+                            } else {
+                                "Preparing compaction preview. Ctrl-C cancels."
+                            },
+                        );
                         let preview = active::preview(
                             make_provider(&state, &p, &model)?,
                             db.load()?,
@@ -1480,6 +1505,9 @@ fn run(
                 ":ack" => acknowledge(&mut db)?,
                 ":retry" => {
                     cancel.reset();
+                    if let Some(scroll) = &mut screen.scrollback {
+                        scroll.reset();
+                    }
                     let mut pending = active::PendingTool::default();
                     sdk::SessionSdk { host: &mut db }.retry(
                         make_provider(&state, &p, &model)?.as_mut(),
@@ -1609,7 +1637,7 @@ fn run(
                 }
                 ":login" => {
                     cancel.reset();
-                    if interactive {
+                    if screen.active {
                         crossterm::execute!(
                             io::stdout(),
                             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -1623,11 +1651,13 @@ fn run(
                         else {
                             return Ok(());
                         };
-                        crossterm::execute!(
-                            io::stdout(),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                            crossterm::cursor::MoveTo(0, 0)
-                        )?;
+                        if screen.active {
+                            crossterm::execute!(
+                                io::stdout(),
+                                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                                crossterm::cursor::MoveTo(0, 0)
+                            )?;
+                        }
                         Some(i == 0)
                     } else {
                         None
@@ -1753,6 +1783,18 @@ fn run(
                         configure_context(&mut db, &state, &p, &model, &settings)?;
                     }
                     screen.line(Tone::Dim, &format!("{} {}", safe(&p), safe(&model)))
+                }
+                ":tool" if screen.scrollback.is_some() => {
+                    let id = words.next().context("usage: :tool ID")?;
+                    let session = db.load()?;
+                    let message =
+                        session.history.iter().rev().find(
+                            |m| matches!(m, Message::Result { id: saved, .. } if saved == id),
+                        );
+                    let Some(Message::Result { text, details, .. }) = message else {
+                        bail!("no tool result with ID {id}");
+                    };
+                    screen.line(Tone::Text, &active::result_text(text, details.as_ref()));
                 }
                 ":tool" => screen.select_tool(words.next().context("usage: :tool ID")?)?,
                 ":tools" => {

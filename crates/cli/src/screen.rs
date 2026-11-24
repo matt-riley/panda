@@ -175,6 +175,8 @@ impl StatusLine for Footer {
 }
 
 pub struct Screen {
+    pub scrollback: Option<crate::scrollback::Scrollback>,
+    _alternate: Option<AlternateScreen>,
     pub active: bool,
     pub retry: Option<(u32, std::time::Instant)>,
     live: String,
@@ -198,15 +200,13 @@ pub struct Screen {
 }
 impl Screen {
     pub fn open(active: bool) -> io::Result<Self> {
+        let alternate = active.then(AlternateScreen::enter).transpose()?;
         if active {
-            execute!(
-                io::stdout(),
-                EnterAlternateScreen,
-                Clear(ClearType::All),
-                MoveTo(0, 0)
-            )?;
+            execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
         }
         Ok(Self {
+            _alternate: alternate,
+            scrollback: None,
             active,
             retry: None,
             live: String::new(),
@@ -229,6 +229,10 @@ impl Screen {
         })
     }
     pub fn line(&mut self, tone: Tone, text: &str) {
+        if self.scrollback.is_some() {
+            println!("{}", tone.paint(&safe(text), self.color));
+            return;
+        }
         if !self.active {
             println!("{text}");
             return;
@@ -243,6 +247,9 @@ impl Screen {
         self.offset = 0;
     }
     pub fn stream(&mut self, text: &str) {
+        if let Some(scroll) = &mut self.scrollback {
+            return scroll.stream(text);
+        }
         if !self.active {
             print!("{}", safe(text));
             let _ = io::stdout().flush();
@@ -265,6 +272,9 @@ impl Screen {
         self.current_reply = None;
     }
     pub fn finish_reply(&mut self, text: &str) {
+        if let Some(scroll) = &mut self.scrollback {
+            return scroll.finish(text);
+        }
         if !self.active {
             println!("{}", safe(text));
             return;
@@ -591,12 +601,12 @@ impl Screen {
         }
     }
     pub fn read(&mut self, editor: &mut Option<Reedline>) -> io::Result<Signal> {
-        let mut engine = editor
-            .take()
-            .unwrap()
-            .with_status_line(Box::new(self.footer.clone()));
-        self.wrapped.lock().unwrap().0 = 0;
-        execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
+        let mut engine = editor.take().unwrap();
+        if self.active {
+            engine = engine.with_status_line(Box::new(self.footer.clone()));
+            self.wrapped.lock().unwrap().0 = 0;
+            execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
+        }
         let signal = loop {
             let signal = engine.read_line(&ui::Status(self))?;
             if let Signal::HostCommand(action) = &signal {
@@ -657,9 +667,26 @@ impl Screen {
         Ok(signal)
     }
 }
-impl Drop for Screen {
+thread_local! {
+    static IN_ALTERNATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// A picker can open before, inside or independently of the fullscreen UI.
+pub struct AlternateScreen(bool);
+impl AlternateScreen {
+    pub fn enter() -> io::Result<Self> {
+        let owner = !IN_ALTERNATE.get();
+        if owner {
+            execute!(io::stdout(), EnterAlternateScreen)?;
+            IN_ALTERNATE.set(true);
+        }
+        Ok(Self(owner))
+    }
+}
+impl Drop for AlternateScreen {
     fn drop(&mut self) {
-        if self.active {
+        if self.0 {
+            IN_ALTERNATE.set(false);
             let _ = execute!(io::stdout(), LeaveAlternateScreen);
         }
     }
@@ -711,23 +738,25 @@ impl Screen {
             );
         }
         let mut visual = default_vi_visual_keybindings();
-        for bindings in [&mut insert, &mut normal, &mut visual] {
-            for (key, name) in [('o', "expand"), ('t', "thoughts")] {
-                bindings.add_binding(
-                    KeyModifiers::CONTROL,
-                    KeyCode::Char(key),
-                    ReedlineEvent::ExecuteHostCommand(name.into()),
-                );
-            }
-            for (key, name) in [
-                (KeyCode::PageUp, "page-up"),
-                (KeyCode::PageDown, "page-down"),
-            ] {
-                bindings.add_binding(
-                    KeyModifiers::NONE,
-                    key,
-                    ReedlineEvent::ExecuteHostCommand(name.into()),
-                );
+        if self.active {
+            for bindings in [&mut insert, &mut normal, &mut visual] {
+                for (key, name) in [('o', "expand"), ('t', "thoughts")] {
+                    bindings.add_binding(
+                        KeyModifiers::CONTROL,
+                        KeyCode::Char(key),
+                        ReedlineEvent::ExecuteHostCommand(name.into()),
+                    );
+                }
+                for (key, name) in [
+                    (KeyCode::PageUp, "page-up"),
+                    (KeyCode::PageDown, "page-down"),
+                ] {
+                    bindings.add_binding(
+                        KeyModifiers::NONE,
+                        key,
+                        ReedlineEvent::ExecuteHostCommand(name.into()),
+                    );
+                }
             }
         }
         self.footer.vim = crate::vim::Vim::new(insert, normal, visual);

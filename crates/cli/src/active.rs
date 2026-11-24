@@ -27,12 +27,13 @@ impl Drop for Raw {
 #[derive(Default)]
 pub struct PendingTool {
     calls: std::collections::VecDeque<Call>,
+    images: Vec<String>,
     details: Option<ToolDetails>,
 }
 pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
     match event {
         Event::Truncated { text, retrying } => {
-            if screen.active {
+            if screen.active || screen.scrollback.is_some() {
                 screen.finish_reply(&text);
             }
             screen.line(
@@ -66,6 +67,11 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
             }
         }
         Event::Text(s) => screen.stream(&s),
+        Event::ResultImages(images) => {
+            if screen.scrollback.is_some() {
+                pending.images = images;
+            }
+        }
         Event::ResultDetails { details, .. } => pending.details = Some(details),
         Event::NestedRead(_) | Event::Responder(_) | Event::BackingModel(_) | Event::Replay(_) => {}
         Event::NestedCall { call, .. } => {
@@ -77,13 +83,24 @@ pub fn display(event: Event, screen: &mut Screen, pending: &mut PendingTool) {
             }
         }
         Event::AssistantComplete(s) => {
-            if screen.active {
+            if screen.active || screen.scrollback.is_some() {
                 screen.finish_reply(&s);
             }
+        }
+        Event::Calling(call) if screen.scrollback.is_some() => {
+            screen.line(Tone::Tool, &ui::header(&call))
         }
         Event::Calling(call) if screen.active => {
             screen.line(Tone::Tool, &ui::header(&call));
             pending.calls.push_back(call);
+        }
+        Event::Result(text) if screen.scrollback.is_some() => {
+            let scroll = screen.scrollback.as_mut().unwrap();
+            let result = scroll.result(&text, &pending.images, pending.details.take().as_ref());
+            pending.images.clear();
+            if let Err(e) = result {
+                eprintln!("Terminal image output: {e}");
+            }
         }
         Event::Result(text) => {
             let error = text.starts_with("tool error: ");
@@ -157,17 +174,27 @@ pub fn run(
     screen.retry = None;
     screen.end_reply();
     let mut pending = PendingTool::default();
+    if let Some(scroll) = &mut screen.scrollback {
+        scroll.reset();
+        if let Message::Images { urls, .. } = &input {
+            scroll.images(urls)?;
+        }
+    }
     if !screen.active {
-        panda_core::sdk::SessionSdk { host: db }.prompt(
+        let result = panda_core::sdk::SessionSdk { host: db }.prompt(
             p,
             tools,
             input,
             cancel,
             &mut |e| display(e, screen, &mut pending),
             &Mutex::new(Queue::<String>::default()),
-        )?;
-        println!();
-        return Ok(());
+        );
+        if let Some(scroll) = &mut screen.scrollback {
+            scroll.finish("");
+        } else {
+            println!();
+        }
+        return result;
     }
     let mut prompt = crate::vim::Steering {
         vim: screen.footer.vim.clone(),
