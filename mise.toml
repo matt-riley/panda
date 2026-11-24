@@ -1,7 +1,7 @@
 [tools]
 # CI installs repository tools before running tasks with --skip-tools.
 pi = { version = "1.5.2", os = ["macos"] }
-rust = { version = "1.99.1", components = ["rustfmt", "clippy"] }
+rust = { version = "1.100.0", components = ["rustfmt", "clippy"] }
 
 [tasks.fmt]
 run = ["cargo fmt --all -- --check", "cargo fmt --manifest-path fuzz/Cargo.toml -- --check"]
