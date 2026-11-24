@@ -88,10 +88,24 @@ class Endpoint(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         tool = "READ_FIXTURE" in text and "peacock-731" not in text
-        for packet in packets(family, tool):
+        if family == "bedrock":
+            delta = {"tool_calls":[{"index":0,"id":"bed-call","function":{"name":"read","arguments":json.dumps(ARGS)}}]} if tool else {"content":"finished"}
+            events = [{"choices":[{"delta":delta,"finish_reason":"tool_calls" if tool else "stop"}],
+                       "usage":{"prompt_tokens":12,"completion_tokens":3}}]
+        elif family == "radius":
+            events = ([{"type":"toolcall_start","contentIndex":0,"id":"pi-call","toolName":"read"},
+                       {"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"pi-call","name":"read","arguments":ARGS}}] if tool else
+                      [{"type":"text_start","contentIndex":0},{"type":"text_delta","contentIndex":0,"delta":"finished"},
+                       {"type":"text_end","contentIndex":0,"content":"finished"}])
+            events.append({"type":"done","reason":"toolUse" if tool else "stop","usage":{"input":10,"cacheRead":2,"cacheWrite":0,"output":3}})
+        else:
+            events = packets(family, tool)
+        for packet in events:
             line = ("data: " + json.dumps(packet) + "\r\n\r\n").encode()
             for start in range(0, len(line), 5):
                 self.wfile.write(line[start:start + 5])
+        if family=="bedrock":
+            self.wfile.write(b"data: [DONE]\n\n")
 
 
 def exercise(server, root):
@@ -206,6 +220,32 @@ def exercise(server, root):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+
+    for name, api, prefix, family, header, suffix in [
+        ("azure", "azure-openai-responses", "/r/openai/v1", "r", "api-key", "/responses"),
+        ("vertex", "google-vertex", "/g/v1/projects/p/locations/l/publishers/google", "g", "authorization", "/models/demo:streamGenerateContent?alt=sse"),
+        ("bedrock", "openai-completions", "/bedrock/openai/v1", "bedrock", "authorization", "/chat/completions"),
+        ("radius", "pi-messages", "/radius/v1", "radius", "authorization", "/messages"),
+    ]:
+        env["CLOUD_FIXTURE_TOKEN"] = "fixture-" + name
+        providers[name] = {"api":api, "baseUrl":f"http://127.0.0.1:{server.server_port}"+prefix,
+                           "apiKey":"CLOUD_FIXTURE_TOKEN", "models":[{"id":"demo","maxTokens":2048,"contextWindow":32000}]}
+        (state / "models.json").write_text(json.dumps({"providers":providers}))
+        REQUESTS.clear()
+        output = run("--mode","json","--provider",name,"--model","demo","--tools","read","READ_FIXTURE")
+        done = next(e for e in map(json.loads,output.splitlines()) if e["type"]=="done")
+        assert done["text"]=="finished" and len(REQUESTS)==2, output
+        for _, path, headers, body in REQUESTS:
+            assert path==prefix+suffix,path
+            headers={k.lower():v for k,v in headers.items()}
+            assert headers[header]==("Bearer " if header=="authorization" else "")+"fixture-"+name
+        if family=="radius":
+            messages = REQUESTS[1][3]["context"]["messages"]
+            assert messages[0]["role"]=="system" and messages[0]["toolsAdded"][0]["name"]=="read"
+            assert messages[-1]["role"]=="toolResult" and messages[-1]["toolCallId"]=="pi-call"
+            assert messages[-1]["toolName"]=="read"
+        assert "peacock-731" in json.dumps(REQUESTS[1][3])
+        assert [(r["input"],r["output"]) for r in session(done["session_id"])["usage"]]==[(12,3)]*2
 
 
 if __name__ == "__main__":

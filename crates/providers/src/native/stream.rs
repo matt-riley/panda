@@ -51,9 +51,80 @@ impl Decoder {
         );
         if self.family == Family::Anthropic {
             self.anthropic(&v, emit)
+        } else if self.family == Family::Pi {
+            self.pi_event(&v, emit)
         } else {
             self.gemini(&v, emit)
         }
+    }
+    fn pi_event(&mut self, v: &Value, emit: &mut Emit) -> Result<()> {
+        ensure!(!self.done, "event after Pi Messages completion");
+        match wire::string(v, "type")? {
+            "text_delta" => {
+                let t = v["delta"].as_str().context("missing text delta")?;
+                self.text.push_str(t);
+                emit(Event::Text(t.into()));
+            }
+            "thinking_delta" => emit(Event::Reasoning(
+                v["delta"]
+                    .as_str()
+                    .context("missing thinking delta")?
+                    .into(),
+            )),
+            "toolcall_start" => {
+                let index = v["contentIndex"]
+                    .as_u64()
+                    .filter(|i| *i < 1024)
+                    .context("invalid tool index")?;
+                ensure!(self.blocks.insert(index,Block{raw:json!({"type":"tool_use","id":wire::string(v,"id")?,"name":wire::string(v,"toolName")?}),arguments:String::new()}).is_none(),"duplicate tool start");
+            }
+            "toolcall_delta" => {
+                let block = self
+                    .blocks
+                    .get_mut(&v["contentIndex"].as_u64().context("missing tool index")?)
+                    .context("unexpected tool delta")?;
+                block
+                    .arguments
+                    .push_str(v["delta"].as_str().context("missing tool delta")?);
+            }
+            "toolcall_end" => {
+                let mut block = self
+                    .blocks
+                    .remove(&v["contentIndex"].as_u64().context("missing tool index")?)
+                    .context("unexpected tool end")?;
+                let call = &v["toolCall"];
+                ensure!(
+                    call["id"] == block.raw["id"]
+                        && call["name"] == block.raw["name"]
+                        && call["arguments"].is_object(),
+                    "invalid completed tool call"
+                );
+                block.arguments.clear();
+                block.raw["input"] = call["arguments"].clone();
+                self.tool_blocks.push(block);
+            }
+            "done" | "error" => {
+                let u = &v["usage"];
+                self.usage = json!({"input_tokens":u["input"],"output_tokens":u["output"],"cache_read_input_tokens":u["cacheRead"],"cache_creation_input_tokens":u["cacheWrite"],"cost":u.pointer("/cost/total")});
+                if v["type"] == "error" {
+                    emit(Event::Usage(self.usage.clone()));
+                    bail!("Pi Messages request failed")
+                }
+                self.stop = match v["reason"].as_str() {
+                    Some("stop") => "end_turn",
+                    Some("toolUse") => "tool_use",
+                    Some("length") => "max_tokens",
+                    _ => bail!("unknown Pi Messages stop reason"),
+                }
+                .into();
+                if let Some(model) = v["responseModel"].as_str() {
+                    emit(Event::Responder(model.into()));
+                }
+                self.done = true;
+            }
+            _ => {}
+        }
+        Ok(())
     }
     fn anthropic(&mut self, v: &Value, emit: &mut Emit) -> Result<()> {
         ensure!(!self.done, "event after message_stop");
