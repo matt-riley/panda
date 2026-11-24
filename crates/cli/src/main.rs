@@ -34,7 +34,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :mcp [list|status|login|logout|reconnect|diagnostics|exposure] · :context [BYTES|info] · :transcript [POINTER] · :compact [instructions|preview [guidance]|info] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :warm · :retry · :resume [ID] · :ack · :tool ID · :tools · :mcp [list|status|login|logout|reconnect|diagnostics|exposure] · :context [BYTES|info] · :transcript [POINTER] · :compact [instructions|preview [guidance]|info] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -299,6 +299,7 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
         if let Some(api) = ep.api.as_deref().filter(|api| *api != "openai-completions") {
             return Ok(Box::new(panda_providers::native::NativeApi {
                 family: panda_providers::native::Family::parse(api)?,
+                transport: ep.transport,
                 provider: p.into(),
                 api: Api {
                     model: m.into(),
@@ -335,6 +336,7 @@ fn provider(state: &Path, p: &str, m: &str) -> Result<Box<dyn Provider + Send>> 
     if let Some((family, base)) = panda_providers::native::builtin(p) {
         return Ok(Box::new(panda_providers::native::NativeApi {
             family,
+            transport: Default::default(),
             provider: p.into(),
             api: Api {
                 key: key.trim().into(),
@@ -442,7 +444,9 @@ fn configure_context(
     if s.model_window != window
         || s.keep_recent_tokens != keep_recent_tokens
         || s.compaction_thresholds != settings.thresholds()
+        || s.request_policy != settings.request
     {
+        s.request_policy = settings.request;
         s.compaction_thresholds = settings.thresholds();
         s.keep_recent_tokens = keep_recent_tokens;
         s.model_window = window;
@@ -1589,6 +1593,19 @@ fn run(
                         "Choose a model provider"
                     };
                     screen.line(Tone::Text, &format!("{title}: 1 OpenAI Codex · 2 DeepSeek · 3 OpenRouter · anthropic · openai-api · google. Enter a number or name (:cancel to close)."));
+                }
+                ":warm" => {
+                    cancel.reset();
+                    panda_core::warm(
+                        make_provider(&state, &p, &model)?.as_mut(),
+                        &mut db,
+                        tools,
+                        &cancel,
+                    )?;
+                    screen.line(
+                        Tone::Dim,
+                        &format!("Warm request completed · {}", usage(&db.load()?)),
+                    );
                 }
                 ":usage" => {
                     let s = db.load()?;

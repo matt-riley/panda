@@ -19,6 +19,8 @@ pub struct Catalog {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
+    #[serde(default)]
+    pub transport: panda_providers::native::Transport,
     pub base_url: String,
     pub api_key: Option<String>,
     pub api: Option<String>,
@@ -71,6 +73,14 @@ impl Catalog {
                     .is_none_or(|api| api == "openai-completions"
                         || panda_providers::native::Family::parse(api).is_ok()),
                 "unsupported API for {id} in models.json"
+            );
+            ensure!(
+                ep.transport != panda_providers::native::Transport::Websocket
+                    || matches!(
+                        ep.api.as_deref(),
+                        Some("openai-responses" | "azure-openai-responses")
+                    ),
+                "WebSocket transport requires a Responses API for {id}"
             );
             if let Some(key) = &ep.api_key {
                 ensure!(

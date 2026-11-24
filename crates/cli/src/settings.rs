@@ -77,6 +77,7 @@ struct Compaction {
 }
 #[derive(Default, Deserialize)]
 struct SettingsFile {
+    request: Option<panda_core::RequestPolicy>,
     #[serde(default)]
     compaction: Compaction,
     #[serde(rename = "skillIndex")]
@@ -85,6 +86,7 @@ struct SettingsFile {
 
 #[derive(Default)]
 pub struct Settings {
+    pub request: panda_core::RequestPolicy,
     controls: Controls,
     control_sources: BTreeMap<&'static str, PathBuf>,
     pub invocation_controls: Controls,
@@ -126,6 +128,14 @@ impl Settings {
                 if let Some(value) = setting.keep {
                     settings.models.insert(model, (value, path.clone()));
                 }
+            }
+            if let Some(policy) = layer.request {
+                anyhow::ensure!(
+                    policy.max_retries <= 10 && policy.timeout_ms != Some(0),
+                    "invalid request policy in {}",
+                    path.display()
+                );
+                settings.request = policy;
             }
             if let Some(value) = layer.skill_index {
                 settings.skill_index = value;
@@ -176,6 +186,13 @@ impl Settings {
             (controls.cache_age_secs / 60).to_string(),
         ];
         let mut lines = vec![
+            format!("request.maxRetries = {}", self.request.max_retries),
+            format!(
+                "request.timeoutMs = {}",
+                self.request
+                    .timeout_ms
+                    .map_or_else(|| "none".to_string(), |ms| ms.to_string())
+            ),
             format!("compaction.keepRecentTokens = {keep} ({origin})"),
             format!(
                 "skillIndex = {} ({})",

@@ -47,6 +47,11 @@ Set `apiKey` to an uppercase environment variable name for authenticated endpoin
 
 Panda resumes each branch with its own provider, model and thinking level. Pi JSONL exports retain the model that answered each turn, including one-shot overrides. `:usage` lists requests, retries and summaries with their reported or catalogue-derived costs. It reports unpriced requests separately.
 
+Set `"request": {"maxRetries": 2, "timeoutMs": 60000}` in Panda's `settings.json` to limit retries and each provider attempt. The project settings file can replace the request policy. Defaults are three retries and no Panda deadline. Use `:settings reload` to apply edits. In `models.json`, a Responses endpoint accepts `"transport": "sse"` (default), `"websocket"`, or `"auto"`. Auto falls back to SSE if the upgrade is unsupported, before sending a generation request.
+
+Use `:warm` to submit the current prompt prefix once. The command leaves the transcript alone, ignores any returned tool calls, and records the provider's usage under `warm`. Cache admission depends on the provider. In the loopback pricing fixture a warm request cost $0.000300 for 100 input and 10 output tokens. Panda only warms on request.
+
+
 
 For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `:model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. Use `:login openai` to start Codex sign-in directly. The Rust binary handles authorization, token refresh, streaming and tool calls. Panda reads existing subscription credentials from the same private SQLite database.
 
@@ -82,7 +87,7 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | Attach a workspace file | Type `@src/main.rs`, or `@"path with spaces"`. Press Tab in Insert mode for completions. For large files, ask Panda to read a range of lines. |
 | Send an image | Attach a PNG, JPEG, GIF or WebP by path, or use Ctrl-V in Insert mode or `:paste` for a macOS clipboard image. `:detach` clears the pending clipboard image. Select a model that accepts images. |
 | Edit a longer prompt | Press Ctrl-G in Insert mode. Panda opens the draft in `$VISUAL`, `$EDITOR` or `vi`. Save and close the editor to return. |
-| Recover from a temporary provider failure | Panda retries the current model request up to three times before any response is shown. The countdown appears above the prompt. Ctrl-C cancels it. Completed tools are never replayed by the retry. |
+| Recover from a temporary provider failure | By default Panda retries a transient failure up to three times before streaming begins. The countdown appears above the prompt. Ctrl-C cancels it. Completed tools are never replayed by the retry. |
 | Redirect an active turn | Type a correction and press Enter. Panda delivers it after the current batch of tools finishes. Alt-Enter queues a follow-up after the answer. Alt-Up brings queued text back into the draft. |
 | Copy a reply | Use `:copy` or Ctrl-X in Insert or Normal mode to copy the last completed reply on the active branch as original Markdown. During a turn the command runs when Panda returns to the prompt. |
 | Inspect output | Shell output appears as it arrives. During a turn the activity timer sits above the steering prompt. Ctrl-O at the prompt expands tool results, `:tool ID` toggles one and Ctrl-T shows or hides reasoning supplied by the model. |

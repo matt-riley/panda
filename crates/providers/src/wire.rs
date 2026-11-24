@@ -50,112 +50,119 @@ pub struct Responses {
 }
 impl Responses {
     pub fn push(&mut self, bytes: &[u8], emit: &mut Emit) -> Result<()> {
-        self.lines.feed(bytes, |v| {
-            ensure!(!self.complete, "event after completion");
-            if let Some(model) = v.pointer("/response/model").and_then(Value::as_str) {
-                emit(Event::Responder(model.to_owned()));
+        let mut lines = std::mem::take(&mut self.lines);
+        let result = lines.feed(bytes, |v| self.event(v, emit));
+        self.lines = lines;
+        result
+    }
+    pub(super) fn complete(&self) -> bool {
+        self.complete
+    }
+    pub(super) fn event(&mut self, v: Value, emit: &mut Emit) -> Result<()> {
+        ensure!(!self.complete, "event after completion");
+        if let Some(model) = v.pointer("/response/model").and_then(Value::as_str) {
+            emit(Event::Responder(model.to_owned()));
+        }
+        match string(&v, "type")? {
+            "response.reasoning_summary_text.delta" => {
+                if let Some(t) = v["delta"].as_str() {
+                    emit(Event::Reasoning(t.into()));
+                }
             }
-            match string(&v, "type")? {
-                "response.reasoning_summary_text.delta" => {
-                    if let Some(t) = v["delta"].as_str() {
-                        emit(Event::Reasoning(t.into()));
-                    }
-                }
-                "response.output_text.delta" => {
-                    let t = v["delta"].as_str().context("missing delta")?;
-                    self.text += t;
-                    emit(Event::Text(t.into()))
-                }
-                "response.output_item.added" if v["item"]["type"] == "function_call" => {
-                    let item = &v["item"];
-                    let id = string(item, "id")?.to_owned();
-                    ensure!(
-                        self.pending.len() < 128
-                            && self
-                                .pending
-                                .insert(
-                                    id,
-                                    (
-                                        item.clone(),
-                                        item["arguments"].as_str().unwrap_or("").to_owned()
-                                    )
+            "response.output_text.delta" => {
+                let t = v["delta"].as_str().context("missing delta")?;
+                self.text += t;
+                emit(Event::Text(t.into()))
+            }
+            "response.output_item.added" if v["item"]["type"] == "function_call" => {
+                let item = &v["item"];
+                let id = string(item, "id")?.to_owned();
+                ensure!(
+                    self.pending.len() < 128
+                        && self
+                            .pending
+                            .insert(
+                                id,
+                                (
+                                    item.clone(),
+                                    item["arguments"].as_str().unwrap_or("").to_owned()
                                 )
-                                .is_none(),
-                        "duplicate or excessive function call"
-                    );
-                }
-                "response.function_call_arguments.delta" => {
-                    if let Some((_, args)) = v["item_id"]
-                        .as_str()
-                        .and_then(|id| self.pending.get_mut(id))
-                    {
-                        args.push_str(v["delta"].as_str().context("invalid argument delta")?);
-                    }
-                }
-                "response.function_call_arguments.done" => {
-                    if let Some((_, args)) = v["item_id"]
-                        .as_str()
-                        .and_then(|id| self.pending.get_mut(id))
-                        && let Some(full) = v["arguments"].as_str()
-                    {
-                        *args = full.to_owned();
-                    }
-                }
-                "response.output_item.done"
-                    if v["item"]["type"] == "reasoning"
-                        && v["item"]["encrypted_content"].is_string() =>
-                {
-                    self.replay.push(v["item"].clone());
-                }
-                "response.output_item.done" if v["item"]["type"] == "function_call" => {
-                    let mut item = v["item"].clone();
-                    if let Some((start, args)) =
-                        item["id"].as_str().and_then(|id| self.pending.remove(id))
-                    {
-                        for key in ["call_id", "name"] {
-                            if item[key].is_null() {
-                                item[key] = start[key].clone();
-                            }
-                        }
-                        if item["arguments"].as_str().is_none_or(str::is_empty) {
-                            item["arguments"] = json!(args);
-                        }
-                    }
-                    self.calls.push(item);
-                }
-                "response.incomplete"
-                    if v["response"]["incomplete_details"]["reason"] == "max_output_tokens" =>
-                {
-                    let response = &v["response"];
-                    self.complete = true;
-                    self.cutoff = Some((
-                        response["usage"]["output_tokens"].as_u64(),
-                        response["max_output_tokens"].as_u64(),
-                    ));
-                    if !response["usage"].is_null() {
-                        emit(Event::Usage(response["usage"].clone()));
-                    }
-                }
-                "response.completed" => {
-                    ensure!(
-                        v["response"]["status"] == "completed",
-                        "response incomplete"
-                    );
-                    self.complete = true;
-                    if !v["response"]["usage"].is_null() {
-                        emit(Event::Usage(v["response"]["usage"].clone()))
-                    }
-                }
-                "error" | "response.failed" | "response.incomplete" => {
-                    if let Some(usage) = v.pointer("/response/usage").filter(|u| u.is_object()) {
-                        emit(Event::Usage(usage.clone()));
-                    }
-                    bail!("subscription response failed or incomplete")
-                }
-                _ => {}
+                            )
+                            .is_none(),
+                    "duplicate or excessive function call"
+                );
             }
-            Ok(())
-        })
+            "response.function_call_arguments.delta" => {
+                if let Some((_, args)) = v["item_id"]
+                    .as_str()
+                    .and_then(|id| self.pending.get_mut(id))
+                {
+                    args.push_str(v["delta"].as_str().context("invalid argument delta")?);
+                }
+            }
+            "response.function_call_arguments.done" => {
+                if let Some((_, args)) = v["item_id"]
+                    .as_str()
+                    .and_then(|id| self.pending.get_mut(id))
+                    && let Some(full) = v["arguments"].as_str()
+                {
+                    *args = full.to_owned();
+                }
+            }
+            "response.output_item.done"
+                if v["item"]["type"] == "reasoning"
+                    && v["item"]["encrypted_content"].is_string() =>
+            {
+                self.replay.push(v["item"].clone());
+            }
+            "response.output_item.done" if v["item"]["type"] == "function_call" => {
+                let mut item = v["item"].clone();
+                if let Some((start, args)) =
+                    item["id"].as_str().and_then(|id| self.pending.remove(id))
+                {
+                    for key in ["call_id", "name"] {
+                        if item[key].is_null() {
+                            item[key] = start[key].clone();
+                        }
+                    }
+                    if item["arguments"].as_str().is_none_or(str::is_empty) {
+                        item["arguments"] = json!(args);
+                    }
+                }
+                self.calls.push(item);
+            }
+            "response.incomplete"
+                if v["response"]["incomplete_details"]["reason"] == "max_output_tokens" =>
+            {
+                let response = &v["response"];
+                self.complete = true;
+                self.cutoff = Some((
+                    response["usage"]["output_tokens"].as_u64(),
+                    response["max_output_tokens"].as_u64(),
+                ));
+                if !response["usage"].is_null() {
+                    emit(Event::Usage(response["usage"].clone()));
+                }
+            }
+            "response.completed" => {
+                ensure!(
+                    v["response"]["status"] == "completed",
+                    "response incomplete"
+                );
+                self.complete = true;
+                if !v["response"]["usage"].is_null() {
+                    emit(Event::Usage(v["response"]["usage"].clone()))
+                }
+            }
+            "error" | "response.failed" | "response.incomplete" => {
+                if let Some(usage) = v.pointer("/response/usage").filter(|u| u.is_object()) {
+                    emit(Event::Usage(usage.clone()));
+                }
+                bail!("subscription response failed or incomplete")
+            }
+            _ => {}
+        }
+        Ok(())
     }
     pub fn finish(mut self) -> Result<(String, Vec<Call>)> {
         ensure!(

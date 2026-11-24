@@ -2,11 +2,13 @@
 mod history;
 mod pi;
 mod stream;
+mod websocket;
 use crate::{Api, checked, subscription::cancellable, transport_error, wire};
 use anyhow::{Result, bail, ensure};
 use panda_core::{Call, Cancel, Emit, Event, Message, Provider, ProviderReplay};
 use reqwest::Url;
 use serde_json::{Value, json};
+pub use websocket::Transport;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Family {
@@ -61,6 +63,7 @@ pub fn builtin(id: &str) -> Option<(Family, &'static str)> {
 }
 
 pub struct NativeApi {
+    pub transport: Transport,
     pub family: Family,
     pub provider: String,
     pub api: Api,
@@ -159,11 +162,18 @@ impl Provider for NativeApi {
             .enable_all()
             .build()?;
         rt.block_on(cancellable(cancel, async {
+            if self.transport != Transport::Sse
+                && self.family.wire() == Family::Responses
+                && let Some(reply) = websocket::request(self, &body, cancel, emit).await?
+            {
+                return Ok(reply);
+            }
             let mut response =
                 checked(request.json(&body).send().await.map_err(transport_error)?).await?;
             if self.family.wire() == Family::Responses {
                 let mut decoder = wire::Responses::default();
                 while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+                    cancel.mark_response_started();
                     decoder.push(&chunk, emit)?;
                 }
                 let replay = std::mem::take(&mut decoder.replay);
@@ -174,6 +184,7 @@ impl Provider for NativeApi {
             let mut lines = wire::Lines::default();
             let mut decoder = stream::Decoder::new(self.family.wire(), h.len(), self.max_tokens);
             while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+                cancel.mark_response_started();
                 lines.feed(&chunk, |v| decoder.push(v, emit))?;
             }
             ensure!(lines.partial.is_empty(), "incomplete provider event");

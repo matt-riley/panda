@@ -167,6 +167,7 @@ impl SessionSdk<'_> {
             reasoning: state.reasoning,
             disable_auto_compaction: state.disable_auto_compaction,
             disable_auto_retry: state.disable_auto_retry,
+            request_policy: state.request_policy,
             ..Session::default()
         };
         if let Some(parent) = parent {

@@ -362,6 +362,7 @@ impl<A: std::borrow::Borrow<Api>> Provider for ChatProvider<A> {
                 }
             })? {
                 cancel.check()?;
+                cancel.mark_response_started();
                 stream.push(&chunk, emit)?;
             }
             stream.finish_with_limit(limit)
