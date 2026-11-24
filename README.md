@@ -48,7 +48,7 @@ Set `apiKey` to an uppercase environment variable name for authenticated endpoin
 Panda resumes each branch with its own provider, model and thinking level. Pi JSONL exports retain the model that answered each turn, including one-shot overrides. `:usage` lists requests, retries and summaries with their reported or catalogue-derived costs. It reports unpriced requests separately.
 
 
-For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `:model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. The direct command `:login openai` also works. The Rust binary handles authorization, token refresh, streaming, and tool calls. Existing Panda subscription credentials are read from the same private SQLite database.
+For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open browser** or **Use device code**. After signing in, enter `:model` to search the models from configured providers. Type to filter, move with ↑ or ↓, press Enter to select, or Esc to cancel. GPT selections use your Codex subscription. Use `:login openai` to start Codex sign-in directly. The Rust binary handles authorization, token refresh, streaming and tool calls. Panda reads existing subscription credentials from the same private SQLite database.
 
 ## Use a session
 
@@ -56,7 +56,7 @@ Run `panda "Review this change"` in an interactive terminal to send the first pr
 
 The interactive prompt starts in Vim Insert mode. Press `Esc` for Normal mode, use motions such as `w`, `b`, `0` and `$`, and edit with `cw`, `dw` or `u`. Press `i` to insert again. Enter sends the prompt. Alt-Enter inserts a newline in terminals that report the shortcut. Multiline paste stays in the editor until you submit it.
 
-The interactive UI fills the terminal. Assistant replies render Markdown as they stream, including headings, lists, emphasis, inline code and fenced code. Reopening a session renders its saved Markdown with the same styles and wrapping. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The lower-left footer shows the Vim mode. Press Esc, type a command such as `:q`, and press Enter. In either the idle or steering prompt, typing `:mo` shows `:model` and `:models` above the command line. Tab completes the first match and cycles forward, Shift-Tab cycles backward, and Enter runs the displayed command. Esc cancels the command and restores the draft. Existing slash commands still work. The steering prompt shares the idle editor’s Vim motions, operators, and undo history. Set `NO_COLOR=1` for monochrome. Use `:tools` for full tool results.
+The full-screen UI renders Markdown as replies stream, including headings, lists, emphasis, inline code and fenced code. Panda uses the same styles and wrapping to render saved Markdown when you reopen a session. Page Up and Page Down scroll the transcript while you edit. Successful file edits show a coloured, numbered before-and-after excerpt with context. The prompt sits between two rules, with the workspace and Git branch, session mode, latest reported input/output token counts, and selected model below it. The lower-left footer shows the Vim mode. Press Esc, type a command such as `:q`, and press Enter. In either the idle or steering prompt, typing `:mo` shows `:model` and `:models` above the command line. Tab completes the first match and cycles forward, Shift-Tab cycles backward, and Enter runs the displayed command. Esc cancels the command and restores the draft. Existing slash commands still work. The steering prompt shares the idle editor’s Vim motions, operators, and undo history. Set `NO_COLOR=1` for monochrome. Use `:tools` for full tool results.
 
 - `:plan` enables directory listing, file discovery by glob, paginated literal and regex search, file reads, skill lookup and conversational clarification. Type `:code` to enable edits, writes and shell commands.
 - `:resume` opens a searchable picker for this workspace. Type part of a name, prompt, or reply to see matching sessions and a conversation preview. Use ↑/↓ to preview another result, Enter to resume, or Esc to return. In piped input, bare `:resume` lists sessions. `:resume ID` reopens one and displays its transcript and mode. Ctrl-C interrupts an active turn. `:quit` closes Panda.
@@ -91,7 +91,7 @@ In code mode, `edit` accepts a single `{"path":"src/app.rs","old":"before","new"
 | Choose a model | `:models openrouter deepseek` filters the provider catalogue. Use `:model NUMBER` to select a result. Use `:effort` to choose a reasoning level, or enter it directly with `:effort high`. `:thinking` is an alias. Codex choices come from the selected model’s catalogue entry. |
 | Use a Markdown skill | Search with `:skills QUERY` and invoke one with `:skill:NAME task`. Panda shows the selected path. |
 
-Panda first tries a verified extractive handoff for manual, automatic and overflow checkpoints. It uses the optional `TYPESAFE_API_KEY` for Jev judgments and masks credentials before sending any text. Without a key, or if judging fails, times out or rejects the handoff, a manual or hard checkpoint uses the current chat provider’s summarizer. Soft pressure can defer to the next clean boundary. Both strategies preserve the branch and save a private recovery transcript only when a new checkpoint commits.
+Panda first tries a verified extractive handoff for manual, automatic and overflow checkpoints. It uses the optional `TYPESAFE_API_KEY` for Jev judgments and masks credentials before sending any text. Without a key, or if judging fails, times out or rejects the handoff, a manual or hard checkpoint uses the current chat provider’s summarizer. Panda can defer compaction at the soft threshold until the next clean boundary. Both strategies preserve the branch and save a private recovery transcript only when a new checkpoint commits.
 
 - `:compact [guidance]` adopts a checkpoint. `:compact preview [guidance]` displays the candidate and leaves session history and recovery storage untouched. Esc cancels a preview in the terminal.
 - `:compact info` and `:context` report usage, effective thresholds, prompt section estimates and the visible tool declarations. Looking at context makes no judge requests.
@@ -112,13 +112,13 @@ The verified planner uses a 20,000-token retention target by default and keeps t
 
 Compaction keeps a sorted list of files read and files modified alongside the summary. A successful edit or write moves a path into the modified list. Successful reads inside Codemode count too. The lists survive reopening and Pi JSONL export and import.
 
-If a provider stops for length before using its output allowance, Panda saves the partial reply in the transcript and retries once. It can compact older exchanges before retrying. The retry carries the current prompt and completed tool results forward. Tool calls from a truncated reply never run. A full allowance or an unknown token count or limit ends the turn with a length error. A follow-up uses the completed conversation.
+If a provider stops for length before using its output allowance, Panda saves the partial reply in the transcript and retries once. It can compact older exchanges before retrying. The retry carries the current prompt and completed tool results forward. Tool calls from a truncated reply never run. If the provider used its full allowance or the token count or limit is unknown, the turn ends with a length error. A follow-up uses the completed conversation.
 
 Panda sends an explicit output limit for supported DeepSeek models and for OpenRouter models with an output limit in the cached catalogue. Refresh the OpenRouter catalogue with `:models openrouter`. For a Codex subscription, Panda uses the limit and usage returned with an incomplete response.
 
 ## Codemode
 
-Start `panda --codemode` to let the model combine read-only workspace tools in JavaScript. For example, ask “Rank the five files with the most TODO lines.” The script can walk every search page, count matches, and send the model just the ranking. Codemode works in both plan and code mode, and the flag also works with print, JSON and RPC.
+Start `panda --codemode` to let the model combine read-only workspace tools in JavaScript. For example, ask “Rank the five files with the most TODO lines.” The script can count matches across all search pages and return only the ranking. The flag works in plan and code modes and is available in print, JSON and RPC.
 
 For print and JSON runs, `--codemode-only` makes `codemode` the sole tool the provider can call. Scripts have the usual read-only helpers. Use `panda --print --codemode-only --tools read "Read version.txt"` to allow just one nested helper, or `panda --mode json --codemode-only --tools codemode,read,search "Rank TODOs by file"` to allow two. Listing `codemode` is optional with this flag. An explicit `--no-tools` still disables all tools.
 
@@ -175,9 +175,9 @@ panda --export-session 42 review.html
 pi --session continued.jsonl
 ```
 
-Open the standalone HTML file in a browser offline. It opens on the active branch. Use the branch selector to review a sibling, including its tool output and compaction checkpoints. Export requires a new destination file and preserves the order used by `--continue`.
+Open the standalone HTML file offline in a browser to see the active branch. Use the branch selector to review a sibling, including its tool output and compaction checkpoints. Export requires a new destination file and preserves the order used by `--continue`.
 
-Import and export also accept a trailing `--session-dir DIR`. Export creates a new file and includes all branches. Pi opens the selected branch, including its compaction checkpoint. Imported entries retain their IDs, parent links and extension payloads. The exported header points to the importing workspace. Panda uses its own configured model and tools when continuing. For Panda-authored entries that lack original timestamps or model metadata, the export uses the time of first export and identifies the model as unknown.
+Import and export also accept a trailing `--session-dir DIR`. Export includes all branches. Pi opens the selected branch, including its compaction checkpoint. Imported entries retain their IDs, parent links and extension payloads. The exported header points to the importing workspace. Panda uses its own configured model and tools when continuing. For Panda-authored entries that lack original timestamps or model metadata, the export uses the time of first export and identifies the model as unknown.
 
 Use `--session-dir DIR` to choose where a print or JSON run creates and looks up sessions, for example `panda --print --session-dir ../review-sessions --continue "Summarize the review"`. The SQLite database and session locks live in that directory. Both `--session ID` and `--continue` look there for conversations in the current workspace. Choose a private directory outside the workspace and configured toolchains. Panda creates it if needed. Credentials, model settings, and user instructions still come from `PANDA_HOME`, which is also the default session store. With `--no-session`, Panda skips the session directory entirely.
 
@@ -233,12 +233,12 @@ cargo +nightly fuzz run subscription_stream -- -max_total_time=60
 
 DeepSeek, OpenRouter and ChatGPT Codex each completed a live tool round trip. Codex also completed a fresh browser login and returned the verified contents of a random test file.
 
-Panda used DeepSeek to inspect a failing regression in its own subscription transcript conversion, proposed a plan, edited the implementation, and ran the two Node tests successfully in its sandbox. A new process reopened the session. The fixture exposed a practical requirement for access to an installed language toolchain, supplied through `PANDA_TOOLCHAIN_DIRS`. The run completed in Panda.
+Using DeepSeek, Panda inspected a failing regression in its own subscription transcript conversion, proposed a plan, edited the implementation and passed both Node tests in its sandbox. A new Panda process reopened the session. The fixture needed access to an installed language toolchain, made available through `PANDA_TOOLCHAIN_DIRS`.
 
 
 ## Releasing
 
-Conventional commits on main feed Release Please. Merge its release PR to publish the version in `version.txt`. This file versions the shipped binary independently of the internal Cargo workspace packages. The release workflow checks out the tag, packages the Intel and Apple Silicon binaries, uploads SHA-256 checksums, then dispatches the tap publisher at that tag. The publisher uses the tap App's `APP_ID` variable and `PRIVATE_KEY` Actions secret. To retry tap publication, dispatch the Homebrew workflow at the published tag.
+Conventional commits on main feed Release Please. Merge its release PR to publish the version in `version.txt`. The shipped binary and the Cargo workspace packages are versioned separately. The release workflow checks out the tag, packages the Intel and Apple Silicon binaries, uploads SHA-256 checksums, then dispatches the tap publisher at that tag. The publisher uses the tap App's `APP_ID` variable and `PRIVATE_KEY` Actions secret. To retry tap publication, dispatch the Homebrew workflow at the published tag.
 
 ## Settings and Markdown resources
 
@@ -254,4 +254,4 @@ Panda discovers ancestor `.agents/skills` and `.pi/skills` directories up to the
 
 Use `:diagnostics` to save a private JSON file under Panda’s state directory. It records the build, platform, session ID, revision, mode, message count and checkpoint status. `:bug-report` also includes fields you can fill in locally with reproduction steps and expected and observed behavior. `:changelog` displays the latest bundled release, and `:changelog 0.1.20` selects a release offline.
 
-External transcript sharing is excluded from these commands. To share a conversation yourself, export the specific session with `--export-session ID FILE`, inspect the file and choose its recipient.
+These commands don’t share transcripts externally. To share one, export the session with `--export-session ID FILE`, inspect the file and choose its recipient.

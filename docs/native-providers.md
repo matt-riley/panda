@@ -13,7 +13,7 @@ For a configured provider, set `api` to `anthropic-messages`, `openai-responses`
 
 ## Virtual models
 
-Register virtual models in the same `models.json`. This example sends a high-thinking turn to the Anthropic model. Other text turns use the default model.
+Register virtual models in the same `models.json`. In this example, high-thinking turns go to the Anthropic model and other text turns use the default model.
 
 ```json
 {
@@ -37,4 +37,4 @@ Targets must name physical models. Configure credentials on those providers. The
 
 Panda supports an independently run llama.cpp server through the existing `openai-completions` family. Register its `/v1` base URL and loaded model ID in `models.json`. The model is available to the picker, one-shot CLI and virtual routes. Set its context and output limits to match the server.
 
-We evaluated Pi's optional `/llama` UI. Its router discovers GGUF models and exposes loading, unloading and model download. A shared server can hold several models and allocate context across slots. Model changes therefore affect clients beyond the current Panda session. Panda keeps server startup, GPU allocation, GGUF downloads and shutdown under the operator's existing llama.cpp service. The scope of this implementation is inference against that service. [Pi's pinned llama.cpp guide](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/coding-agent/docs/llama-cpp.md)
+We evaluated Pi's optional `/llama` UI. Its router discovers GGUF models and exposes loading, unloading and model download. A shared server can hold several models and allocate context across slots, so model changes affect clients beyond the current Panda session. Panda uses the existing llama.cpp service only for inference; the operator retains control of server startup, GPU allocation, GGUF downloads and shutdown. [Pi's pinned llama.cpp guide](https://github.com/earendil-works/pi/blob/f472efdc1f310c7340579db447ef19201c3232ea/packages/coding-agent/docs/llama-cpp.md)
