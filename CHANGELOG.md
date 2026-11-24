@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.26](https://github.com/matt-riley/panda/compare/v0.1.25...v0.1.26) (2026-11-24)
+
+
+### Features
+
+* support offline session transfer on Linux ([#99](https://github.com/matt-riley/panda/issues/99)) ([cb5911c](https://github.com/matt-riley/panda/commit/cb5911c79505f81048285327f44d254f1d9fb415))
+
 ## [0.1.25](https://github.com/matt-riley/panda/compare/v0.1.24...v0.1.25) (2026-11-24)
 
 
