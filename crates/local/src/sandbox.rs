@@ -38,36 +38,64 @@ fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+// Both transcript transfers and live sessions enforce the same workspace and
+// private-storage boundaries. Only the live host needs an executable and scratch.
+fn storage_paths(root: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+    ensure!(root.is_dir(), "expected workspace directory");
+    let home = PathBuf::from(std::env::var_os("HOME").context("missing HOME")?).canonicalize()?;
+    ensure!(
+        !home.starts_with(root),
+        "choose a repository below the home directory"
+    );
+    let state = state_dir()?;
+    ensure!(
+        !overlaps(&state, root),
+        "workspace overlaps Panda credentials or sessions"
+    );
+    let mut toolchains = Vec::new();
+    if let Some(roots) = std::env::var_os("PANDA_TOOLCHAIN_DIRS") {
+        for dir in std::env::split_paths(&roots) {
+            let dir = dir.canonicalize()?;
+            ensure!(
+                dir.is_dir()
+                    && !home.starts_with(&dir)
+                    && !dir.starts_with(root)
+                    && !overlaps(&state, &dir),
+                "choose a separate installed toolchain directory"
+            );
+            toolchains.push(dir);
+        }
+    }
+    Ok((state, toolchains))
+}
+
+fn checked_session_dir(root: &Path, toolchains: &[PathBuf], path: &Path) -> Result<PathBuf> {
+    let dir = private_dir(path, "--session-dir")?;
+    ensure!(
+        !overlaps(&dir, root),
+        "workspace overlaps session directory"
+    );
+    ensure!(
+        toolchains.iter().all(|tools| !overlaps(&dir, tools)),
+        "toolchain overlaps session directory"
+    );
+    Ok(dir)
+}
+
+pub fn transfer_dir(root: &Path, session_dir: Option<&Path>) -> Result<PathBuf> {
+    let root = root.canonicalize()?;
+    let (state, toolchains) = storage_paths(&root)?;
+    match session_dir {
+        Some(dir) => checked_session_dir(&root, &toolchains, dir),
+        None => Ok(state),
+    }
+}
+
 impl Native {
     pub fn new(root: &Path, worker: &Path) -> Result<Self> {
         ensure!(cfg!(target_os = "macos"), "native sandbox requires macOS");
         let root = root.canonicalize()?;
-        ensure!(root.is_dir(), "expected workspace directory");
-        let home =
-            PathBuf::from(std::env::var_os("HOME").context("missing HOME")?).canonicalize()?;
-        ensure!(
-            !home.starts_with(&root),
-            "choose a repository below the home directory"
-        );
-        let state = state_dir()?;
-        ensure!(
-            !overlaps(&state, &root),
-            "workspace overlaps Panda credentials or sessions"
-        );
-        let mut toolchains = Vec::new();
-        if let Some(roots) = std::env::var_os("PANDA_TOOLCHAIN_DIRS") {
-            for dir in std::env::split_paths(&roots) {
-                let dir = dir.canonicalize()?;
-                ensure!(
-                    dir.is_dir()
-                        && !home.starts_with(&dir)
-                        && !dir.starts_with(&root)
-                        && !overlaps(&state, &dir),
-                    "choose a separate installed toolchain directory"
-                );
-                toolchains.push(dir);
-            }
-        }
+        let (state, toolchains) = storage_paths(&root)?;
         let scratch = private_scratch(crate::resources::project_root(&root), &state)?;
         Ok(Self {
             root,
@@ -78,16 +106,7 @@ impl Native {
         })
     }
     pub fn session_dir(&self, path: &Path) -> Result<PathBuf> {
-        let dir = private_dir(path, "--session-dir")?;
-        ensure!(
-            !overlaps(&dir, &self.root),
-            "workspace overlaps session directory"
-        );
-        ensure!(
-            self.toolchains.iter().all(|tools| !overlaps(&dir, tools)),
-            "toolchain overlaps session directory"
-        );
-        Ok(dir)
+        checked_session_dir(&self.root, &self.toolchains, path)
     }
     fn profile(&self, workspace: &Path, scratch: &Path, write: bool) -> Result<String> {
         let quoted = |p: &Path| -> Result<String> {

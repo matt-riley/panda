@@ -7,6 +7,10 @@ The resume picker searches the current workspace by session ID, title, or transc
 In the session tree, Tab cycles default, no-tools, user-only, labeled-only and all entries. Ctrl-L jumps to labeled entries. Tool calls, results, reasoning and internal events are available for inspection. Prompts, completed answers, branch summaries and imported metadata/checkpoints support navigation.
 
 
+## Offline session transfer on Linux
+
+Install the CLI from this checkout with `cargo install --locked --path crates/cli`. From the destination workspace, run `panda --import-session session.jsonl`. Use the returned session ID with `panda --export-session ID exported.jsonl`. Both commands accept `--session-dir DIR` for a separate private session store. Interactive coding sessions currently require the macOS host.
+
 ## Run on macOS
 
 Install the Intel or Apple Silicon release with `brew install matt-riley/tools/panda`. Check the installed version with `panda --version`.
