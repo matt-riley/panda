@@ -6,6 +6,7 @@ pub struct Exposure<'a> {
     inner: &'a dyn Toolset,
     deferred: BTreeSet<String>,
     hidden: BTreeSet<String>,
+    configured_deferred: Option<&'a (dyn Fn(&str) -> bool + Sync)>,
 }
 fn search_schema() -> Value {
     json!({"type":"function","function":{"name":"tool_search","description":"Discover deferred tools by name or description on this branch.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":1}},"required":["query"],"additionalProperties":false}}})
@@ -24,7 +25,15 @@ impl<'a> Exposure<'a> {
             inner,
             deferred,
             hidden,
+            configured_deferred: None,
         })
+    }
+    pub fn with_deferred_policy(mut self, policy: &'a (dyn Fn(&str) -> bool + Sync)) -> Self {
+        self.configured_deferred = Some(policy);
+        self
+    }
+    fn is_deferred(&self, name: &str) -> bool {
+        self.deferred.contains(name) || self.configured_deferred.is_some_and(|policy| policy(name))
     }
     fn available(&self, mode: Mode, history: &[Message]) -> Vec<Value> {
         let discovered: BTreeSet<&str> = history
@@ -44,7 +53,7 @@ impl<'a> Exposure<'a> {
             .into_iter()
             .filter(|d| {
                 d.name() == "tool_search"
-                    || !self.deferred.contains(d.name())
+                    || !self.is_deferred(d.name())
                     || discovered.contains(d.name())
             })
             .map(|d| d.schema)
@@ -63,7 +72,7 @@ impl Toolset for Exposure<'_> {
             .filter(|d| !self.hidden.contains(d.name()))
             .collect();
         if !self.hidden.contains("tool_search")
-            && definitions.iter().any(|d| self.deferred.contains(d.name()))
+            && definitions.iter().any(|d| self.is_deferred(d.name()))
         {
             definitions.retain(|d| d.name() != "tool_search");
             definitions.push(ToolDefinition {
@@ -108,7 +117,7 @@ impl Toolset for Exposure<'_> {
                 .definitions(session.mode)
                 .into_iter()
                 .filter(|d| {
-                    self.deferred.contains(d.name())
+                    self.is_deferred(d.name())
                         && (d.name().to_lowercase().contains(&query)
                             || d.schema["function"]["description"]
                                 .as_str()

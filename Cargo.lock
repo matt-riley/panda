@@ -1290,6 +1290,7 @@ dependencies = [
  "proptest",
  "regex",
  "reqwest",
+ "ring",
  "rquickjs",
  "rusqlite",
  "rustix",

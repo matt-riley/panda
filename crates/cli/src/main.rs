@@ -34,7 +34,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :context [BYTES|info] · :transcript [POINTER] · :compact [instructions|preview [guidance]|info] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
+const HELP: &str = ":plan · :code · :model PROVIDER MODEL · :login PROVIDER · :auth [PROVIDER] · :logout [PROVIDER] · :scope PATTERNS · :cycle [next|prev] · :usage · :retry · :resume [ID] · :ack · :tool ID · :tools · :mcp [list|status|login|logout|reconnect|diagnostics|exposure] · :context [BYTES|info] · :transcript [POINTER] · :compact [instructions|preview [guidance]|info] · :new · :session · :prompts · :settings [reload] · :theme [NAME] · :keys · :diagnostics · :bug-report · :changelog [VERSION] · :name NAME · :tree · :fork [TURN] [NAME] · :clone [NAME] · :models PROVIDER [FILTER] · :effort [LEVEL] · :thinking [LEVEL] · :skills [QUERY] · :skill: · :copy · :paste · :detach · :help · :cancel · :q · :quit";
 fn command_matches(prefix: &str) -> impl Iterator<Item = &'static str> + '_ {
     HELP.split(" · ")
         .filter_map(|usage| usage.split_whitespace().next())
@@ -627,7 +627,25 @@ fn run(
     }
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "panda — interactive coding harness\n--scrollback uses normal terminal scrollback and inline image previews.\n--version prints the release version\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\nCodemode is enabled by default and can write and edit files in code mode. --no-codemode disables it. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+            "panda — interactive coding harness\n--scrollback uses normal terminal scrollback and inline image previews.\n--version prints the release version\n--mcp list|status|login|logout|reconnect|diagnostics|exposure manages MCP servers.\n--trust [allow|deny|revoke|status] manages workspace trust. --package install|list|activate|update|remove manages Markdown packages.\n--import-session FILE [--session-dir DIR] imports Pi v3 JSONL. --export-session ID FILE [--session-dir DIR] writes standalone HTML for .html files or Pi v3 JSONL otherwise.\n--list-models [PATTERN] lists available models. --models PATTERNS scopes startup and cycling (Ctrl-P or :cycle).\npanda PROMPT sends the first turn in an interactive terminal and stays open for follow-ups.\n--all-sessions opens the cross-workspace picker. --resume-any ID opens the original workspace. --fork-here ID copies the session into this workspace. --recover-transcript ID POINTER writes private checkpoint JSONL.\n--continue resumes the most recently modified session in this workspace. --print PROMPT writes the final answer. --mode json emits events; --mode rpc accepts JSONL commands. Add --rpc-version pi-v1 to use Pi commands and events.\nPrint and JSON options: [--provider PROVIDER] --model MODEL, --thinking LEVEL, --session-dir DIR, --session ID or --no-session, --tools NAME[,NAME...] or --no-tools. --system-prompt TEXT|PATH replaces the base prompt. Repeat --append-system-prompt TEXT|PATH to add instructions in order. Piped input precedes the prompt.\n--compact-soft-at PCT, --compact-at PCT, --compact-cache-at PCT and --compact-cache-for MINUTES override checkpoint settings for this invocation.\nCodemode is enabled by default and can write and edit files in code mode. --no-codemode disables it. For print and JSON, --codemode-only exposes codemode as the sole provider tool and applies --tools to its nested helpers.\n{HELP}"
+        );
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--mcp") {
+        let root = std::env::current_dir()?.canonicalize()?;
+        let project = panda_local::resources::project_root(&root);
+        let state = state_dir()?;
+        let trusted = panda_local::catalog::trusted(&state, project)? == Some(true);
+        println!(
+            "{}",
+            panda_local::mcp::manage(
+                &state,
+                project,
+                trusted,
+                None,
+                &args[1..],
+                &mut |line| println!("{line}")
+            )?
         );
         return Ok(());
     }
@@ -775,7 +793,8 @@ fn run(
     #[cfg(test)]
     let executable = std::env::var_os("PANDA_TEST_WORKER").map_or(executable, PathBuf::from);
     let mut native = Native::new(&root, &executable)?;
-    native.mcp = panda_local::mcp::Servers::load(&state, project, options.trust_project, &native)?;
+    native.mcp =
+        panda_local::mcp::Servers::load(&state, project, options.trust_project, &native)?.into();
     let sessions = match &options.session_dir {
         Some(dir) if !options.no_session => native.session_dir(dir)?,
         _ => state.clone(),
@@ -846,8 +865,10 @@ fn run(
     };
     // Native and script dispatch share the same policy. The outer projection
     // additionally controls the synthetic codemode tool itself.
+    let mcp_deferred = |name: &str| coding.workspace.mcp.read().unwrap().deferred(name);
     let exposure =
-        panda_coding::Exposure::new(base, options.deferred.clone(), options.hidden.clone())?;
+        panda_coding::Exposure::new(base, options.deferred.clone(), options.hidden.clone())?
+            .with_deferred_policy(&mcp_deferred);
     let codemode =
         panda_local::codemode::Codemode::new(&exposure, &executable, &coding.workspace.root);
     let provider_tools;
@@ -867,7 +888,8 @@ fn run(
         tools,
         std::mem::take(&mut options.deferred),
         std::mem::take(&mut options.hidden),
-    )?;
+    )?
+    .with_deferred_policy(&mcp_deferred);
     let tools: &(dyn Toolset + Sync) = &provider_exposure;
     let index = std::sync::RwLock::new(if settings.skill_index {
         coding.skills.startup_index()?
@@ -1852,6 +1874,21 @@ fn run(
                 ":theme" => {
                     let name = terminal_config::theme(&state, words.next())?;
                     screen.line(Tone::Dim, &format!("Theme · {name}"));
+                }
+                ":mcp" => {
+                    let args = words.map(str::to_owned).collect::<Vec<_>>();
+                    let status = panda_local::mcp::manage(
+                        &state,
+                        project,
+                        options.trust_project,
+                        Some(&coding.workspace),
+                        &args,
+                        // Login waits for the callback before the next screen redraw.
+                        &mut |line| println!("{}", safe(line)),
+                    )?;
+                    for line in status.lines() {
+                        screen.line(Tone::Dim, &safe(line));
+                    }
                 }
                 ":skills" => {
                     for diagnostic in coding.skills.diagnostics()? {

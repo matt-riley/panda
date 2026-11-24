@@ -13,8 +13,9 @@ panda-coding = { path = "../coding" }
 panda-core = { path = "../core" }
 rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
 tempfile = "3"
-reqwest = { version = "0.13", default-features = false, features = ["json","rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["form","json","rustls"] }
 tokio = { version = "1", features = ["rt","time","macros","process","io-util"] }
+ring = "0.17"
 fastrand = "2"
 walkdir = "2"
 globset = "0.4"
