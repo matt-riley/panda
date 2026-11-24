@@ -141,6 +141,20 @@ Each invocation starts a fresh QuickJS worker under macOS Seatbelt. Read helpers
 
 `tools.ls()` lists the workspace root. Pass `{path: "src"}` to list the immediate entries in a directory. Each item contains its `name` and `type` (file, directory, symlink, or other). Listings include dotfiles and ignored names, report symlinks without following them, and return up to 50 entries in lexical order. Pass `next_offset` back as `offset` with the same path for the next page. An empty directory returns an empty page. A missing path produces an error.
 
+Use `tools.list_models({})` to inspect locally configured and cached models. Pass `{model: "provider/model"}` to check one model. The host reports credential availability and inference capabilities. Enable classification or image generation on a model in the personal `models.json` by adding `"inference": ["classify"]` or `"inference": ["generate_image"]`. These helpers use OpenAI-compatible structured Chat Completions and base64 PNG image generation respectively. For image classification also declare `"input": ["text", "image"]`.
+
+This code-mode script classifies the image it generates and displays it once.
+
+```js
+// @options: {"timeout_ms":120000}
+const labels = ["diagram", "photograph"];
+const drawing = tools.generate_image({model: "studio/art", prompt: "Draw a circuit diagram"});
+text(tools.classify({model: "studio/vision", labels, image: drawing}));
+image(drawing);
+```
+
+For JSON classification, pass `input` in place of `image`. The host resolves credentials and records each request under `classify` or `generate_image` in `:usage`. The default script deadline is 10 seconds. Scripts with an enabled inference helper can request up to 180 seconds.
+
 Use `tools.shell_result({id})` to inspect a completed `shell` call on the active branch. The result includes `output`, `exitCode`, `cancelled`, `truncated`, and, when recorded, `elapsedMs` and `fullOutputPath`. For a truncated result, pass the log path to `tools.read({path, offset, limit})` to retrieve specific lines. Older sessions can lack structured results.
 
 Use the optional workspace-relative `path` on `search` and `repo_map` to select one directory or file. Returned paths and glob patterns are relative to the workspace root. Search and map honor workspace and nested `.gitignore` rules before returning up to 50 matching items per page. A later `!` rule can re-include a file if its parent directories are visible. Pass `next_offset` back as `offset` with the same arguments until it is `null`. Search items contain `path`, one-based `line`, and `text`. A positive `context` adds `before` and `after` arrays of text in file order, clipped at file boundaries. Each line is limited to 500 characters. Only matching lines count toward the offset. A context-heavy page can end early to fit the 1 MiB tool-result limit. Map items are paths. Use `text(value)` to select the text included in the saved tool result and the next model request. Nested calls appear live in the terminal and as `nested_call` events in JSON and RPC.
@@ -151,11 +165,11 @@ Use `console.log("searched", offset)` to record which pages a script visited. `l
 
 Use `store("rank", {cursor: page.next_offset, counts})` to checkpoint a paginated search and `load("rank")` to resume it in a later script. Values follow the active session branch through reopening, compaction, and Pi JSONL export/import. A load returns a fresh JSON copy, or `undefined` for a missing key. Pass `undefined` to delete a key. Writes take effect together when the script succeeds. One value can contain 262,144 UTF-16 code units of JSON, and the combined keys and values can contain 1,048,576.
 
-Set a smaller preview or deadline on the first line of a script, for example `// @options: {"max_output_tokens": 256, "timeout_ms": 2000}`. The preview accepts 1–4,096 tokens at four UTF-8 bytes each. For very small budgets the truncation notice and log path can exceed the requested size. The deadline accepts 1–10,000 milliseconds and includes nested calls. A timeout discards pending store writes.
+Set a smaller preview or deadline on the first line of a script, for example `// @options: {"max_output_tokens": 256, "timeout_ms": 2000}`. The preview accepts 1–4,096 tokens at four UTF-8 bytes each. For very small budgets the truncation notice and log path can exceed the requested size. The deadline includes time spent in nested calls. A timeout discards pending store writes.
 
 By default Codemode returns up to 16 KiB inline. For longer text, the preview includes the beginning, the end, and a workspace-relative path to the complete UTF-8 log under `.panda/`. Use `read` or `tools.read({path, offset, limit})` to recover omitted lines, including after reopening a session. If a script throws, its tool error includes any text emitted before the failure, followed by the diagnostic. The same preview and full log apply, and pending `store()` writes are discarded. Emitting more than 1 MiB of text across a script fails the call and discards its pending `store()` writes. Newlines inserted between outputs count toward the limit.
 
-A script has 10 seconds, a 32 MiB JavaScript heap, up to 64 tool calls and 12 MiB of base64-encoded image URLs. Ctrl-C cancels the worker and its active workspace read.
+A script has a 64 MiB JavaScript heap, up to 64 tool calls and 12 MiB of base64-encoded image URLs. Ctrl-C cancels the worker and its active host calls.
 
 ## Scripting
 

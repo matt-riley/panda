@@ -505,3 +505,5 @@ mod tests {
 mod auth;
 pub mod native;
 pub mod wire;
+
+pub mod inference;

@@ -36,8 +36,11 @@ impl ToolDefinition {
             && (self.access == Access::Read
                 || (mode == Mode::Code
                     && self.access == Access::Mutate
-                    && self.namespace.as_deref() == Some("workspace")
-                    && matches!(self.name(), "write" | "edit")))
+                    && matches!(
+                        (self.namespace.as_deref(), self.name()),
+                        (Some("workspace"), "write" | "edit")
+                            | (Some("models"), "classify" | "generate_image")
+                    )))
     }
     pub fn validate(&self, args: &Value) -> Result<()> {
         validate(&self.schema["function"]["parameters"], args, self.name())

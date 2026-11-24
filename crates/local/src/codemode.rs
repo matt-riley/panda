@@ -20,10 +20,18 @@ use std::{
 pub use vm::worker;
 
 const TIME_LIMIT: Duration = Duration::from_secs(10);
+const INFERENCE_TIMEOUT_MS: u64 = 180_000;
 const SCRIPT_BYTES: usize = 64 * 1024;
 const PREVIEW_BYTES: usize = 16 * 1024;
 const MAX_OUTPUT_BYTES: usize = crate::MAX_TOOL_RESULT_BYTES;
 const OUTPUT_LIMIT_ERROR: &str = "Codemode text output exceeds 1 MiB";
+fn argument_limit(name: &str) -> usize {
+    if name == "classify" {
+        MAX_IMAGE_URL_BYTES
+    } else {
+        ARG_BYTES
+    }
+}
 const ARG_BYTES: usize = 16 * 1024;
 const MAX_CALLS: usize = 64;
 // Bound the total retained across nested calls, including base64 expansion.
@@ -118,8 +126,8 @@ impl ScriptOptions {
                 "max_output_tokens must be between 1 and 4096"
             );
             ensure!(
-                (1..=10_000).contains(&options.timeout_ms),
-                "timeout_ms must be between 1 and 10000"
+                (1..=INFERENCE_TIMEOUT_MS).contains(&options.timeout_ms),
+                "timeout_ms outside supported range"
             );
         }
         Ok(options)
@@ -348,6 +356,15 @@ impl<'a> Codemode<'a> {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(options.timeout_ms);
         let definitions = self.inner.nested_definitions(session);
+        if options.timeout_ms > TIME_LIMIT.as_millis() as u64 {
+            ensure!(
+                definitions
+                    .iter()
+                    .any(|d| d.namespace.as_deref() == Some("models")
+                        && d.access == panda_core::Access::Mutate),
+                "timeout_ms exceeds 10000 without an enabled inference tool"
+            );
+        }
         let schemas: Vec<_> = definitions.iter().map(|d| d.schema.clone()).collect();
         let mut catalog: Vec<_> = Self::helpers(&schemas).map(|h| h.entry()).collect();
         for d in &definitions {
@@ -451,8 +468,8 @@ impl<'a> Codemode<'a> {
                                     "unavailable nested tool {name}"
                                 );
                                 ensure!(
-                                    args.to_string().len() <= ARG_BYTES,
-                                    "nested arguments exceed 16 KiB"
+                                    args.to_string().len() <= argument_limit(&name),
+                                    "nested arguments exceed size limit (16 KiB for ordinary calls)"
                                 );
                                 let child = Call {
                                     id: format!("{}/{}", call.id, count),
@@ -466,8 +483,21 @@ impl<'a> Codemode<'a> {
                                 calls.push(child);
                             }
                             let run = |c: &Call| {
-                                nested.check()?;
-                                panda_core::run_nested(self.inner, session, c, &nested)
+                                let mut attempts = Vec::new();
+                                let result = nested.check().and_then(|()| {
+                                    panda_core::run_nested_with_events(
+                                        self.inner,
+                                        session,
+                                        c,
+                                        &nested,
+                                        &mut |e| {
+                                            if let Event::ModelAttempt(a) = e {
+                                                attempts.push(a);
+                                            }
+                                        },
+                                    )
+                                });
+                                (result, attempts)
                             };
                             // A mixed batch must observe writes in submission order.
                             let parallel = calls.len() > 1
@@ -484,7 +514,10 @@ impl<'a> Codemode<'a> {
                                         .into_iter()
                                         .map(|h| {
                                             h.join().unwrap_or_else(|_| {
-                                                Err(anyhow::anyhow!("nested worker panicked"))
+                                                (
+                                                    Err(anyhow::anyhow!("nested worker panicked")),
+                                                    Vec::new(),
+                                                )
                                             })
                                         })
                                         .collect()
@@ -493,7 +526,10 @@ impl<'a> Codemode<'a> {
                                 calls.iter().map(run).collect()
                             };
                             let mut replies = Vec::new();
-                            for (c, result) in calls.iter().zip(results) {
+                            for (c, (result, attempts)) in calls.iter().zip(results) {
+                                for attempt in attempts {
+                                    emit(Event::ModelAttempt(attempt));
+                                }
                                 let reply = result.and_then(|out| {
                                     if let Some(path) = c.args["path"].as_str() {
                                         match c.name.as_str() {
@@ -660,7 +696,7 @@ fn codemode_schema(
     }
     json!({"type":"function","function":{
         "name":"codemode",
-        "description":format!("Run isolated JavaScript to compose permitted workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending store() values are discarded. Completed file edits persist. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or whole-script deadline (1–10000 ms). Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 10 seconds, 1 MiB text output, 12 MiB of encoded images."),
+        "description":format!("Run isolated JavaScript to compose permitted workspace tools. {helpers} Use asyncTools or first-line // @options: {{\"async\":true}} for awaitable tools and Promise.allSettled(). Synchronous tools remain available by default. describeNamespace(name) returns allowed members. ALL_TOOLS lists callable helpers as {{name, description}}. searchTools(query, {{limit?}}) ranks them, and describeTool(name) returns a description and typed signature or undefined. Use text(value) and image(block or local data URL) to emit ordered output. Explicit images are saved under .panda; remote URLs are rejected. A top-level return adds its resolved value after text() unless it is undefined. console.log/info/warn/error/debug lines follow together in one <console_output> block. exit() finishes immediately with the output and stored values so far. If a script throws, emitted text precedes the error and pending store() values are discarded. Completed file edits persist. An optional first line // @options: {{\"max_output_tokens\": 400, \"timeout_ms\": 2000}} reduces the preview (1–4096 tokens, four bytes each) or sets the whole-script deadline. The default is 10 seconds. Enabled inference helpers allow up to 180000 ms. Above the preview limit the result shows the beginning, end and workspace-relative full log path for line-range reads. store(key,value) and load(key) keep small JSON values on this branch across successful scripts and session resumes. Missing keys return undefined. Storing undefined deletes a key. Limits: 64 calls, 1 MiB text output, 12 MiB of encoded images."),
         "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
     }})
 }

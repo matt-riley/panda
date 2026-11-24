@@ -682,7 +682,7 @@ with tempfile.TemporaryDirectory() as tmp, HTTPServer(("127.0.0.1", 0), Provider
 
     catalog = ("codemode", {"code": "text(ALL_TOOLS.map(tool => tool.name).sort())"})
     available, _ = exercise_tools(["--print"], ["--codemode-only"], {"codemode"}, catalog, "List helpers")
-    assert json.loads(available) == ["edit", "ls", "read", "repo_map", "search", "shell_result", "write"], available
+    assert json.loads(available) == ["edit", "list_models", "ls", "read", "repo_map", "search", "shell_result", "write"], available
     available, _ = exercise_tools(["--print"], ["--codemode-only", "--tools", "read"], {"codemode"}, catalog, "List helpers")
     assert json.loads(available) == ["read"], available
     denied, _ = exercise_tools(["--print"], ["--codemode-only", "--no-tools"], set(), catalog, "List helpers")
