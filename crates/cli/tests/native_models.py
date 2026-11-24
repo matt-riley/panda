@@ -1,5 +1,8 @@
 """Native provider contracts at the CLI boundary, using only loopback credentials."""
+import base64
+import hashlib
 import json
+import struct
 import os
 from pathlib import Path
 import sqlite3
@@ -69,9 +72,39 @@ class Endpoint(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def do_GET(self):
+        self.protocol_version = "HTTP/1.1"
+        if self.path.startswith("/fallback/"):
+            self.send_error(426)
+            return
+        assert self.headers["Authorization"] == "Bearer only-r"
+        accept = hashlib.sha1((self.headers["Sec-WebSocket-Key"] +
+                               "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", base64.b64encode(accept).decode())
+        self.end_headers()
+        first, length = self.rfile.read(2)
+        assert first == 129 and length & 128
+        length &= 127
+        if length in (126, 127):
+            length = int.from_bytes(self.rfile.read(2 if length == 126 else 8), "big")
+        mask = self.rfile.read(4)
+        body = json.loads(bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(length))))
+        assert body["type"] == "response.create" and "stream" not in body
+        REQUESTS.append(("ws", self.path, dict(self.headers), body))
+        for event in packets("r", False):
+            data = json.dumps(event).encode()
+            size = bytes([len(data)]) if len(data) < 126 else b"\x7e" + struct.pack(">H", len(data))
+            self.wfile.write(b"\x81" + size + data)
+        self.close_connection = True
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         family = self.path.split("/")[1]
+        if family == "fallback":
+            family = "r"
         REQUESTS.append((family, self.path, dict(self.headers), body))
         text = json.dumps(body)
         if "AUTH_FAIL" in text:
@@ -246,6 +279,13 @@ def exercise(server, root):
             assert messages[-1]["toolName"]=="read"
         assert "peacock-731" in json.dumps(REQUESTS[1][3])
         assert [(r["input"],r["output"]) for r in session(done["session_id"])["usage"]]==[(12,3)]*2
+
+    for mode, path, wire in [("websocket", "socket", "ws"), ("auto", "fallback", "r")]:
+        providers["r"].update(transport=mode, baseUrl=f"http://127.0.0.1:{server.server_port}/{path}/v1")
+        (state / "models.json").write_text(json.dumps({"providers": providers}))
+        REQUESTS.clear()
+        assert run("--print", "--no-session", "--provider", "r", "--model", MODELS["r"], "transport fixture").strip() == "finished"
+        assert [r[0] for r in REQUESTS] == [wire]
 
 
 if __name__ == "__main__":

@@ -42,6 +42,14 @@ class Endpoint(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"answers": answers, "usage": {"input_tokens": 11, "output_tokens": 2}}).encode())
             return
+        if body["messages"][-1].get("content") == "partial timeout":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')
+            self.wfile.flush()
+            time.sleep(1)
+            return
         if fail_once:
             fail_once = False
             self.send_response(503)
@@ -158,6 +166,23 @@ def exercise(port, root):
     assert "known $0.126300" in report and "0.001000 (reported)" in report and "compaction" in report, report
     assert snapshot(sid)["attempts"] == before
     assert snapshot(2)["attempts"][-1]["cost_source"] == "unknown"
+
+    warmed = run("--continue", stdin=":warm\n:usage\n:q\n")
+    after = snapshot(sid)
+    assert len(after["attempts"]) == len(before) + 1, warmed
+    assert after["attempts"][-1]["purpose"] == "warm" and abs(after["attempts"][-1]["cost"] - 0.0003) < 1e-10
+    assert "warm" in warmed and after["attempts"][:-1] == before
+
+    (state / "settings.json").write_text(json.dumps({"request": {"maxRetries": 0, "timeoutMs": 100}}))
+    fail_once = True
+    previous = len(requests)
+    run("--print", "--provider", "local-a", "--model", "gpt-text", "no retry", error="503")
+    assert len(requests) == previous + 1
+    (state / "settings.json").write_text(json.dumps({"request": {"maxRetries": 2, "timeoutMs": 150}}))
+    previous = len(requests)
+    run("--print", "--no-session", "--provider", "local-a", "--model", "gpt-text", "partial timeout", error="timed out")
+    assert len(requests) == previous + 1
+    (state / "settings.json").unlink()
 
     # Start inside the requested scope and cycle using the real key binding.
     (state / "model.json").write_text(json.dumps(["local-b", "remote"]))

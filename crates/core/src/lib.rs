@@ -9,7 +9,7 @@ mod tool_batch;
 mod tool_details;
 use anyhow::{Result, bail};
 pub use checkpoint_files::CheckpointFiles;
-pub use recovery::TransientFailure;
+pub use recovery::{RequestPolicy, TransientFailure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -19,17 +19,43 @@ use std::sync::{
 pub use tool_details::{ImagePosition, OutputItem, Part, Replacement, ToolDetails, parts};
 
 #[derive(Default, Clone)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel {
+    stopped: Arc<AtomicBool>,
+    deadline: Option<std::time::Instant>,
+    response_started: Arc<AtomicBool>,
+}
 impl Cancel {
+    fn attempt(&self, timeout_ms: Option<u32>) -> Self {
+        let deadline = timeout_ms
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms.into()));
+        Self {
+            stopped: self.stopped.clone(),
+            deadline,
+            response_started: Arc::default(),
+        }
+    }
+    pub fn mark_response_started(&self) {
+        self.response_started.store(true, Ordering::Release);
+    }
     pub fn stop(&self) {
-        self.0.store(true, Ordering::Release)
+        self.stopped.store(true, Ordering::Release)
     }
     pub fn reset(&self) {
-        self.0.store(false, Ordering::Release)
+        self.stopped.store(false, Ordering::Release)
     }
     pub fn check(&self) -> Result<()> {
-        if self.0.load(Ordering::Acquire) {
+        if self.stopped.load(Ordering::Acquire) {
             bail!("cancelled")
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Err(TransientFailure {
+                reason: "provider request timed out".into(),
+                retry_after: None,
+            }
+            .into());
         }
         Ok(())
     }
@@ -152,6 +178,8 @@ pub enum Mode {
 }
 #[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "RequestPolicy::is_default")]
+    pub request_policy: RequestPolicy,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_auto_retry: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -389,6 +417,7 @@ fn provider_checkpoint(
         &mut s.attempts,
         s.history.len(),
         "compaction",
+        s.request_policy,
     )?;
     Ok(Checkpoint {
         recovery: None,
@@ -430,6 +459,7 @@ pub fn summarize_branch_accounted(
         attempts,
         0,
         "branch_summary",
+        RequestPolicy::default(),
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +474,7 @@ fn summarize(
     attempts: &mut Vec<Attempt>,
     through: usize,
     purpose: &str,
+    policy: RequestPolicy,
 ) -> Result<String> {
     let mut chunk = String::new();
     let mut summarize =
@@ -452,10 +483,15 @@ fn summarize(
             let input = [Message::User(format!(
                 "Prior summary:\n{summary}\nTranscript data:\n{chunk}"
             ))];
-            let (next, calls) = recovery::request(cancel, emit, |_| {
-                tracked(p, attempts, through, purpose, &mut |_| {}, |p, events| {
-                    p.reply(instruction, &input, &[], cancel, events)
-                })
+            let (next, calls) = recovery::request(policy, cancel, emit, |attempt, _| {
+                tracked(
+                    p,
+                    attempts,
+                    through,
+                    purpose,
+                    &mut |_| attempt.mark_response_started(),
+                    |p, events| p.reply(instruction, &input, &[], attempt, events),
+                )
             })?;
             anyhow::ensure!(
                 calls.is_empty() && !next.trim().is_empty(),
@@ -519,6 +555,41 @@ impl Message {
         matches!(self, Self::User(_) | Self::Images { .. })
     }
 }
+/// Submit one prefix-warming request without adding messages or dispatching tool calls.
+pub fn warm(
+    p: &mut dyn Provider,
+    store: &mut dyn Store,
+    tools: &dyn Toolset,
+    cancel: &Cancel,
+) -> Result<()> {
+    let mut session = store.load()?;
+    anyhow::ensure!(!session.active, "acknowledge interrupted turn first");
+    let mut input = session.projected();
+    input.push(Message::User("Reply OK without calling tools.".into()));
+    let schemas = tools.schemas_for(&session);
+    let system = tools.system()?;
+    let attempt = cancel.attempt(session.request_policy.timeout_ms);
+    let result = tracked(
+        p,
+        &mut session.attempts,
+        session.history.len(),
+        "warm",
+        &mut |_| {},
+        |p, events| {
+            p.reply_with_effort(
+                &system,
+                &input,
+                &schemas,
+                &attempt,
+                events,
+                session.reasoning.as_deref(),
+            )
+        },
+    );
+    store.save(&mut session)?;
+    result.map(|_| ())
+}
+
 pub fn compact(p: &mut dyn Provider, store: &mut dyn Store, cancel: &Cancel) -> Result<()> {
     compact_with_instructions(p, store, "", cancel)
 }
@@ -809,25 +880,30 @@ fn drive_turn(
                 emit(e);
             };
             let history = s.projected();
-            let reply = recovery::request_if(!s.disable_auto_retry, cancel, &mut relay, |events| {
-                tracked(
-                    p,
-                    &mut s.attempts,
-                    s.history.len(),
-                    "turn",
-                    events,
-                    |p, events| {
-                        p.reply_with_effort(
-                            &system,
-                            &history,
-                            &schemas,
-                            cancel,
-                            events,
-                            s.reasoning.as_deref(),
-                        )
-                    },
-                )
-            });
+            let reply = recovery::request(
+                s.request_policy.enabled(!s.disable_auto_retry),
+                cancel,
+                &mut relay,
+                |attempt, events| {
+                    tracked(
+                        p,
+                        &mut s.attempts,
+                        s.history.len(),
+                        "turn",
+                        events,
+                        |p, events| {
+                            p.reply_with_effort(
+                                &system,
+                                &history,
+                                &schemas,
+                                attempt,
+                                events,
+                                s.reasoning.as_deref(),
+                            )
+                        },
+                    )
+                },
+            );
             if reply.is_err() {
                 store.save(&mut s)?;
             }

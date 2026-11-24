@@ -126,6 +126,7 @@ impl Provider for Subscription {
             let mut response = crate::checked(response).await?;
             let mut stream = wire::Responses::default();
             while let Some(bytes) = response.chunk().await.map_err(crate::transport_error)? {
+                cancel.mark_response_started();
                 stream.push(&bytes, emit)?
             }
             stream.finish()
