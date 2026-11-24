@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.24](https://github.com/matt-riley/panda/compare/v0.1.23...v0.1.24) (2026-11-24)
+
+
+### Features
+
+* support terminal scrollback and inline PNG previews ([#92](https://github.com/matt-riley/panda/issues/92)) ([5c166b7](https://github.com/matt-riley/panda/commit/5c166b7f97ec8ef6f7f9514e64fc26af28b4f4c9))
+
+
+### Bug Fixes
+
+* **deps:** update weekly minor and pin updates ([#87](https://github.com/matt-riley/panda/issues/87)) ([d9da359](https://github.com/matt-riley/panda/commit/d9da3592b6265ce1a4b451aa05d309f940a10c06))
+
 ## [0.1.23](https://github.com/matt-riley/panda/compare/v0.1.22...v0.1.23) (2026-11-23)
 
 
