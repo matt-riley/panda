@@ -25,3 +25,9 @@ In `$PANDA_HOME/keybindings.json`, map picker actions to keys. For example:
 ```
 
 The actions are `up`, `down`, `select`, `close`, `pageUp` and `pageDown`. Available keys include their standard navigation keys, F1 through F12, and unreserved Ctrl-letter combinations. Restart Panda after editing bindings. Use `:keys` or `:help` to see the active assignments. Duplicate and reserved keys report the conflicting action and file.
+
+## Terminal scrollback
+
+Start with `panda --scrollback` or `panda --scrollback --continue`. The transcript stays in the terminal after exit. Use the terminal’s scroll controls to revisit earlier output. The Vim prompt and command pickers remain available between turns. During a turn, Ctrl-C cancels the request. Enter follow-ups at the next prompt.
+
+Panda previews PNG attachments and tool results directly in Kitty (`TERM=xterm-kitty`) and iTerm2 (`TERM_PROGRAM=iTerm.app`). Each turn or session replay can display up to four previews sharing 512 KiB of base64 data. The image dimensions must fit within 4096 × 4096 pixels, and each preview occupies at most 40 columns by 12 rows. Other image formats, larger images, multiplexers, and unrecognized terminals get a text placeholder. The original attachment stays in the session.

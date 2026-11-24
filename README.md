@@ -52,6 +52,8 @@ For ChatGPT Codex, enter `:login`, choose **OpenAI Codex**, then choose **Open b
 
 ## Use a session
 
+Run `panda --scrollback` to keep prompts and streamed replies in your terminal’s scrollback. Add `--continue` to reopen the latest session. Kitty and iTerm2 can also display PNG attachments and tool results inline. [Terminal preferences](docs/terminal-workspaces.md#terminal-scrollback)
+
 Run `panda "Review this change"` in an interactive terminal to send the first prompt immediately and keep the session open for follow-ups. Use `panda --print "Review this change"` for a single answer. A positional prompt also runs once when a stream is redirected or when you supply a print/JSON-only option such as `--no-session`.
 
 The interactive prompt starts in Vim Insert mode. Press `Esc` for Normal mode, use motions such as `w`, `b`, `0` and `$`, and edit with `cw`, `dw` or `u`. Press `i` to insert again. Enter sends the prompt. Alt-Enter inserts a newline in terminals that report the shortcut. Multiline paste stays in the editor until you submit it.

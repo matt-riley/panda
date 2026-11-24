@@ -30,6 +30,7 @@ pub enum CodemodeExposure {
 #[derive(Default)]
 pub struct Options {
     pub interface: Interface,
+    pub scrollback: bool,
     pub pi_rpc: bool,
     pub codemode: CodemodeExposure,
     pub tools: Option<BTreeSet<String>>,
@@ -77,6 +78,7 @@ impl Options {
                         _ => bail!("expected pi-v1 or panda-v1 after --rpc-version"),
                     }
                 }
+                "--scrollback" => out.scrollback = true,
                 "--trust-project" => out.trust_project = true,
                 "--compact-soft-at"
                 | "--compact-at"
@@ -253,6 +255,10 @@ impl Options {
         {
             out.interface = Interface::Print;
         }
+        ensure!(
+            !out.scrollback || (out.interface == Interface::Terminal && interactive_terminal),
+            "--scrollback requires an interactive terminal"
+        );
         if one_shot {
             ensure!(
                 matches!(out.interface, Interface::Print | Interface::Json),
@@ -398,7 +404,7 @@ impl Host<'_> {
             input,
             self.cancel,
             &mut |e| {
-                if structured {
+                if structured && !matches!(e, Event::ResultImages(_)) {
                     println!("{}", json!({"type":"event","event":e}));
                 }
             },

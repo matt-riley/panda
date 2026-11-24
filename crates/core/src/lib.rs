@@ -533,6 +533,8 @@ pub enum Event {
     NestedRead(String),
     NestedCall { parent: String, call: Call },
     ResultDetails { id: String, details: ToolDetails },
+    // Local display attachments for the immediately following tool result.
+    ResultImages(Vec<String>),
     Result(String),
 }
 pub type Emit<'a> = dyn FnMut(Event) + 'a;
@@ -998,6 +1000,11 @@ fn drive_turn(
                         id: call.id,
                         details: details.clone(),
                     });
+                }
+                if let Some(Message::Result { images, .. }) = s.history.last()
+                    && !images.is_empty()
+                {
+                    emit(Event::ResultImages(images.clone()));
                 }
                 emit(Event::Result(output.text));
             }
