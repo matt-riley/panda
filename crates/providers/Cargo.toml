@@ -12,7 +12,7 @@ regex = "1"
 ring = "0.17"
 serde_json.workspace = true
 panda-core = { path = "../core" }
-reqwest = { version = "0.13", default-features = false, features = ["blocking","json","rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking","form","json","query","rustls"] }
 tokio = { version = "1", features = ["rt","time","macros"] }
 httpdate = "1"
 
